@@ -22,6 +22,13 @@ impl Player {
             Player::Two => Player::One,
         }
     }
+
+    pub fn sign(self) -> f32 {
+        match self {
+            Player::One => 1.0,
+            Player::Two => -1.0,
+        }
+    }
 }
 
 /// A two-element array indexed by [`Player`] instead of `usize`.

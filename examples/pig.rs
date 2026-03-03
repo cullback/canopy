@@ -13,13 +13,13 @@
 //! 1. **Decision node** (player chooses): `Roll` or `Hold`
 //! 2. **Chance node** (die roll): outcome 0..=5 mapping to faces 1..=6
 //!
-//! Chance outcomes are *not* actions — they're resolved automatically by the
-//! MCTS engine via the `StochasticGame` trait.
+//! Chance outcomes flow through `apply_action` — the game knows it's in a
+//! chance state and interprets the `usize` as a die outcome.
 
 use rand::Rng;
 
-use canopy2::game::{Game, Status, StochasticGame};
-use canopy2::mcts::{Mcts, MctsConfig};
+use canopy2::game::{Game, Status};
+use canopy2::mcts::{Config, RolloutEvaluator, search};
 use canopy2::player::{PerPlayer, Player};
 
 const ROLL: usize = 0;
@@ -85,6 +85,16 @@ impl Game for PigGame {
     }
 
     fn apply_action(&mut self, action: usize) {
+        if matches!(self.phase, Phase::Rolling) {
+            let face = Self::die_face(action);
+            if face == 1 {
+                self.pass_turn();
+            } else {
+                self.turn_total += face;
+                self.phase = Phase::Decision;
+            }
+            return;
+        }
         match action {
             ROLL => {
                 self.phase = Phase::Rolling;
@@ -96,26 +106,12 @@ impl Game for PigGame {
             _ => panic!("invalid action {action}"),
         }
     }
-}
-
-impl StochasticGame for PigGame {
-    fn is_chance_node(&self) -> bool {
-        matches!(self.phase, Phase::Rolling)
-    }
 
     fn chance_outcomes(&self, buf: &mut Vec<(usize, f32)>) {
-        for i in 0..6 {
-            buf.push((i, 1.0 / 6.0));
-        }
-    }
-
-    fn apply_chance(&mut self, outcome: usize) {
-        let face = Self::die_face(outcome);
-        if face == 1 {
-            self.pass_turn();
-        } else {
-            self.turn_total += face;
-            self.phase = Phase::Decision;
+        if matches!(self.phase, Phase::Rolling) {
+            for i in 0..6 {
+                buf.push((i, 1.0 / 6.0));
+            }
         }
     }
 }
@@ -124,15 +120,16 @@ fn main() {
     let mut rng = rand::rng();
     let mut game = PigGame::new(100);
     let simulations = 10_000;
+    let evaluator = RolloutEvaluator { num_rollouts: 1 };
 
     println!("=== Pig (MCTS vs MCTS, target=100) ===\n");
 
     let mut turn_num = 0;
     let mut chance_buf = Vec::new();
     while let Status::Ongoing(player) = game.status() {
-        if game.is_chance_node() {
-            chance_buf.clear();
-            game.chance_outcomes(&mut chance_buf);
+        chance_buf.clear();
+        game.chance_outcomes(&mut chance_buf);
+        if !chance_buf.is_empty() {
             let total: f32 = chance_buf.iter().map(|(_, p)| p).sum();
             let mut r: f32 = rng.random_range(0.0..total);
             let mut chosen = chance_buf[0].0;
@@ -149,30 +146,38 @@ fn main() {
                 turn_num += 1;
                 println!("  PIG OUT! Turn passes.\n--- Turn {} ---", turn_num);
             }
-            game.apply_chance(chosen);
+            game.apply_action(chosen);
         } else {
-            let mut mcts = Mcts::new(MctsConfig {
-                simulations,
+            let config = Config {
+                num_simulations: simulations,
                 ..Default::default()
-            });
-            let visits = mcts.search(&game, &mut rng);
+            };
+            let result = search(&game, &evaluator, &config, &mut rng);
 
-            let action = visits[0].0;
-            let total_visits: u32 = visits.iter().map(|(_, v)| v).sum();
+            let action = result
+                .policy
+                .iter()
+                .enumerate()
+                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+                .map(|(i, _)| i)
+                .unwrap();
+
             print!(
                 "  {} (score={}, turn={}): ",
                 player, game.scores[player], game.turn_total
             );
-            for (a, v) in &visits {
-                let pct = *v as f32 / total_visits as f32 * 100.0;
-                print!("{}={:.0}%  ", ACTION_NAMES[*a], pct);
+            for (a, name) in ACTION_NAMES.iter().enumerate() {
+                let pct = result.policy[a] * 100.0;
+                if pct > 0.0 {
+                    print!("{}={:.0}%  ", name, pct);
+                }
             }
             println!("-> {}", ACTION_NAMES[action]);
 
             game.apply_action(action);
         }
 
-        if !game.is_chance_node()
+        if !matches!(game.phase, Phase::Rolling)
             && game.turn_total == 0
             && matches!(game.status(), Status::Ongoing(_))
         {
