@@ -49,10 +49,38 @@ struct Edge {
     total_value: f32,
 }
 
+impl Edge {
+    fn new(action: usize, prior: f32) -> Self {
+        Self {
+            action,
+            child: None,
+            prior,
+            visits: 0,
+            total_value: 0.0,
+        }
+    }
+}
+
+impl From<(usize, f32)> for Edge {
+    fn from((action, prior): (usize, f32)) -> Self {
+        Self::new(action, prior)
+    }
+}
+
 struct Node {
     status: Status,
     is_chance: bool,
     edges: Vec<Edge>,
+}
+
+impl Node {
+    fn terminal(status: Status) -> Self {
+        Self {
+            status,
+            is_chance: false,
+            edges: Vec::new(),
+        }
+    }
 }
 
 #[derive(Default)]
@@ -202,48 +230,21 @@ fn expand<G: Game>(
     let id = tree.nodes.len();
 
     if let Status::Terminal(reward) = status {
-        tree.nodes.push(Node {
-            status,
-            is_chance: false,
-            edges: Vec::new(),
-        });
+        tree.nodes.push(Node::terminal(status));
         return (id, Some(reward));
     }
 
-    bufs.chances.clear();
     state.chance_outcomes(&mut bufs.chances);
     let is_chance = !bufs.chances.is_empty();
 
     let (edges, value) = if is_chance {
-        let edges = bufs
-            .chances
-            .iter()
-            .map(|&(outcome, prob)| Edge {
-                action: outcome,
-                child: None,
-                prior: prob,
-                visits: 0,
-                total_value: 0.0,
-            })
-            .collect();
+        let edges = bufs.chances.drain(..).map(Edge::from).collect();
         (edges, None)
     } else {
         let nn = evaluator.evaluate(state);
-        bufs.actions.clear();
         state.legal_actions(&mut bufs.actions);
         let priors = softmax_legal(&nn.policy_logits, &bufs.actions);
-        let edges = bufs
-            .actions
-            .iter()
-            .zip(priors)
-            .map(|(&a, p)| Edge {
-                action: a,
-                child: None,
-                prior: p,
-                visits: 0,
-                total_value: 0.0,
-            })
-            .collect();
+        let edges = bufs.actions.drain(..).zip(priors).map(Edge::from).collect();
         (edges, Some(nn.value))
     };
 
