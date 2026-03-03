@@ -201,7 +201,7 @@ fn apply_place_settlement(state: &mut GameState, nid: NodeId) {
     let opp = pid.opponent();
     state.boards[pid].settlements |= 1u64 << nid.0;
     state.current_mut().settlements_left -= 1;
-    state.current_mut().victory_points += 1;
+    state.current_mut().building_vps += 1;
     state.setup_count += 1;
 
     update_trade_ratios(state, nid, pid);
@@ -339,10 +339,7 @@ fn distribute_resources(state: &mut GameState, roll: u8) {
 
 fn apply_end_turn(state: &mut GameState) {
     if state.turn_number >= MAX_TURNS {
-        let vp = |p: Player| {
-            state.players[p].victory_points + state.players[p].dev_cards[DevCardKind::VictoryPoint]
-        };
-        let winner = if vp(Player::Two) > vp(Player::One) {
+        let winner = if state.total_vps(Player::Two) > state.total_vps(Player::One) {
             Player::Two
         } else {
             Player::One
@@ -406,7 +403,7 @@ fn apply_build_settlement(state: &mut GameState, nid: NodeId) {
     state.bank.add(SETTLEMENT_COST);
     state.boards[pid].settlements |= 1u64 << nid.0;
     state.current_mut().settlements_left -= 1;
-    state.current_mut().victory_points += 1;
+    state.current_mut().building_vps += 1;
 
     update_trade_ratios(state, nid, pid);
 
@@ -438,7 +435,7 @@ fn apply_build_city(state: &mut GameState, nid: NodeId) {
     state.boards[pid].cities |= bit;
     state.current_mut().settlements_left += 1;
     state.current_mut().cities_left -= 1;
-    state.current_mut().victory_points += 1;
+    state.current_mut().building_vps += 1;
 
     check_victory(state);
 }
@@ -559,21 +556,7 @@ fn check_victory(state: &mut GameState) {
         return;
     }
     let pid = state.current_player;
-    let player = &state.players[pid];
-    let mut vps = player.victory_points + player.dev_cards[DevCardKind::VictoryPoint];
-
-    if let Some((lr_pid, _)) = state.longest_road
-        && lr_pid == pid
-    {
-        vps += 2;
-    }
-    if let Some((la_pid, _)) = state.largest_army
-        && la_pid == pid
-    {
-        vps += 2;
-    }
-
-    if vps >= VP_TO_WIN {
+    if state.total_vps(pid) >= VP_TO_WIN {
         state.phase = Phase::GameOver(pid);
     }
 }
@@ -1259,7 +1242,7 @@ mod tests {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
         // Disable friendly robber so all non-current tiles are legal
-        state.players[Player::Two].victory_points = FRIENDLY_ROBBER_VP;
+        state.players[Player::Two].building_vps = FRIENDLY_ROBBER_VP;
         state.phase = Phase::MoveRobber;
 
         let mut actions = Vec::new();
@@ -1304,7 +1287,7 @@ mod tests {
             // Empty P2's hand
             state.players[Player::Two].hand = ResourceArray::default();
             // Give P2 enough public VP to bypass friendly robber
-            state.players[Player::Two].victory_points = 3;
+            state.players[Player::Two].building_vps = 3;
             state.phase = Phase::MoveRobber;
 
             let p1_hand_before = state.players[Player::One].hand;
@@ -1384,7 +1367,7 @@ mod tests {
 
         state.current_player = Player::One;
         // Give P2 enough VP to exceed friendly robber threshold
-        state.players[Player::Two].victory_points = 3;
+        state.players[Player::Two].building_vps = 3;
 
         state.phase = Phase::MoveRobber;
         let mut actions = Vec::new();
@@ -1746,7 +1729,7 @@ mod tests {
         state.phase = Phase::Main;
 
         // Set P1 to 14 VP (12 from buildings + 2 VP dev cards)
-        state.players[Player::One].victory_points = 12;
+        state.players[Player::One].building_vps = 12;
         state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
 
         // Stack the deck with a VP card
@@ -2131,7 +2114,7 @@ mod tests {
         let mut rng = play_setup(&mut state);
 
         // Give P2 enough VP to win
-        state.players[Player::Two].victory_points = 13;
+        state.players[Player::Two].building_vps = 13;
         state.players[Player::Two].dev_cards[DevCardKind::VictoryPoint] = 2;
 
         // But it's P1's turn — building something should not trigger P2's win
@@ -2165,7 +2148,7 @@ mod tests {
 
         // 12 from buildings + 2 VP dev cards = 14 total
         // Buy a VP dev card → 15 → win
-        state.players[Player::One].victory_points = 12;
+        state.players[Player::One].building_vps = 12;
         state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
         state.dev_deck = DevCardDeck::from_cards(&[DevCardKind::VictoryPoint]);
         state.players[Player::One].hand.add(DEV_CARD_COST);

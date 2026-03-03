@@ -966,7 +966,7 @@ mod tests {
         }
 
         // Verify opponent tiles ARE included once VP >= 3
-        state.players[Player::Two].victory_points = 3;
+        state.players[Player::Two].building_vps = 3;
         legal_actions(&state, &mut actions);
         let has_opp_tile = actions.iter().any(|a| {
             let tid = a.robber_tile();

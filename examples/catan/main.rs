@@ -16,6 +16,7 @@ use canopy2::player::PerPlayer;
 use canopy2::tournament;
 
 mod game;
+mod heuristic;
 mod visualize;
 
 use game::dice::Dice;
@@ -39,6 +40,18 @@ fn app() -> Command {
             Arg::new("log-dir")
                 .long("log-dir")
                 .help("Directory to write game logs"),
+        )
+        .arg(
+            Arg::new("p1-eval")
+                .long("p1-eval")
+                .default_value("rollout")
+                .help("Evaluator for player 1: rollout, heuristic, or policy"),
+        )
+        .arg(
+            Arg::new("p2-eval")
+                .long("p2-eval")
+                .default_value("rollout")
+                .help("Evaluator for player 2: rollout, heuristic, or policy"),
         );
     for arg in cli::config_args() {
         cmd = cmd.arg(arg);
@@ -71,13 +84,40 @@ fn main() {
 
     let configs = cli::parse_configs(&matches);
 
+    let p1_eval_name = matches.get_one::<String>("p1-eval").unwrap().as_str();
+    let p2_eval_name = matches.get_one::<String>("p2-eval").unwrap().as_str();
+
+    let rollout = RolloutEvaluator { num_rollouts: 1 };
+    let heuristic_eval = heuristic::HeuristicEvaluator;
+    let policy_eval = heuristic::PolicyEvaluator {
+        rollout: RolloutEvaluator { num_rollouts: 1 },
+    };
+
+    let eval_ref = |name: &str| -> &dyn Evaluator<GameState> {
+        match name {
+            "rollout" => &rollout,
+            "heuristic" => &heuristic_eval,
+            "policy" => &policy_eval,
+            other => {
+                panic!("unknown evaluator '{other}', expected 'rollout', 'heuristic', or 'policy'")
+            }
+        }
+    };
+
+    let evaluators: PerPlayer<&dyn Evaluator<GameState>> =
+        PerPlayer([eval_ref(p1_eval_name), eval_ref(p2_eval_name)]);
+
     let mut rng = fastrand::Rng::new();
-    let eval = RolloutEvaluator { num_rollouts: 1 };
-    let evaluators: PerPlayer<&dyn Evaluator<GameState>> = PerPlayer([&eval, &eval]);
 
     println!(
-        "=== Catan Tournament: {} vs {} simulations, {} games ===\n",
-        configs.0[0].num_simulations, configs.0[1].num_simulations, num_games,
+        "=== Catan Tournament: {} vs {} simulations, {} ({}) vs {} ({}), {} games ===\n",
+        configs.0[0].num_simulations,
+        configs.0[1].num_simulations,
+        "P1",
+        p1_eval_name,
+        "P2",
+        p2_eval_name,
+        num_games,
     );
 
     let new_game = |seed: u64| game::new_game(seed, Dice::default());

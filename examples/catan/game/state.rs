@@ -4,32 +4,53 @@ use std::sync::Arc;
 use canopy2::player::{PerPlayer, Player};
 
 use super::board::TileId;
-use super::dev_card::{DevCardArray, DevCardDeck};
+use super::dev_card::{DevCardArray, DevCardDeck, DevCardKind};
 use super::dice::Dice;
 use super::resource::ResourceArray;
 use super::road::RoadNetwork;
 use super::topology::Topology;
 
+/// Bitboard representation of a player's buildings and road network.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct PlayerBoards {
-    pub settlements: u64,          // bits 0..54
-    pub cities: u64,               // bits 0..54
-    pub road_network: RoadNetwork, // roads + reachable frontier + cached longest
+    /// Bitmask of node positions with settlements (bits 0..54).
+    pub settlements: u64,
+    /// Bitmask of node positions with cities (bits 0..54).
+    pub cities: u64,
+    /// Road network: placed roads, reachable frontier, and cached longest road.
+    pub road_network: RoadNetwork,
 }
 
+/// Per-player game state: resources, pieces, dev cards, and scoring.
 #[derive(Clone, Debug)]
 pub struct PlayerState {
+    /// Resource cards currently in hand.
     pub hand: ResourceArray,
+    /// Development cards held but not yet played (includes VP cards).
     pub dev_cards: DevCardArray,
+    /// Dev cards bought this turn (cannot be played until next turn).
     pub dev_cards_bought_this_turn: DevCardArray,
+    /// Total knight cards played (counts toward largest army; threshold is 3).
     pub knights_played: u8,
+    /// Total road segments placed on the board.
     pub roads_placed: u8,
+    /// Remaining settlement pieces (starts at 5).
     pub settlements_left: u8,
+    /// Remaining city pieces (starts at 4).
     pub cities_left: u8,
+    /// Remaining road pieces (starts at 15).
     pub roads_left: u8,
+    /// Whether a dev card has been played this turn (limit one per turn).
     pub has_played_dev_card_this_turn: bool,
-    pub victory_points: u8,
-    pub trade_ratios: [u8; 5], // best maritime ratio per resource
+    /// VP from buildings only: +1 per settlement, +1 more per city upgrade.
+    /// Does **not** include longest road, largest army, or VP dev cards.
+    /// For total VP, combine with `dev_cards[VictoryPoint]` and the
+    /// `longest_road`/`largest_army` awards on `GameState`.
+    pub building_vps: u8,
+    /// Best maritime trade ratio per resource type (indexed by `Resource`).
+    /// Defaults to 4:1; improved to 3:1 by a generic port or 2:1 by a
+    /// resource-specific port.
+    pub trade_ratios: [u8; 5],
 }
 
 impl Default for PlayerState {
@@ -44,7 +65,7 @@ impl Default for PlayerState {
             cities_left: 4,
             roads_left: 15,
             has_played_dev_card_this_turn: false,
-            victory_points: 0,
+            building_vps: 0,
             trade_ratios: [4; 5],
         }
     }
@@ -160,8 +181,10 @@ impl GameState {
         self.boards[pid].settlements | self.boards[pid].cities
     }
 
+    /// VP visible to all players: buildings + longest road + largest army.
+    /// Does not include hidden VP dev cards.
     pub fn public_vps(&self, pid: Player) -> u8 {
-        let mut vps = self.players[pid].victory_points;
+        let mut vps = self.players[pid].building_vps;
         if let Some((lr_pid, _)) = self.longest_road {
             if lr_pid == pid {
                 vps += 2;
@@ -173,6 +196,11 @@ impl GameState {
             }
         }
         vps
+    }
+
+    /// True total VP: buildings + longest road + largest army + VP dev cards.
+    pub fn total_vps(&self, pid: Player) -> u8 {
+        self.public_vps(pid) + self.players[pid].dev_cards[DevCardKind::VictoryPoint]
     }
 }
 
@@ -204,7 +232,7 @@ mod tests {
         assert_eq!(state.all_roads(), 0);
         for p in &state.players.0 {
             assert_eq!(p.hand, ResourceArray::default());
-            assert_eq!(p.victory_points, 0);
+            assert_eq!(p.building_vps, 0);
             assert_eq!(p.settlements_left, 5);
             assert_eq!(p.cities_left, 4);
             assert_eq!(p.roads_left, 15);
