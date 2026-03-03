@@ -1,32 +1,37 @@
-//! # Pig dice game with autoregressive actions
+//! # Pig dice game — tournament mode
 //!
-//! Two players race to 100 points. On your turn you repeatedly roll a die:
-//!   - Roll 2-6: add to your turn total, then decide to **roll** or **hold**.
-//!   - Roll 1: lose your turn total, turn ends.
-//!   - Hold: bank your turn total and pass the turn.
+//! Runs a head-to-head tournament between two MCTS bots with different
+//! configurations playing the Pig dice game.
 //!
-//! ## Autoregressive action decomposition
-//!
-//! Instead of a single "Roll" action that simultaneously decides *and* samples,
-//! we split each turn step into two phases:
-//!
-//! 1. **Decision node** (player chooses): `Roll` or `Hold`
-//! 2. **Chance node** (die roll): outcome 0..=5 mapping to faces 1..=6
-//!
-//! Chance outcomes flow through `apply_action` — the game knows it's in a
-//! chance state and interprets the `usize` as a die outcome.
+//! ```text
+//! cargo run --example pig -- --p1-simulations 1000 --p2-simulations 5000
+//! ```
 
-use rand::Rng;
+use clap::{Arg, Command};
 
-use canopy2::eval::RolloutEvaluator;
+use canopy2::cli;
+use canopy2::eval::{Evaluator, RolloutEvaluator};
 use canopy2::game::{Game, Status};
-use canopy2::mcts::{Config, search};
 use canopy2::player::{PerPlayer, Player};
+use canopy2::tournament;
 
 const ROLL: usize = 0;
 const HOLD: usize = 1;
 
-const ACTION_NAMES: [&str; 2] = ["Roll", "Hold"];
+fn app() -> Command {
+    let mut cmd = Command::new("pig")
+        .about("Pig dice game tournament between two MCTS bots")
+        .arg(
+            Arg::new("num-games")
+                .short('n')
+                .long("num-games")
+                .default_value("20"),
+        );
+    for arg in cli::config_args() {
+        cmd = cmd.arg(arg);
+    }
+    cmd
+}
 
 /// Phase within a turn.
 #[derive(Clone, Debug)]
@@ -118,84 +123,24 @@ impl Game for PigGame {
 }
 
 fn main() {
+    let matches = app().get_matches();
+    let num_games: u32 = matches
+        .get_one::<String>("num-games")
+        .unwrap()
+        .parse()
+        .unwrap();
+
+    let configs = cli::parse_configs(&matches);
+
     let mut rng = rand::rng();
-    let mut game = PigGame::new(100);
-    let simulations = 10_000;
-    let evaluator = RolloutEvaluator { num_rollouts: 1 };
+    let game = PigGame::new(100);
+    let eval = RolloutEvaluator { num_rollouts: 1 };
+    let evaluators: PerPlayer<&dyn Evaluator<PigGame>> = PerPlayer([&eval, &eval]);
 
-    println!("=== Pig (MCTS vs MCTS, target=100) ===\n");
+    println!(
+        "=== Pig Tournament: {} vs {} simulations, {} games ===\n",
+        configs.0[0].num_simulations, configs.0[1].num_simulations, num_games,
+    );
 
-    let mut turn_num = 0;
-    let mut chance_buf = Vec::new();
-    while let Status::Ongoing(player) = game.status() {
-        chance_buf.clear();
-        game.chance_outcomes(&mut chance_buf);
-        if !chance_buf.is_empty() {
-            let total: f32 = chance_buf.iter().map(|(_, p)| p).sum();
-            let mut r: f32 = rng.random_range(0.0..total);
-            let mut chosen = chance_buf[0].0;
-            for &(o, p) in &chance_buf {
-                r -= p;
-                if r <= 0.0 {
-                    chosen = o;
-                    break;
-                }
-            }
-            let face = PigGame::die_face(chosen);
-            println!("  -> rolled {}", face);
-            if face == 1 {
-                turn_num += 1;
-                println!("  PIG OUT! Turn passes.\n--- Turn {} ---", turn_num);
-            }
-            game.apply_action(chosen);
-        } else {
-            let config = Config {
-                num_simulations: simulations,
-                ..Default::default()
-            };
-            let result = search(&game, &evaluator, &config, &mut rng);
-
-            let action = result
-                .policy
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
-                .map(|(i, _)| i)
-                .unwrap();
-
-            print!(
-                "  {} (score={}, turn={}): ",
-                player, game.scores[player], game.turn_total
-            );
-            for (a, name) in ACTION_NAMES.iter().enumerate() {
-                let pct = result.policy[a] * 100.0;
-                if pct > 0.0 {
-                    print!("{}={:.0}%  ", name, pct);
-                }
-            }
-            println!("-> {}", ACTION_NAMES[action]);
-
-            game.apply_action(action);
-        }
-
-        if !matches!(game.phase, Phase::Rolling)
-            && game.turn_total == 0
-            && matches!(game.status(), Status::Ongoing(_))
-        {
-            turn_num += 1;
-            println!("\n--- Turn {} ---", turn_num);
-        }
-    }
-
-    println!("\n=== Final Scores ===");
-    println!("  Player 1: {}", game.scores[Player::One]);
-    println!("  Player 2: {}", game.scores[Player::Two]);
-    if let Status::Terminal(reward) = game.status() {
-        let winner = if reward > 0.0 {
-            Player::One
-        } else {
-            Player::Two
-        };
-        println!("  {} wins!", winner);
-    }
+    tournament::tournament(&game, &evaluators, &configs, num_games, &mut rng);
 }

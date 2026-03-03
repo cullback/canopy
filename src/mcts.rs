@@ -105,9 +105,9 @@ struct Bufs {
 // ── Public API ────────────────────────────────────────────────────────
 
 /// Run MCTS from the given root state and return a policy + value.
-pub fn search<G: Game>(
+pub fn search<G: Game, E: Evaluator<G> + ?Sized>(
     root_state: &G,
-    evaluator: &impl Evaluator<G>,
+    evaluator: &E,
     config: &Config,
     rng: &mut impl Rng,
 ) -> SearchResult {
@@ -156,11 +156,11 @@ pub fn search<G: Game>(
 
 // ── Tree operations ───────────────────────────────────────────────────
 
-fn simulate<G: Game>(
+fn simulate<G: Game, E: Evaluator<G> + ?Sized>(
     tree: &mut Tree,
     root: NodeId,
     root_state: &G,
-    evaluator: &impl Evaluator<G>,
+    evaluator: &E,
     config: &Config,
     rng: &mut impl Rng,
     bufs: &mut Bufs,
@@ -210,10 +210,10 @@ fn simulate<G: Game>(
     }
 }
 
-fn expand<G: Game>(
+fn expand<G: Game, E: Evaluator<G> + ?Sized>(
     tree: &mut Tree,
     state: &G,
-    evaluator: &impl Evaluator<G>,
+    evaluator: &E,
     bufs: &mut Bufs,
 ) -> (NodeId, Option<f32>) {
     // Transposition hit — reuse existing node
