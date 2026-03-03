@@ -27,10 +27,10 @@ check:
 test:
     cargo test
 
-# Build release binary
+# Build the library
 build:
     cargo build --release
 
-# Run the project
-run *args:
-    cargo run -- {{ args }}
+# Run an example (e.g., just run pig)
+run example *args:
+    cargo run --example {{ example }} -- {{ args }}

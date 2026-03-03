@@ -3,4 +3,13 @@ name = "canopy2"
 version = "0.1.0"
 edition = "2024"
 
+[lib]
+name = "canopy2"
+path = "src/lib.rs"
+
 [dependencies]
+rand = "0.9"
+
+[[example]]
+name = "pig"
+path = "examples/pig.rs"
