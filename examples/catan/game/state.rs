@@ -29,7 +29,6 @@ pub struct PlayerState {
     pub roads_left: u8,
     pub has_played_dev_card_this_turn: bool,
     pub victory_points: u8,
-    pub hidden_vps: u8,
     pub trade_ratios: [u8; 5], // best maritime ratio per resource
 }
 
@@ -46,15 +45,8 @@ impl Default for PlayerState {
             roads_left: 15,
             has_played_dev_card_this_turn: false,
             victory_points: 0,
-            hidden_vps: 0,
             trade_ratios: [4; 5],
         }
-    }
-}
-
-impl PlayerState {
-    pub fn total_vps(&self) -> u8 {
-        self.victory_points + self.hidden_vps
     }
 }
 

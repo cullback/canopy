@@ -13,6 +13,7 @@ use crate::game::action::{
     YOP_END, YOP_START,
 };
 use crate::game::board::{Port, TileId};
+use crate::game::dev_card::DevCardKind;
 use crate::game::dice::Dice;
 use crate::game::hex;
 use crate::game::state::{GameState, Phase};
@@ -210,7 +211,7 @@ fn bits128_to_vec(mut bits: u128) -> Vec<u8> {
 
 fn player_frame(state: &GameState, pid: Player) -> PlayerFrame {
     let ps = &state.players[pid];
-    let mut vp = ps.victory_points + ps.hidden_vps;
+    let mut vp = ps.victory_points + ps.dev_cards[DevCardKind::VictoryPoint];
     if let Some((p, _)) = state.longest_road {
         if p == pid {
             vp += 2;

@@ -18,7 +18,7 @@ use action::{
     YOP_END, YOP_START,
 };
 use board::{EdgeId, NodeId, TileId};
-use dev_card::{DevCardDeck, DevCardKind};
+use dev_card::DevCardKind;
 use dice::Dice;
 use resource::{
     ALL_RESOURCES, CITY_COST, DEV_CARD_COST, ROAD_COST, Resource, ResourceArray, SETTLEMENT_COST,
@@ -118,73 +118,6 @@ impl Game for GameState {
             }
             _ => {}
         }
-    }
-
-    fn determinize(&self, rng: &mut fastrand::Rng) -> Self {
-        let observer = self.current_player;
-        let opp = observer.opponent();
-        let mut s = self.clone();
-
-        const ALL_KINDS: [DevCardKind; 5] = [
-            DevCardKind::Knight,
-            DevCardKind::VictoryPoint,
-            DevCardKind::RoadBuilding,
-            DevCardKind::YearOfPlenty,
-            DevCardKind::Monopoly,
-        ];
-
-        // Collect all unknown dev cards into a pool:
-        // - opponent's dev cards (full hand, includes bought-this-turn)
-        // - remaining deck cards
-        let mut pool: Vec<DevCardKind> = Vec::new();
-
-        let opp_state = &s.players[opp];
-        for &kind in &ALL_KINDS {
-            for _ in 0..opp_state.dev_cards[kind] {
-                pool.push(kind);
-            }
-        }
-        for &card in s.dev_deck.remaining_cards() {
-            pool.push(card);
-        }
-
-        debug_assert_eq!(
-            pool.len(),
-            opp_state.dev_cards.0.iter().sum::<u8>() as usize + s.dev_deck.remaining() as usize,
-        );
-
-        rng.shuffle(&mut pool);
-
-        let opp_total: u8 = opp_state.dev_cards.0.iter().sum();
-        let opp_bought: u8 = opp_state.dev_cards_bought_this_turn.0.iter().sum();
-
-        let opp_state_mut = &mut s.players[opp];
-        opp_state_mut.dev_cards = Default::default();
-        opp_state_mut.dev_cards_bought_this_turn = Default::default();
-
-        let mut idx = 0usize;
-
-        for _ in 0..opp_bought {
-            opp_state_mut.dev_cards[pool[idx]] += 1;
-            opp_state_mut.dev_cards_bought_this_turn[pool[idx]] += 1;
-            idx += 1;
-        }
-
-        for _ in 0..(opp_total - opp_bought) {
-            opp_state_mut.dev_cards[pool[idx]] += 1;
-            idx += 1;
-        }
-
-        s.dev_deck = DevCardDeck::from_cards(&pool[idx..]);
-
-        debug_assert!(
-            ALL_KINDS.iter().all(|&k| opp_state_mut.dev_cards_bought_this_turn[k]
-                <= opp_state_mut.dev_cards[k]),
-        );
-
-        opp_state_mut.hidden_vps = opp_state_mut.dev_cards[DevCardKind::VictoryPoint];
-
-        s
     }
 }
 
@@ -406,9 +339,14 @@ fn distribute_resources(state: &mut GameState, roll: u8) {
 
 fn apply_end_turn(state: &mut GameState) {
     if state.turn_number >= MAX_TURNS {
-        let vp0 = state.players[Player::One].total_vps();
-        let vp1 = state.players[Player::Two].total_vps();
-        let winner = if vp1 > vp0 { Player::Two } else { Player::One };
+        let vp = |p: Player| {
+            state.players[p].victory_points + state.players[p].dev_cards[DevCardKind::VictoryPoint]
+        };
+        let winner = if vp(Player::Two) > vp(Player::One) {
+            Player::Two
+        } else {
+            Player::One
+        };
         state.phase = Phase::GameOver(winner);
         return;
     }
@@ -513,7 +451,6 @@ fn apply_buy_dev_card(state: &mut GameState) {
     state.current_mut().dev_cards_bought_this_turn[card] += 1;
 
     if card == DevCardKind::VictoryPoint {
-        state.current_mut().hidden_vps += 1;
         check_victory(state);
     }
 }
@@ -623,7 +560,7 @@ fn check_victory(state: &mut GameState) {
     }
     let pid = state.current_player;
     let player = &state.players[pid];
-    let mut vps = player.victory_points + player.hidden_vps;
+    let mut vps = player.victory_points + player.dev_cards[DevCardKind::VictoryPoint];
 
     if let Some((lr_pid, _)) = state.longest_road
         && lr_pid == pid
@@ -699,11 +636,12 @@ mod tests {
         SETTLEMENT_START, maritime_id, road_id, robber_id, settlement_id,
     };
     use super::board::AdjacencyBitboards;
-    use super::dev_card::DevCardKind;
+    use super::dev_card::{DevCardDeck, DevCardKind};
     use super::dice::Dice;
     use super::resource::{DEV_CARD_COST, Resource, SETTLEMENT_COST};
     use super::*;
     use canopy2::game::Game;
+    use std::sync::Arc;
 
     fn sample_chance_outcome(buf: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
         let mut roll = rng.f32();
@@ -970,7 +908,7 @@ mod tests {
     fn full_game_simulation() {
         for seed in 0..10u64 {
             let mut rng = fastrand::Rng::with_seed(seed);
-            let mut s = new_game(&mut rng, Dice::default());
+            let mut s = new_game(seed, Dice::default());
             let mut actions = Vec::new();
             let mut chance_buf = Vec::new();
             for _ in 0..10000 {
@@ -1011,7 +949,7 @@ mod tests {
         let mut results = Vec::new();
         for _ in 0..2 {
             let mut rng = fastrand::Rng::with_seed(seed);
-            let mut s = new_game(&mut rng, Dice::default());
+            let mut s = new_game(seed, Dice::default());
             let mut actions = Vec::new();
             let mut action_log = Vec::new();
             let mut chance_buf = Vec::new();
@@ -1487,18 +1425,17 @@ mod tests {
         }
     }
 
-    /// Opponent has 2 settlements + 1 hidden VP card (3 total but only 2 public).
-    /// Friendly robber still protects them.
+    /// Opponent has 2 settlements + 1 VP dev card (3 total but only 2 public).
+    /// Friendly robber still protects them because VP cards don't count as public VP.
     #[test]
-    fn friendly_robber_ignores_hidden_vp() {
+    fn friendly_robber_ignores_vp_cards() {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
 
         state.current_player = Player::One;
-        // P2 has 2 VP from settlements + 1 hidden VP = 3 total, but only 2 public
-        state.players[Player::Two].hidden_vps = 1;
+        // P2 has 2 VP from settlements + 1 VP dev card, but only 2 public
+        state.players[Player::Two].dev_cards[DevCardKind::VictoryPoint] = 1;
         assert_eq!(state.public_vps(Player::Two), 2);
-        assert_eq!(state.players[Player::Two].total_vps(), 3);
 
         state.phase = Phase::MoveRobber;
         let mut actions = Vec::new();
@@ -1513,7 +1450,7 @@ mod tests {
             assert_eq!(
                 tile_mask & opp_buildings,
                 0,
-                "hidden VP shouldn't count for friendly robber"
+                "VP dev cards shouldn't count for friendly robber"
             );
         }
     }
@@ -1808,9 +1745,9 @@ mod tests {
         state.current_player = Player::One;
         state.phase = Phase::Main;
 
-        // Set P1 to 14 VP (2 from settlements + 12 more)
+        // Set P1 to 14 VP (12 from buildings + 2 VP dev cards)
         state.players[Player::One].victory_points = 12;
-        state.players[Player::One].hidden_vps = 2;
+        state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
 
         // Stack the deck with a VP card
         state.dev_deck = DevCardDeck::from_cards(&[DevCardKind::VictoryPoint]);
@@ -2195,7 +2132,7 @@ mod tests {
 
         // Give P2 enough VP to win
         state.players[Player::Two].victory_points = 13;
-        state.players[Player::Two].hidden_vps = 2;
+        state.players[Player::Two].dev_cards[DevCardKind::VictoryPoint] = 2;
 
         // But it's P1's turn — building something should not trigger P2's win
         state.current_player = Player::One;
@@ -2226,10 +2163,10 @@ mod tests {
         state.current_player = Player::One;
         state.phase = Phase::Main;
 
-        // settlements/cities VP = 12, hidden VP = 2 → total = 14
+        // 12 from buildings + 2 VP dev cards = 14 total
         // Buy a VP dev card → 15 → win
         state.players[Player::One].victory_points = 12;
-        state.players[Player::One].hidden_vps = 2;
+        state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
         state.dev_deck = DevCardDeck::from_cards(&[DevCardKind::VictoryPoint]);
         state.players[Player::One].hand.add(DEV_CARD_COST);
 

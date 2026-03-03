@@ -34,19 +34,4 @@ pub trait Game: Clone + Send + Sync {
     /// Outcomes are passed back to `apply_action` — the game knows it's in a chance
     /// state and interprets the `usize` accordingly.
     fn chance_outcomes(&self, _buf: &mut Vec<(usize, f32)>) {}
-
-    // ── Imperfect information ─────────────────────────────────────
-
-    /// Sample a determinization consistent with the current player's information set.
-    fn determinize(&self, _rng: &mut fastrand::Rng) -> Self
-    where
-        Self: Sized,
-    {
-        unimplemented!()
-    }
-
-    /// Key that identifies the information set for the current player.
-    fn info_set_key(&self) -> Option<u64> {
-        None
-    }
 }
