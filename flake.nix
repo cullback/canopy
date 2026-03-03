@@ -51,6 +51,7 @@
               fd
               ripgrep
               nixfmt-rfc-style
+              perf
             ];
           };
         }
