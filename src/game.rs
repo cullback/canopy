@@ -37,16 +37,16 @@ pub trait Game: Clone + Send + Sync {
 
     // ── Imperfect information ─────────────────────────────────────
 
-    /// Sample a determinization consistent with `observer`'s information set.
-    fn determinize(&self, _observer: Player, _rng: &mut fastrand::Rng) -> Self
+    /// Sample a determinization consistent with the current player's information set.
+    fn determinize(&self, _rng: &mut fastrand::Rng) -> Self
     where
         Self: Sized,
     {
         unimplemented!()
     }
 
-    /// Key that identifies the information set for `observer`.
-    fn info_set_key(&self, _observer: Player) -> Option<u64> {
+    /// Key that identifies the information set for the current player.
+    fn info_set_key(&self) -> Option<u64> {
         None
     }
 }

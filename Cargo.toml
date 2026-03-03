@@ -21,3 +21,7 @@ canopy2 = { path = ".", features = ["cli"] }
 [[example]]
 name = "pig"
 path = "examples/pig.rs"
+
+[[example]]
+name = "catan"
+path = "examples/catan/main.rs"
