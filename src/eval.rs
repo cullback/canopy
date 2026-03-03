@@ -20,10 +20,12 @@ pub struct RolloutEvaluator {
 
 impl<G: Game> Evaluator<G> for RolloutEvaluator {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> NnOutput {
+        let mut action_buf = Vec::with_capacity(G::NUM_ACTIONS);
+        let mut chance_buf = Vec::with_capacity(G::NUM_ACTIONS);
         let mut total = 0.0f32;
         for _ in 0..self.num_rollouts {
             let mut s = state.clone();
-            total += rollout(&mut s, rng);
+            total += rollout(&mut s, &mut action_buf, &mut chance_buf, rng);
         }
         NnOutput {
             policy_logits: vec![0.0; G::NUM_ACTIONS],
@@ -32,20 +34,23 @@ impl<G: Game> Evaluator<G> for RolloutEvaluator {
     }
 }
 
-fn rollout<G: Game>(state: &mut G, rng: &mut fastrand::Rng) -> f32 {
-    let mut action_buf = Vec::new();
-    let mut chance_buf = Vec::new();
+fn rollout<G: Game>(
+    state: &mut G,
+    action_buf: &mut Vec<usize>,
+    chance_buf: &mut Vec<(usize, f32)>,
+    rng: &mut fastrand::Rng,
+) -> f32 {
     loop {
         match state.status() {
             Status::Terminal(reward) => return reward,
             Status::Ongoing(_) => {
                 chance_buf.clear();
-                state.chance_outcomes(&mut chance_buf);
+                state.chance_outcomes(chance_buf);
                 let action = if !chance_buf.is_empty() {
-                    sample_weighted(&chance_buf, rng)
+                    sample_weighted(chance_buf, rng)
                 } else {
                     action_buf.clear();
-                    state.legal_actions(&mut action_buf);
+                    state.legal_actions(action_buf);
                     action_buf[rng.usize(..action_buf.len())]
                 };
                 state.apply_action(action);
