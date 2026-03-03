@@ -1,25 +1,12 @@
 use std::collections::HashMap;
 
 use rand::Rng;
-use rand::seq::IndexedRandom;
 use rand_distr::{Distribution, Gamma};
 
+use crate::eval::Evaluator;
 use crate::game::{Game, Status};
 
 // ── Public types ──────────────────────────────────────────────────────
-
-/// Output from a neural network (or any position evaluator).
-pub struct NnOutput {
-    /// Logits over the full action space `[0, NUM_ACTIONS)`.
-    pub policy_logits: Vec<f32>,
-    /// Value estimate from P1's perspective.
-    pub value: f32,
-}
-
-/// Evaluates a game state, producing policy logits and a value estimate.
-pub trait Evaluator<G: Game> {
-    fn evaluate(&self, state: &G) -> NnOutput;
-}
 
 /// MCTS search configuration.
 pub struct Config {
@@ -50,26 +37,6 @@ pub struct SearchResult {
     pub value: f32,
 }
 
-/// Default evaluator: random rollouts with uniform policy logits.
-pub struct RolloutEvaluator {
-    pub num_rollouts: u32,
-}
-
-impl<G: Game> Evaluator<G> for RolloutEvaluator {
-    fn evaluate(&self, state: &G) -> NnOutput {
-        let mut rng = rand::rng();
-        let mut total = 0.0f32;
-        for _ in 0..self.num_rollouts {
-            let mut s = state.clone();
-            total += rollout(&mut s, &mut rng);
-        }
-        NnOutput {
-            policy_logits: vec![0.0; G::NUM_ACTIONS],
-            value: total / self.num_rollouts as f32,
-        }
-    }
-}
-
 // ── Internal types ────────────────────────────────────────────────────
 
 type NodeId = u32;
@@ -88,12 +55,14 @@ struct Node {
     edges: Vec<Edge>,
 }
 
+#[derive(Default)]
 struct Tree {
     nodes: Vec<Node>,
     table: HashMap<u64, NodeId>,
 }
 
 /// Scratch buffers reused across simulations.
+#[derive(Default)]
 struct Bufs {
     actions: Vec<usize>,
     chances: Vec<(usize, f32)>,
@@ -116,15 +85,8 @@ pub fn search<G: Game>(
         };
     }
 
-    let mut tree = Tree {
-        nodes: Vec::new(),
-        table: HashMap::new(),
-    };
-    let mut bufs = Bufs {
-        actions: Vec::new(),
-        chances: Vec::new(),
-        path: Vec::new(),
-    };
+    let mut tree = Tree::default();
+    let mut bufs = Bufs::default();
 
     let (root, _) = expand(&mut tree, root_state, evaluator, &mut bufs);
 
@@ -387,43 +349,10 @@ fn softmax_legal(logits: &[f32], legal_actions: &[usize]) -> Vec<f32> {
     exps.into_iter().map(|x| x / sum).collect()
 }
 
-fn rollout<G: Game>(state: &mut G, rng: &mut impl Rng) -> f32 {
-    let mut action_buf = Vec::new();
-    let mut chance_buf = Vec::new();
-    loop {
-        match state.status() {
-            Status::Terminal(reward) => return reward,
-            Status::Ongoing(_) => {
-                chance_buf.clear();
-                state.chance_outcomes(&mut chance_buf);
-                let action = if !chance_buf.is_empty() {
-                    sample_weighted(&chance_buf, rng)
-                } else {
-                    action_buf.clear();
-                    state.legal_actions(&mut action_buf);
-                    *action_buf.choose(rng).unwrap()
-                };
-                state.apply_action(action);
-            }
-        }
-    }
-}
-
-fn sample_weighted(items: &[(usize, f32)], rng: &mut impl Rng) -> usize {
-    let total: f32 = items.iter().map(|(_, p)| p).sum();
-    let mut r = rng.random_range(0.0..total);
-    for &(item, p) in items {
-        r -= p;
-        if r <= 0.0 {
-            return item;
-        }
-    }
-    items.last().unwrap().0
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::eval::RolloutEvaluator;
     use crate::player::Player;
 
     /// Trivial one-step game: player picks action 0 (win) or 1 (lose).

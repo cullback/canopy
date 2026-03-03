@@ -18,8 +18,9 @@
 
 use rand::Rng;
 
+use canopy2::eval::RolloutEvaluator;
 use canopy2::game::{Game, Status};
-use canopy2::mcts::{Config, RolloutEvaluator, search};
+use canopy2::mcts::{Config, search};
 use canopy2::player::{PerPlayer, Player};
 
 const ROLL: usize = 0;
