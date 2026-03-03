@@ -133,7 +133,6 @@ fn main() {
     let configs = cli::parse_configs(&matches);
 
     let mut rng = fastrand::Rng::new();
-    let game = PigGame::new(100);
     let eval = RolloutEvaluator { num_rollouts: 1 };
     let evaluators: PerPlayer<&dyn Evaluator<PigGame>> = PerPlayer([&eval, &eval]);
 
@@ -142,5 +141,11 @@ fn main() {
         configs.0[0].num_simulations, configs.0[1].num_simulations, num_games,
     );
 
-    tournament::tournament(&game, &evaluators, &configs, num_games, &mut rng);
+    tournament::tournament(
+        |_seed| PigGame::new(100),
+        &evaluators,
+        &configs,
+        num_games,
+        &mut rng,
+    );
 }

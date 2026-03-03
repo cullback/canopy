@@ -45,7 +45,7 @@ const EDGE_NEIGHBOR_DIR: [Direction; 6] = [
 
 /// The 19 hex positions of the standard Catan board in axial coordinates.
 /// Canonical clockwise spiral from top-left: ring 2 → ring 1 → center.
-const LAND_HEXES: [Hex; 19] = [
+pub const LAND_HEXES: [Hex; 19] = [
     // Ring 2 (clockwise from top-left corner)
     Hex::new(0, -2),
     Hex::new(1, -2),

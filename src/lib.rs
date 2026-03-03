@@ -3,6 +3,7 @@ pub mod cli;
 pub mod dirichlet;
 pub mod eval;
 pub mod game;
+pub mod game_log;
 pub mod graph;
 pub mod mcts;
 pub mod orchestrator;

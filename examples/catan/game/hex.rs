@@ -28,6 +28,8 @@ const DIRECTION_VECTORS: [(i8, i8); 6] = [
     (1, -1), // Northeast
 ];
 
+const SQRT3: f64 = 1.732_050_807_568_877_2;
+
 impl Hex {
     pub const fn new(q: i8, r: i8) -> Self {
         Self { q, r }
@@ -39,6 +41,27 @@ impl Hex {
             q: self.q + dq,
             r: self.r + dr,
         }
+    }
+
+    /// Convert axial coordinates to pixel center (pointy-top layout).
+    pub fn pixel_center(self, size: f64) -> (f64, f64) {
+        let x = size * SQRT3 * (self.q as f64 + self.r as f64 / 2.0);
+        let y = size * 1.5 * self.r as f64;
+        (x, y)
+    }
+}
+
+/// Pixel offset from hex center for a corner (pointy-top, 0=N clockwise).
+pub fn corner_pixel_offset(corner: usize, size: f64) -> (f64, f64) {
+    let w = size * SQRT3 / 2.0;
+    match corner {
+        0 => (0.0, -size),
+        1 => (w, -size / 2.0),
+        2 => (w, size / 2.0),
+        3 => (0.0, size),
+        4 => (-w, size / 2.0),
+        5 => (-w, -size / 2.0),
+        _ => unreachable!(),
     }
 }
 

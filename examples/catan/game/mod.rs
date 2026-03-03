@@ -8,8 +8,6 @@ pub mod road;
 pub mod state;
 pub mod topology;
 
-use std::sync::Arc;
-
 use canopy2::game::{Game, Status};
 use canopy2::player::Player;
 
@@ -26,18 +24,14 @@ use resource::{
     ALL_RESOURCES, CITY_COST, DEV_CARD_COST, ROAD_COST, Resource, ResourceArray, SETTLEMENT_COST,
 };
 use state::{GameState, Phase};
-use topology::Topology;
 
 const VP_TO_WIN: u8 = 15;
 const MAX_TURNS: u16 = 2000;
 pub(crate) const DISCARD_THRESHOLD: u8 = 9;
 pub(crate) const FRIENDLY_ROBBER_VP: u8 = 3;
 
-pub fn new_game(rng: &mut fastrand::Rng, dice: Dice) -> GameState {
-    let topo_seed = rng.u64(..);
-    let topology = Arc::new(Topology::from_seed(topo_seed));
-    let dev_deck = DevCardDeck::new(rng);
-    GameState::new(topology, dev_deck, dice)
+pub fn new_game(seed: u64, dice: Dice) -> GameState {
+    GameState::from_seed(seed, dice)
 }
 
 const DICE_PROBS: [(usize, f32); 11] = [
@@ -723,10 +717,7 @@ mod tests {
     }
 
     fn make_state_with_seed(seed: u64) -> GameState {
-        let topo = Arc::new(Topology::from_seed(seed));
-        let mut rng = fastrand::Rng::with_seed(seed);
-        let deck = DevCardDeck::new(&mut rng);
-        GameState::new(topo, deck, Dice::default())
+        GameState::from_seed(seed, Dice::default())
     }
 
     /// Play through the 4-settlement setup phase using random actions.

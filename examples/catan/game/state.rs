@@ -120,6 +120,13 @@ impl fmt::Debug for GameState {
 }
 
 impl GameState {
+    pub fn from_seed(seed: u64, dice: Dice) -> Self {
+        let mut rng = fastrand::Rng::with_seed(seed);
+        let topology = Arc::new(Topology::from_seed(rng.u64(..)));
+        let dev_deck = DevCardDeck::new(&mut rng);
+        Self::new(topology, dev_deck, dice)
+    }
+
     pub fn new(topology: Arc<Topology>, dev_deck: DevCardDeck, dice: Dice) -> Self {
         let robber = topology.robber_start;
 

@@ -2,12 +2,14 @@ use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
+use crate::game_log::GameLog;
 use crate::mcts::{Config, Search, Step};
 use crate::player::{PerPlayer, Player};
 
 /// Play a single match between two MCTS bots.
 ///
-/// Returns the terminal reward from P1's perspective.
+/// Returns the terminal reward from P1's perspective and a log of every action
+/// applied (both chance outcomes and player decisions).
 /// When `swap` is true, seat assignments are reversed:
 /// the game's P1 uses `configs[Player::Two]` and vice versa.
 pub fn play_match<G: Game>(
@@ -16,13 +18,14 @@ pub fn play_match<G: Game>(
     configs: &PerPlayer<Config>,
     swap: bool,
     rng: &mut fastrand::Rng,
-) -> f32 {
+) -> (f32, Vec<usize>) {
     let mut state = game.clone();
     let mut chance_buf = Vec::new();
+    let mut actions = Vec::new();
 
     loop {
         let player = match state.status() {
-            Status::Terminal(reward) => return reward,
+            Status::Terminal(reward) => return (reward, actions),
             Status::Ongoing(p) => p,
         };
 
@@ -31,6 +34,7 @@ pub fn play_match<G: Game>(
 
         if !chance_buf.is_empty() {
             let action = sample_chance(&chance_buf, rng);
+            actions.push(action);
             state.apply_action(action);
         } else {
             let seat = if swap { player.opponent() } else { player };
@@ -55,33 +59,27 @@ pub fn play_match<G: Game>(
                 .unwrap()
                 .0;
 
+            actions.push(action);
             state.apply_action(action);
         }
     }
 }
 
-/// Summary of a tournament between two MCTS configurations.
-pub struct TournamentResult {
-    /// Wins per seat (indexed by the original `configs` ordering).
-    pub wins: PerPlayer<u32>,
-    pub draws: u32,
-    pub total: u32,
-}
-
 /// Run a tournament of `num_games` matches, alternating sides.
 ///
+/// `new_game` is a factory that creates a fresh game state from a seed.
 /// Even-numbered games use the original seat assignment;
 /// odd-numbered games swap which config plays as P1.
-/// Prints a summary line at the end.
 pub fn tournament<G: Game>(
-    game: &G,
+    new_game: impl Fn(u64) -> G,
     evaluators: &PerPlayer<&dyn Evaluator<G>>,
     configs: &PerPlayer<Config>,
     num_games: u32,
     rng: &mut fastrand::Rng,
-) -> TournamentResult {
-    let mut wins = PerPlayer::default();
+) -> Vec<GameLog> {
+    let mut wins: PerPlayer<u32> = PerPlayer::default();
     let mut draws = 0u32;
+    let mut game_logs = Vec::with_capacity(num_games as usize);
 
     let pb = ProgressBar::new(num_games as u64);
     pb.set_style(
@@ -91,7 +89,10 @@ pub fn tournament<G: Game>(
 
     for i in 0..num_games {
         let swap = i % 2 == 1;
-        let reward = play_match(game, evaluators, configs, swap, rng);
+        let seed = rng.u64(..);
+        let game = new_game(seed);
+        let (reward, actions) = play_match(&game, evaluators, configs, swap, rng);
+        game_logs.push(GameLog { seed, actions });
 
         // Map reward back to seat 0's perspective
         let seat0_reward = if swap { -reward } else { reward };
@@ -128,7 +129,7 @@ pub fn tournament<G: Game>(
         draws as f32 / total as f32 * 100.0,
     );
 
-    TournamentResult { wins, draws, total }
+    game_logs
 }
 
 fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {

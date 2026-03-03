@@ -2,3 +2,4 @@
 .env
 target/
 perf.*
+logs/
