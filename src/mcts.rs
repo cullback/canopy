@@ -180,7 +180,7 @@ fn simulate<G: Game>(
 
         bufs.path.push((current, edge_idx));
 
-        let edge = &tree.nodes[current].edges[edge_idx];
+        let edge = &node.edges[edge_idx];
         let action = edge.action;
         let has_child = edge.child;
 
@@ -190,8 +190,7 @@ fn simulate<G: Game>(
             Some(child) => current = child,
             None => {
                 let (child_id, val) = expand(tree, &state, evaluator, bufs);
-                let &(nid, eidx) = bufs.path.last().unwrap();
-                tree.nodes[nid].edges[eidx].child = Some(child_id);
+                tree.nodes[current].edges[edge_idx].child = Some(child_id);
                 if let Some(v) = val {
                     break v;
                 }
