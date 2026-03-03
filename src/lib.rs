@@ -5,5 +5,7 @@ pub mod eval;
 pub mod game;
 pub mod graph;
 pub mod mcts;
+pub mod orchestrator;
 pub mod player;
 pub mod tournament;
+pub mod utils;
