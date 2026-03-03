@@ -43,14 +43,14 @@ struct Edge {
     child: Option<NodeId>,
     prior: f32,
     visits: u32,
-    total_value: f32,
 }
 
 struct NodeData {
     status: Status,
     is_chance: bool,
     total_visits: u32,
-    total_value: f32,
+    utility: f32,
+    q: f32,
 }
 
 #[derive(Default)]
@@ -104,18 +104,19 @@ pub fn search<G: Game, E: Evaluator<G> + ?Sized>(
         );
     }
 
-    // Extract policy from root visit counts
-    let root_node = &tree.graph[root];
+    // Extract policy from root edge visit counts
+    let edges = tree.graph.edges(root);
+    let total_edge_visits: u32 = edges.iter().map(|e| e.visits).sum();
     let mut policy = vec![0.0f32; G::NUM_ACTIONS];
-    if root_node.total_visits > 0 {
-        for edge in tree.graph.edges(root) {
-            policy[edge.action] = edge.visits as f32 / root_node.total_visits as f32;
+    if total_edge_visits > 0 {
+        for edge in edges {
+            policy[edge.action] = edge.visits as f32 / total_edge_visits as f32;
         }
     }
 
     SearchResult {
         policy,
-        value: node_value(&tree.graph[root]),
+        value: tree.graph[root].q,
     }
 }
 
@@ -134,14 +135,14 @@ fn simulate<G: Game, E: Evaluator<G> + ?Sized>(
     let mut current = root;
     let mut state = root_state.clone();
 
-    let value = loop {
+    loop {
         let node = &tree.graph[current];
         let edges = tree.graph.edges(current);
 
         let edge_idx = match node.status {
-            Status::Terminal(reward) => break reward,
+            Status::Terminal(_) => break,
             Status::Ongoing(_) if node.is_chance => sample_chance_edge(edges, rng),
-            Status::Ongoing(player) => puct_select(node, edges, player, config),
+            Status::Ongoing(player) => puct_select(node, edges, &tree.graph, player, config),
         };
 
         bufs.path.push((current, edge_idx));
@@ -155,23 +156,47 @@ fn simulate<G: Game, E: Evaluator<G> + ?Sized>(
         match has_child {
             Some(child) => current = child,
             None => {
-                let (child_id, val) = expand(tree, &state, evaluator, rng, bufs);
+                let (child_id, should_continue) = expand(tree, &state, evaluator, rng, bufs);
                 tree.graph.edges_mut(current)[edge_idx].child = Some(child_id);
-                if let Some(v) = val {
-                    break v;
+                if !should_continue {
+                    break;
                 }
                 // Chance node — no eval, keep descending
                 current = child_id;
             }
         }
-    };
+    }
 
-    // Backprop — value is P1-perspective, no sign flipping
+    // Backprop — idempotent Q recomputation
     for &(nid, eidx) in bufs.path.iter().rev() {
-        tree.graph[nid].total_visits += 1;
-        tree.graph[nid].total_value += value;
         tree.graph.edges_mut(nid)[eidx].visits += 1;
-        tree.graph.edges_mut(nid)[eidx].total_value += value;
+
+        let (sum_edge_visits, weighted_child_q) = {
+            let edges = tree.graph.edges(nid);
+            let sum = edges.iter().map(|e| e.visits).sum::<u32>();
+            let mut wq = 0.0f32;
+            for edge in edges {
+                if let Some(child_id) = edge.child
+                    && edge.visits > 0
+                {
+                    wq += edge.visits as f32 * tree.graph[child_id].q;
+                }
+            }
+            (sum, wq)
+        };
+
+        let node = &mut tree.graph[nid];
+        if node.is_chance {
+            node.total_visits = sum_edge_visits;
+            node.q = if sum_edge_visits > 0 {
+                weighted_child_q / sum_edge_visits as f32
+            } else {
+                0.0
+            };
+        } else {
+            node.total_visits = 1 + sum_edge_visits;
+            node.q = (node.utility + weighted_child_q) / node.total_visits as f32;
+        }
     }
 }
 
@@ -181,16 +206,12 @@ fn expand<G: Game, E: Evaluator<G> + ?Sized>(
     evaluator: &E,
     rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
-) -> (NodeId, Option<f32>) {
+) -> (NodeId, bool) {
     // Transposition hit — reuse existing node
     if let Some(key) = state.state_key()
         && let Some(&existing) = tree.table.get(&key)
     {
-        let val = match tree.graph[existing].status {
-            Status::Terminal(reward) => reward,
-            _ => node_value(&tree.graph[existing]),
-        };
-        return (existing, Some(val));
+        return (existing, false);
     }
 
     let status = state.status();
@@ -200,26 +221,26 @@ fn expand<G: Game, E: Evaluator<G> + ?Sized>(
             NodeData {
                 status,
                 is_chance: false,
-                total_visits: 0,
-                total_value: 0.0,
+                total_visits: 1,
+                utility: reward,
+                q: reward,
             },
             std::iter::empty(),
         );
-        return (id, Some(reward));
+        return (id, false);
     }
 
     state.chance_outcomes(&mut bufs.chances);
     let is_chance = !bufs.chances.is_empty();
 
-    let (edges_iter, value): (Box<dyn Iterator<Item = Edge>>, _) = if is_chance {
+    let (edges_iter, utility): (Box<dyn Iterator<Item = Edge>>, _) = if is_chance {
         let iter = bufs.chances.drain(..).map(|(action, prior)| Edge {
             action,
             child: None,
             prior,
             visits: 0,
-            total_value: 0.0,
         });
-        (Box::new(iter), None)
+        (Box::new(iter), 0.0)
     } else {
         let nn = evaluator.evaluate(state, rng);
         state.legal_actions(&mut bufs.actions);
@@ -233,17 +254,19 @@ fn expand<G: Game, E: Evaluator<G> + ?Sized>(
                 child: None,
                 prior,
                 visits: 0,
-                total_value: 0.0,
             });
-        (Box::new(iter), Some(nn.value))
+        (Box::new(iter), nn.value)
     };
+
+    let (total_visits, q) = if is_chance { (0, 0.0) } else { (1, utility) };
 
     let id = tree.graph.add_node(
         NodeData {
             status,
             is_chance,
-            total_visits: 0,
-            total_value: 0.0,
+            total_visits,
+            utility,
+            q,
         },
         edges_iter,
     );
@@ -252,20 +275,22 @@ fn expand<G: Game, E: Evaluator<G> + ?Sized>(
         tree.table.insert(key, id);
     }
 
-    (id, value)
+    (id, is_chance)
 }
 
 // ── Selection ─────────────────────────────────────────────────────────
 
-fn puct_select(node: &NodeData, edges: &[Edge], player: Player, config: &Config) -> usize {
+fn puct_select(
+    node: &NodeData,
+    edges: &[Edge],
+    graph: &DiGraph<NodeData, Edge>,
+    player: Player,
+    config: &Config,
+) -> usize {
     let sign = player.sign();
     let sqrt_total = (node.total_visits as f32).sqrt();
 
-    let parent_q = if node.total_visits > 0 {
-        sign * node.total_value / node.total_visits as f32
-    } else {
-        0.0
-    };
+    let parent_q = sign * node.q;
     let fpu = parent_q - config.fpu_reduction;
 
     edges
@@ -273,7 +298,7 @@ fn puct_select(node: &NodeData, edges: &[Edge], player: Player, config: &Config)
         .enumerate()
         .map(|(i, e)| {
             let q = if e.visits > 0 {
-                sign * e.total_value / e.visits as f32
+                sign * graph[e.child.unwrap()].q
             } else {
                 fpu
             };
@@ -298,14 +323,6 @@ fn sample_chance_edge(edges: &[Edge], rng: &mut fastrand::Rng) -> usize {
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────
-
-fn node_value(node: &NodeData) -> f32 {
-    if node.total_visits == 0 {
-        0.0
-    } else {
-        node.total_value / node.total_visits as f32
-    }
-}
 
 fn add_dirichlet_noise(edges: &mut [Edge], alpha: f32, epsilon: f32, rng: &mut fastrand::Rng) {
     if edges.is_empty() || epsilon == 0.0 {
