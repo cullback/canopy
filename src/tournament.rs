@@ -76,7 +76,9 @@ pub fn tournament<G: Game>(
     let mut draws = 0u32;
 
     let pb = ProgressBar::new(num_games as u64);
-    pb.set_style(ProgressStyle::with_template("{bar:30} {pos}/{len} | W {msg}").unwrap());
+    pb.set_style(
+        ProgressStyle::with_template("{bar:30} {pos}/{len} | W {msg} | {elapsed} < {eta}").unwrap(),
+    );
     pb.set_message("0-0-0");
 
     for i in 0..num_games {
