@@ -20,6 +20,7 @@ pub struct RolloutEvaluator {
 
 impl<G: Game> Evaluator<G> for RolloutEvaluator {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> NnOutput {
+        assert!(self.num_rollouts > 0, "num_rollouts must be at least 1");
         let mut action_buf = Vec::with_capacity(G::NUM_ACTIONS);
         let mut chance_buf = Vec::with_capacity(G::NUM_ACTIONS);
         let mut total = 0.0f32;
