@@ -3,6 +3,7 @@ pub mod cli;
 pub mod dirichlet;
 pub mod eval;
 pub mod game;
+pub mod graph;
 pub mod mcts;
 pub mod player;
 pub mod tournament;
