@@ -11,43 +11,33 @@
 //! we split each turn step into two phases:
 //!
 //! 1. **Decision node** (player chooses): `Roll` or `Hold`
-//! 2. **Chance node** (die roll): outcome 1..=6
+//! 2. **Chance node** (die roll): outcome 0..=5 mapping to faces 1..=6
 //!
-//! This lets MCTS reason about the decision and stochasticity separately.
-
-use std::collections::HashMap;
-use std::hash::Hash;
+//! Chance outcomes are *not* actions — they're resolved automatically by the
+//! MCTS engine via the `StochasticGame` trait.
 
 use rand::Rng;
 
-use canopy2::game::{Game, StochasticGame};
+use canopy2::game::{Game, Status, StochasticGame};
 use canopy2::mcts::{Mcts, MctsConfig};
+use canopy2::player::{PerPlayer, Player};
 
-/// Actions in the game: player decisions + chance outcomes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-enum PigAction {
-    Roll,
-    Hold,
-    /// Die face 1..=6. Only valid at chance nodes.
-    DieRoll(u8),
-}
+const ROLL: usize = 0;
+const HOLD: usize = 1;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-struct Player(u8);
+const ACTION_NAMES: [&str; 2] = ["Roll", "Hold"];
 
 /// Phase within a turn.
 #[derive(Clone, Debug)]
 enum Phase {
-    /// Player decides to roll or hold.
     Decision,
-    /// Die is being rolled (chance node).
     Rolling,
 }
 
 #[derive(Clone, Debug)]
 struct PigGame {
-    scores: [u32; 2],
-    current: u8,
+    scores: PerPlayer<u32>,
+    current: Player,
     turn_total: u32,
     phase: Phase,
     target: u32,
@@ -56,102 +46,55 @@ struct PigGame {
 impl PigGame {
     fn new(target: u32) -> Self {
         Self {
-            scores: [0; 2],
-            current: 0,
+            scores: PerPlayer::default(),
+            current: Player::One,
             turn_total: 0,
             phase: Phase::Decision,
             target,
         }
     }
 
-    fn opponent(&self) -> u8 {
-        1 - self.current
-    }
-
     fn pass_turn(&mut self) {
-        self.current = self.opponent();
+        self.current = self.current.opponent();
         self.turn_total = 0;
         self.phase = Phase::Decision;
+    }
+
+    /// Map chance outcome index to die face (1..=6).
+    fn die_face(outcome: usize) -> u32 {
+        outcome as u32 + 1
     }
 }
 
 impl Game for PigGame {
-    type Action = PigAction;
-    type Player = Player;
+    const NUM_ACTIONS: usize = 2;
 
-    fn current_player(&self) -> Player {
-        Player(self.current)
-    }
-
-    fn legal_actions(&self) -> Vec<PigAction> {
-        match self.phase {
-            Phase::Decision => vec![PigAction::Roll, PigAction::Hold],
-            Phase::Rolling => (1..=6).map(PigAction::DieRoll).collect(),
+    fn status(&self) -> Status {
+        if self.scores[Player::One] >= self.target {
+            Status::Terminal(1.0)
+        } else if self.scores[Player::Two] >= self.target {
+            Status::Terminal(-1.0)
+        } else {
+            Status::Ongoing(self.current)
         }
     }
 
-    fn apply_action(&mut self, action: PigAction) {
+    fn legal_actions(&self, buf: &mut Vec<usize>) {
+        buf.push(ROLL);
+        buf.push(HOLD);
+    }
+
+    fn apply_action(&mut self, action: usize) {
         match action {
-            PigAction::Roll => {
-                // Player chose to roll — transition to chance node.
+            ROLL => {
                 self.phase = Phase::Rolling;
             }
-            PigAction::Hold => {
-                self.scores[self.current as usize] += self.turn_total;
+            HOLD => {
+                self.scores[self.current] += self.turn_total;
                 self.pass_turn();
             }
-            PigAction::DieRoll(face) => {
-                if face == 1 {
-                    // Pig out — lose turn total.
-                    self.pass_turn();
-                } else {
-                    self.turn_total += face as u32;
-                    self.phase = Phase::Decision;
-                }
-            }
+            _ => panic!("invalid action {action}"),
         }
-    }
-
-    fn is_terminal(&self) -> bool {
-        self.scores[0] >= self.target || self.scores[1] >= self.target
-    }
-
-    fn rewards(&self) -> HashMap<Player, f32> {
-        let mut m = HashMap::new();
-        if self.scores[0] >= self.target {
-            m.insert(Player(0), 1.0);
-            m.insert(Player(1), 0.0);
-        } else if self.scores[1] >= self.target {
-            m.insert(Player(0), 0.0);
-            m.insert(Player(1), 1.0);
-        }
-        m
-    }
-
-    fn state_key(&self) -> u64 {
-        let mut h = self.scores[0] as u64;
-        h = h * 200 + self.scores[1] as u64;
-        h = h * 200 + self.turn_total as u64;
-        h = h * 2 + self.current as u64;
-        h = h * 2
-            + match self.phase {
-                Phase::Decision => 0,
-                Phase::Rolling => 1,
-            };
-        h
-    }
-
-    fn action_index(action: &PigAction) -> usize {
-        match action {
-            PigAction::Roll => 0,
-            PigAction::Hold => 1,
-            PigAction::DieRoll(f) => 2 + (*f as usize - 1),
-        }
-    }
-
-    fn action_space_size() -> usize {
-        // Roll, Hold, DieRoll(1..=6)
-        8
     }
 }
 
@@ -160,88 +103,93 @@ impl StochasticGame for PigGame {
         matches!(self.phase, Phase::Rolling)
     }
 
-    fn chance_outcomes(&self) -> Vec<(PigAction, f32)> {
-        (1..=6)
-            .map(|f| (PigAction::DieRoll(f), 1.0 / 6.0))
-            .collect()
+    fn chance_outcomes(&self, buf: &mut Vec<(usize, f32)>) {
+        for i in 0..6 {
+            buf.push((i, 1.0 / 6.0));
+        }
+    }
+
+    fn apply_chance(&mut self, outcome: usize) {
+        let face = Self::die_face(outcome);
+        if face == 1 {
+            self.pass_turn();
+        } else {
+            self.turn_total += face;
+            self.phase = Phase::Decision;
+        }
     }
 }
 
 fn main() {
     let mut rng = rand::rng();
     let mut game = PigGame::new(100);
-    let config = MctsConfig {
-        simulations: 10_000,
-        ..Default::default()
-    };
+    let simulations = 10_000;
 
     println!("=== Pig (MCTS vs MCTS, target=100) ===\n");
 
     let mut turn_num = 0;
-    while !game.is_terminal() {
-        let player = game.current_player();
-
-        match game.phase {
-            Phase::Decision => {
-                let mut mcts = Mcts::new(MctsConfig {
-                    simulations: config.simulations,
-                    ..Default::default()
-                });
-                let visits = mcts.search(&game, &mut rng);
-
-                let action = visits[0].0;
-                let total_visits: u32 = visits.iter().map(|(_, v)| v).sum();
-                print!(
-                    "  P{} (score={}, turn={}): ",
-                    player.0, game.scores[player.0 as usize], game.turn_total
-                );
-                for (a, v) in &visits {
-                    let pct = *v as f32 / total_visits as f32 * 100.0;
-                    print!("{:?}={:.0}%  ", a, pct);
-                }
-                println!("-> {:?}", action);
-
-                game.apply_action(action);
-            }
-            Phase::Rolling => {
-                // Chance node — sample a die roll.
-                let outcomes = game.chance_outcomes();
-                let total: f32 = outcomes.iter().map(|(_, p)| p).sum();
-                let mut r: f32 = rng.random_range(0.0..total);
-                let mut chosen = outcomes[0].0;
-                for (a, p) in &outcomes {
-                    r -= p;
-                    if r <= 0.0 {
-                        chosen = *a;
-                        break;
-                    }
-                }
-                if let PigAction::DieRoll(face) = chosen {
-                    println!("  -> rolled {}", face);
-                    if face == 1 {
-                        turn_num += 1;
-                        println!("  PIG OUT! Turn passes.\n--- Turn {} ---", turn_num);
-                    }
-                }
-                game.apply_action(chosen);
-
-                // Check if hold just happened implicitly (it didn't, but check terminal).
-                if game.is_terminal() {
+    let mut chance_buf = Vec::new();
+    while let Status::Ongoing(player) = game.status() {
+        if game.is_chance_node() {
+            chance_buf.clear();
+            game.chance_outcomes(&mut chance_buf);
+            let total: f32 = chance_buf.iter().map(|(_, p)| p).sum();
+            let mut r: f32 = rng.random_range(0.0..total);
+            let mut chosen = chance_buf[0].0;
+            for &(o, p) in &chance_buf {
+                r -= p;
+                if r <= 0.0 {
+                    chosen = o;
                     break;
                 }
             }
+            let face = PigGame::die_face(chosen);
+            println!("  -> rolled {}", face);
+            if face == 1 {
+                turn_num += 1;
+                println!("  PIG OUT! Turn passes.\n--- Turn {} ---", turn_num);
+            }
+            game.apply_chance(chosen);
+        } else {
+            let mut mcts = Mcts::new(MctsConfig {
+                simulations,
+                ..Default::default()
+            });
+            let visits = mcts.search(&game, &mut rng);
+
+            let action = visits[0].0;
+            let total_visits: u32 = visits.iter().map(|(_, v)| v).sum();
+            print!(
+                "  {} (score={}, turn={}): ",
+                player, game.scores[player], game.turn_total
+            );
+            for (a, v) in &visits {
+                let pct = *v as f32 / total_visits as f32 * 100.0;
+                print!("{}={:.0}%  ", ACTION_NAMES[*a], pct);
+            }
+            println!("-> {}", ACTION_NAMES[action]);
+
+            game.apply_action(action);
         }
 
-        // Detect turn change for display.
-        if matches!(game.phase, Phase::Decision) && game.turn_total == 0 {
+        if !game.is_chance_node()
+            && game.turn_total == 0
+            && matches!(game.status(), Status::Ongoing(_))
+        {
             turn_num += 1;
             println!("\n--- Turn {} ---", turn_num);
         }
     }
 
     println!("\n=== Final Scores ===");
-    println!("  Player 0: {}", game.scores[0]);
-    println!("  Player 1: {}", game.scores[1]);
-    let winner = if game.scores[0] >= 100 { 0 } else { 1 };
-    println!("  Player {} wins!", winner);
+    println!("  Player 1: {}", game.scores[Player::One]);
+    println!("  Player 2: {}", game.scores[Player::Two]);
+    if let Status::Terminal(reward) = game.status() {
+        let winner = if reward > 0.0 {
+            Player::One
+        } else {
+            Player::Two
+        };
+        println!("  {} wins!", winner);
+    }
 }
