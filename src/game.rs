@@ -1,5 +1,3 @@
-use rand::RngCore;
-
 use crate::player::Player;
 
 #[derive(Clone, Copy, PartialEq, Debug)]
@@ -40,7 +38,7 @@ pub trait Game: Clone + Send + Sync {
     // ── Imperfect information ─────────────────────────────────────
 
     /// Sample a determinization consistent with `observer`'s information set.
-    fn determinize(&self, _observer: Player, _rng: &mut dyn RngCore) -> Self
+    fn determinize(&self, _observer: Player, _rng: &mut fastrand::Rng) -> Self
     where
         Self: Sized,
     {

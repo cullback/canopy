@@ -1,5 +1,4 @@
 use indicatif::{ProgressBar, ProgressStyle};
-use rand::Rng;
 
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
@@ -16,7 +15,7 @@ pub fn play_match<G: Game>(
     evaluators: &PerPlayer<&dyn Evaluator<G>>,
     configs: &PerPlayer<Config>,
     swap: bool,
-    rng: &mut impl Rng,
+    rng: &mut fastrand::Rng,
 ) -> f32 {
     let mut state = game.clone();
     let mut chance_buf = Vec::new();
@@ -70,7 +69,7 @@ pub fn tournament<G: Game>(
     evaluators: &PerPlayer<&dyn Evaluator<G>>,
     configs: &PerPlayer<Config>,
     num_games: u32,
-    rng: &mut impl Rng,
+    rng: &mut fastrand::Rng,
 ) -> TournamentResult {
     let mut wins = PerPlayer::default();
     let mut draws = 0u32;
@@ -123,9 +122,9 @@ pub fn tournament<G: Game>(
     TournamentResult { wins, draws, total }
 }
 
-fn sample_chance(outcomes: &[(usize, f32)], rng: &mut impl Rng) -> usize {
+fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
     let total: f32 = outcomes.iter().map(|(_, p)| p).sum();
-    let mut r = rng.random_range(0.0..total);
+    let mut r = rng.f32() * total;
     for &(outcome, p) in outcomes {
         r -= p;
         if r <= 0.0 {

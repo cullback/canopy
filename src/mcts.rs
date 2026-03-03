@@ -1,8 +1,5 @@
 use std::collections::HashMap;
 
-use rand::Rng;
-use rand_distr::{Distribution, Gamma};
-
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
 use crate::player::Player;
@@ -109,7 +106,7 @@ pub fn search<G: Game, E: Evaluator<G> + ?Sized>(
     root_state: &G,
     evaluator: &E,
     config: &Config,
-    rng: &mut impl Rng,
+    rng: &mut fastrand::Rng,
 ) -> SearchResult {
     if let Status::Terminal(reward) = root_state.status() {
         return SearchResult {
@@ -121,7 +118,7 @@ pub fn search<G: Game, E: Evaluator<G> + ?Sized>(
     let mut tree = Tree::default();
     let mut bufs = Bufs::default();
 
-    let (root, _) = expand(&mut tree, root_state, evaluator, &mut bufs);
+    let (root, _) = expand(&mut tree, root_state, evaluator, rng, &mut bufs);
 
     // Dirichlet noise on root priors (skip for chance roots)
     if !tree.nodes[root].is_chance {
@@ -162,7 +159,7 @@ fn simulate<G: Game, E: Evaluator<G> + ?Sized>(
     root_state: &G,
     evaluator: &E,
     config: &Config,
-    rng: &mut impl Rng,
+    rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
 ) {
     bufs.path.clear();
@@ -189,7 +186,7 @@ fn simulate<G: Game, E: Evaluator<G> + ?Sized>(
         match has_child {
             Some(child) => current = child,
             None => {
-                let (child_id, val) = expand(tree, &state, evaluator, bufs);
+                let (child_id, val) = expand(tree, &state, evaluator, rng, bufs);
                 tree.nodes[current].edges[edge_idx].child = Some(child_id);
                 if let Some(v) = val {
                     break v;
@@ -214,6 +211,7 @@ fn expand<G: Game, E: Evaluator<G> + ?Sized>(
     tree: &mut Tree,
     state: &G,
     evaluator: &E,
+    rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
 ) -> (NodeId, Option<f32>) {
     // Transposition hit — reuse existing node
@@ -242,7 +240,7 @@ fn expand<G: Game, E: Evaluator<G> + ?Sized>(
         let edges = bufs.chances.drain(..).map(Edge::from).collect();
         (edges, None)
     } else {
-        let nn = evaluator.evaluate(state);
+        let nn = evaluator.evaluate(state, rng);
         state.legal_actions(&mut bufs.actions);
         let priors = softmax_legal(&nn.policy_logits, &bufs.actions);
         let edges = bufs.actions.drain(..).zip(priors).map(Edge::from).collect();
@@ -294,9 +292,9 @@ fn puct_select(node: &Node, player: Player, config: &Config) -> usize {
         .0
 }
 
-fn sample_chance_edge(node: &Node, rng: &mut impl Rng) -> usize {
+fn sample_chance_edge(node: &Node, rng: &mut fastrand::Rng) -> usize {
     let total: f32 = node.edges.iter().map(|e| e.prior).sum();
-    let mut r = rng.random_range(0.0..total);
+    let mut r = rng.f32() * total;
     for (i, edge) in node.edges.iter().enumerate() {
         r -= edge.prior;
         if r <= 0.0 {
@@ -316,18 +314,13 @@ fn node_value(node: &Node) -> f32 {
     }
 }
 
-fn add_dirichlet_noise(edges: &mut [Edge], alpha: f32, epsilon: f32, rng: &mut impl Rng) {
+fn add_dirichlet_noise(edges: &mut [Edge], alpha: f32, epsilon: f32, rng: &mut fastrand::Rng) {
     if edges.is_empty() || epsilon == 0.0 {
         return;
     }
-    let gamma = Gamma::<f32>::new(alpha, 1.0).unwrap();
-    let noise: Vec<f32> = edges.iter().map(|_| gamma.sample(rng)).collect();
-    let sum: f32 = noise.iter().sum();
-    if sum == 0.0 {
-        return;
-    }
+    let noise = crate::dirichlet::sample(alpha, edges.len(), rng);
     for (edge, &n) in edges.iter_mut().zip(&noise) {
-        edge.prior = (1.0 - epsilon) * edge.prior + epsilon * (n / sum);
+        edge.prior = (1.0 - epsilon) * edge.prior + epsilon * n;
     }
 }
 
@@ -397,7 +390,7 @@ mod tests {
             num_simulations: 500,
             ..Default::default()
         };
-        let mut rng = rand::rng();
+        let mut rng = fastrand::Rng::new();
         let result = search(&game, &evaluator, &config, &mut rng);
         assert!(
             result.policy[0] > result.policy[1],

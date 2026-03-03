@@ -132,7 +132,7 @@ fn main() {
 
     let configs = cli::parse_configs(&matches);
 
-    let mut rng = rand::rng();
+    let mut rng = fastrand::Rng::new();
     let game = PigGame::new(100);
     let eval = RolloutEvaluator { num_rollouts: 1 };
     let evaluators: PerPlayer<&dyn Evaluator<PigGame>> = PerPlayer([&eval, &eval]);

@@ -12,9 +12,8 @@ cli = ["dep:clap"]
 
 [dependencies]
 clap = { version = "4", default-features = false, features = ["std", "string"], optional = true }
+fastrand = "2"
 indicatif = "0.17"
-rand = "0.9"
-rand_distr = "0.5"
 
 [dev-dependencies]
 canopy2 = { path = ".", features = ["cli"] }
