@@ -39,7 +39,7 @@ pub struct SearchResult {
 
 // ── Internal types ────────────────────────────────────────────────────
 
-type NodeId = u32;
+type NodeId = usize;
 
 struct Edge {
     action: usize,
@@ -91,9 +91,9 @@ pub fn search<G: Game>(
     let (root, _) = expand(&mut tree, root_state, evaluator, &mut bufs);
 
     // Dirichlet noise on root priors (skip for chance roots)
-    if !tree.nodes[root as usize].is_chance {
+    if !tree.nodes[root].is_chance {
         add_dirichlet_noise(
-            &mut tree.nodes[root as usize].edges,
+            &mut tree.nodes[root].edges,
             config.dirichlet_alpha,
             config.dirichlet_epsilon,
             rng,
@@ -107,7 +107,7 @@ pub fn search<G: Game>(
     }
 
     // Extract policy from root visit counts
-    let root_node = &tree.nodes[root as usize];
+    let root_node = &tree.nodes[root];
     let total_visits: u32 = root_node.edges.iter().map(|e| e.visits).sum();
     let mut policy = vec![0.0f32; G::NUM_ACTIONS];
     if total_visits > 0 {
@@ -138,7 +138,7 @@ fn simulate<G: Game>(
     let mut state = root_state.clone();
 
     let value = loop {
-        let node = &tree.nodes[current as usize];
+        let node = &tree.nodes[current];
 
         if let Status::Terminal(reward) = node.status {
             break reward;
@@ -152,7 +152,7 @@ fn simulate<G: Game>(
 
         bufs.path.push((current, edge_idx));
 
-        let edge = &tree.nodes[current as usize].edges[edge_idx];
+        let edge = &tree.nodes[current].edges[edge_idx];
         let action = edge.action;
         let has_child = edge.child;
 
@@ -163,7 +163,7 @@ fn simulate<G: Game>(
             None => {
                 let (child_id, val) = expand(tree, &state, evaluator, bufs);
                 let &(nid, eidx) = bufs.path.last().unwrap();
-                tree.nodes[nid as usize].edges[eidx].child = Some(child_id);
+                tree.nodes[nid].edges[eidx].child = Some(child_id);
                 if let Some(v) = val {
                     break v;
                 }
@@ -175,7 +175,7 @@ fn simulate<G: Game>(
 
     // Backprop — value is P1-perspective, no sign flipping
     for &(nid, eidx) in bufs.path.iter().rev() {
-        let edge = &mut tree.nodes[nid as usize].edges[eidx];
+        let edge = &mut tree.nodes[nid].edges[eidx];
         edge.visits += 1;
         edge.total_value += value;
     }
@@ -191,15 +191,15 @@ fn expand<G: Game>(
     if let Some(key) = state.state_key()
         && let Some(&existing) = tree.table.get(&key)
     {
-        let val = match tree.nodes[existing as usize].status {
+        let val = match tree.nodes[existing].status {
             Status::Terminal(reward) => reward,
-            _ => node_value(&tree.nodes[existing as usize]),
+            _ => node_value(&tree.nodes[existing]),
         };
         return (existing, Some(val));
     }
 
     let status = state.status();
-    let id = tree.nodes.len() as NodeId;
+    let id = tree.nodes.len();
 
     if let Status::Terminal(reward) = status {
         tree.nodes.push(Node {
