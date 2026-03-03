@@ -271,33 +271,29 @@ fn select_edge(node: &Node, config: &Config) -> usize {
     let total_visits: u32 = node.edges.iter().map(|e| e.visits).sum();
     let sqrt_total = (total_visits as f32).sqrt();
 
-    // FPU: unvisited edges use parent mean value minus a reduction
+    // FPU: everything in current-player perspective from here on
     let parent_q = if total_visits > 0 {
-        node.edges.iter().map(|e| e.total_value).sum::<f32>() / total_visits as f32
+        sign * node.edges.iter().map(|e| e.total_value).sum::<f32>() / total_visits as f32
     } else {
         0.0
     };
-    let fpu_q = parent_q - config.fpu_reduction * sign;
+    let fpu = parent_q - config.fpu_reduction;
 
-    let mut best_idx = 0;
-    let mut best_score = f32::NEG_INFINITY;
-
-    for (i, edge) in node.edges.iter().enumerate() {
-        let q = if edge.visits > 0 {
-            edge.total_value / edge.visits as f32
-        } else {
-            fpu_q
-        };
-        let u = config.cpuct * edge.prior * sqrt_total / (1.0 + edge.visits as f32);
-        let score = sign * q + u;
-
-        if score > best_score {
-            best_score = score;
-            best_idx = i;
-        }
-    }
-
-    best_idx
+    node.edges
+        .iter()
+        .enumerate()
+        .map(|(i, e)| {
+            let q = if e.visits > 0 {
+                sign * e.total_value / e.visits as f32
+            } else {
+                fpu
+            };
+            let u = config.cpuct * e.prior * sqrt_total / (1.0 + e.visits as f32);
+            (i, q + u)
+        })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .unwrap()
+        .0
 }
 
 fn sample_chance_edge(node: &Node, rng: &mut impl Rng) -> usize {
