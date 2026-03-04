@@ -117,31 +117,16 @@ impl CatanEncoder {
         out
     }
 
-    /// Push node buildings for a single player (54).
+    /// Push building value for a single node.
     /// 0.0 = empty, 0.5 = settlement, 1.0 = city.
-    fn encode_nodes(state: &GameState, pid: Player, out: &mut Vec<f32>) {
-        let boards = &state.boards[pid];
-        for i in 0..54 {
-            let mask = 1u64 << i;
-            if boards.cities & mask != 0 {
-                out.push(1.0);
-            } else if boards.settlements & mask != 0 {
-                out.push(0.5);
-            } else {
-                out.push(0.0);
-            }
-        }
-    }
-
-    /// Push roads for a single player (72 binary).
-    fn encode_edges(state: &GameState, pid: Player, out: &mut Vec<f32>) {
-        let boards = &state.boards[pid];
-        for i in 0..72 {
-            out.push(if boards.road_network.roads & (1u128 << i) != 0 {
-                1.0
-            } else {
-                0.0
-            });
+    fn node_value(boards: &crate::game::state::PlayerBoards, i: u8) -> f32 {
+        let mask = 1u64 << i;
+        if boards.cities & mask != 0 {
+            1.0
+        } else if boards.settlements & mask != 0 {
+            0.5
+        } else {
+            0.0
         }
     }
 }
@@ -149,10 +134,10 @@ impl CatanEncoder {
 impl StateEncoder<GameState> for CatanEncoder {
     // Global: 8
     // Per-player (x2): 21 x 2 = 42
-    // Tiles: 95 + 19 + 19 = 133
-    // Nodes: 54 + 54 = 108
-    // Edges: 72 + 72 = 144
-    // Ports: 9 x 5 = 45
+    // Tile stream: 19 x 7 = 133  (resource one-hot 5 + dice prob 1 + robber 1)
+    // Node stream: 54 x 2 = 108  (current building + opponent building)
+    // Edge stream: 72 x 2 = 144  (current road + opponent road)
+    // Port stream: 9 x 5 = 45
     // Total: 8 + 42 + 133 + 108 + 144 + 45 = 480
     const FEATURE_SIZE: usize = 480;
 
@@ -181,20 +166,16 @@ impl StateEncoder<GameState> for CatanEncoder {
         Self::encode_player(state, current, out);
         Self::encode_player(state, opp, out);
 
-        // === Tiles (133) ===
+        // === Tile stream (19 x 7 = 133) ===
         let topo = &state.topology;
-
-        // Tile resource type: 19 tiles x 5 one-hot (desert = all zeros) (95)
+        const MAX_DICE_PROB: f32 = 5.0 / 36.0;
         for tile in &topo.tiles {
+            // Resource one-hot (5)
             let resource_idx = tile.terrain.resource().map(|r| r as usize);
             for i in 0..5 {
                 out.push(if resource_idx == Some(i) { 1.0 } else { 0.0 });
             }
-        }
-
-        // Tile dice probability: 19 tiles x 1, normalized by max (5/36) (19)
-        const MAX_DICE_PROB: f32 = 5.0 / 36.0;
-        for tile in &topo.tiles {
+            // Dice probability (1)
             let mut prob = 0.0f32;
             for roll in 2..=12u8 {
                 if topo.dice_to_tiles[roll as usize].contains(&tile.id) {
@@ -202,24 +183,34 @@ impl StateEncoder<GameState> for CatanEncoder {
                 }
             }
             out.push(prob / MAX_DICE_PROB);
+            // Robber (1)
+            out.push(if state.robber == tile.id { 1.0 } else { 0.0 });
         }
 
-        // Robber position one-hot (19)
-        for i in 0..19u8 {
-            out.push(if state.robber.0 == i { 1.0 } else { 0.0 });
+        // === Node stream (54 x 2 = 108) ===
+        let cur_board = &state.boards[current];
+        let opp_board = &state.boards[opp];
+        for i in 0..54u8 {
+            out.push(Self::node_value(cur_board, i));
+            out.push(Self::node_value(opp_board, i));
         }
 
-        // === Nodes (108) ===
-        Self::encode_nodes(state, current, out);
-        Self::encode_nodes(state, opp, out);
+        // === Edge stream (72 x 2 = 144) ===
+        for i in 0..72u8 {
+            let mask = 1u128 << i;
+            out.push(if cur_board.road_network.roads & mask != 0 {
+                1.0
+            } else {
+                0.0
+            });
+            out.push(if opp_board.road_network.roads & mask != 0 {
+                1.0
+            } else {
+                0.0
+            });
+        }
 
-        // === Edges (144) ===
-        Self::encode_edges(state, current, out);
-        Self::encode_edges(state, opp, out);
-
-        // === Ports (45) ===
-        // 9 ports in fixed position order; 5 binary per resource.
-        // Specific 2:1 port sets corresponding resource to 1.0; generic 3:1 = all zeros.
+        // === Port stream (9 x 5 = 45) ===
         for &port_type in &topo.port_types {
             let resource_idx = port_type.map(|r| r as usize);
             for i in 0..5 {
