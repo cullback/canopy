@@ -108,7 +108,7 @@ pub fn tournament<G: Game>(
         pb.inc(1);
     }
 
-    pb.finish_and_clear();
+    pb.finish();
 
     let total = num_games;
     println!(
