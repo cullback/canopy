@@ -77,6 +77,13 @@ fn app() -> Command {
         );
     }
 
+    cmd = cmd.arg(
+        Arg::new("balanced")
+            .long("balanced")
+            .action(clap::ArgAction::SetTrue)
+            .help("Use balanced dice instead of random"),
+    );
+
     for arg in cli::config_args() {
         cmd = cmd.arg(arg);
     }
@@ -173,6 +180,12 @@ fn train_command() -> Command {
                 .long("temp-threshold")
                 .default_value("20"),
         )
+        .arg(
+            Arg::new("balanced")
+                .long("balanced")
+                .action(clap::ArgAction::SetTrue)
+                .help("Use balanced dice instead of random"),
+        )
 }
 
 fn main() {
@@ -239,7 +252,13 @@ fn run_train(matches: &clap::ArgMatches) {
         &device,
     );
 
-    let new_state = |rng: &mut fastrand::Rng| game::new_game(rng.u64(..), Dice::default());
+    let dice = if matches.get_flag("balanced") {
+        Dice::Balanced(game::dice::BalancedDice::new())
+    } else {
+        Dice::Random
+    };
+
+    let new_state = move |rng: &mut fastrand::Rng| game::new_game(rng.u64(..), dice);
 
     canopy2::train::run_training::<GameState, encoder::CatanEncoder, _>(
         config,
@@ -301,16 +320,27 @@ fn run_tournament(matches: &clap::ArgMatches) {
 
     let mut rng = fastrand::Rng::new();
 
+    let dice = if matches.get_flag("balanced") {
+        Dice::Balanced(game::dice::BalancedDice::new())
+    } else {
+        Dice::Random
+    };
+
     println!(
-        "=== Catan Tournament: {} vs {} simulations, P1 ({}) vs P2 ({}), {} games ===\n",
+        "=== Catan Tournament: {} vs {} simulations, P1 ({}) vs P2 ({}), {} games, dice: {} ===\n",
         configs.0[0].num_simulations,
         configs.0[1].num_simulations,
         p1_eval_name,
         p2_eval_name,
         num_games,
+        if matches!(dice, Dice::Balanced(_)) {
+            "balanced"
+        } else {
+            "random"
+        },
     );
 
-    let new_game = |seed: u64| game::new_game(seed, Dice::default());
+    let new_game = move |seed: u64| game::new_game(seed, dice);
 
     let game_logs = tournament::tournament(new_game, &evaluators, &configs, num_games, &mut rng);
 
