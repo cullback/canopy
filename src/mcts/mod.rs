@@ -1,6 +1,6 @@
 mod tree;
 
-use crate::eval::NnOutput;
+use crate::eval::Evaluation;
 use crate::game::{Game, Status};
 use crate::player::Player;
 
@@ -41,19 +41,48 @@ pub struct SearchResult {
     pub selected_action: usize,
 }
 
+/// Continuation token for a pending neural-network evaluation.
+///
+/// Returned inside [`Step::NeedsEval`] when the search cannot proceed without
+/// an NN forward pass.  The caller evaluates `state` to produce an
+/// [`Evaluation`], then hands *both* the output and this token to
+/// [`Search::supply`].  The token's private `context` carries the internal
+/// bookkeeping (which node is being expanded, where in the tree to attach the
+/// result) so that `Search` itself needs no mutable "phase" field — all
+/// in-flight state lives here, making it impossible to call `supply` without
+/// a matching `NeedsEval`.
+pub struct PendingEval<G: Game> {
+    pub state: G,
+    context: Phase,
+}
+
 /// One step of the MCTS state machine.
 pub enum Step<G: Game> {
     /// Search needs an NN evaluation for this state.
-    NeedsEval(G),
-    /// Search complete.
+    NeedsEval(PendingEval<G>),
+    /// Search complete — improved policy, value, and selected action are ready.
     Done(SearchResult),
 }
 
-/// State machine for incremental MCTS search.
+/// Gumbel AlphaZero MCTS, driven as a state machine.
+///
+/// The search tree persists across moves so that subtrees explored in earlier
+/// searches can be reused (the tree is compacted, not rebuilt, on each
+/// `step_to`).  The three public methods form a simple protocol:
+///
+/// 1. [`start`](Self::start) — construct the search and begin the first search.
+/// 2. [`supply`](Self::supply) — feed an NN result back; may yield another
+///    `NeedsEval` or a final `Done`.
+/// 3. [`step_to`](Self::step_to) — after playing one or more actions, advance
+///    the tree and begin the next search with a (possibly updated) config.
+///
+/// The caller never touches the tree directly; all interaction goes through
+/// `Step` / `PendingEval`.
 pub struct Search<G: Game> {
     tree: Tree,
-    /// Root node. `None` only for terminal roots (Step::Done returned immediately)
-    /// or after `advance` when the child doesn't exist (handled by `resume`).
+    /// `None` when the root is terminal (we return `Done` immediately) or when
+    /// `step_to` walks through an action the tree hasn't expanded yet (we fall
+    /// back to `start` with a fresh tree).
     root: Option<NodeId>,
     root_state: G,
     bufs: Bufs,
@@ -61,7 +90,6 @@ pub struct Search<G: Game> {
     gumbel: Option<GumbelState>,
     /// Budget counter for vanilla (non-Gumbel) simulations (chance roots).
     vanilla_budget_remaining: u32,
-    phase: Phase,
 }
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -122,7 +150,18 @@ enum SimResult<G: Game> {
 // ── Public API ────────────────────────────────────────────────────────
 
 impl<G: Game> Search<G> {
-    pub fn new(root_state: &G, config: &Config, rng: &mut fastrand::Rng) -> (Self, Step<G>) {
+    /// Create a new search tree and begin searching from `root_state`.
+    ///
+    /// Returns `(Self, Step)` rather than `&mut self -> Step` (like
+    /// [`step_to`](Self::step_to)) because the `Search` doesn't exist yet —
+    /// the shape asymmetry between the two entry points is inherent, not an
+    /// oversight.
+    ///
+    /// If `root_state` is terminal, returns `Step::Done` immediately with a
+    /// zero policy and the terminal reward.  Otherwise returns `NeedsEval`
+    /// for the root (or, for a chance root that needs no eval, may run
+    /// simulations and return `NeedsEval` for the first leaf it reaches).
+    pub fn start(root_state: &G, config: &Config, rng: &mut fastrand::Rng) -> (Self, Step<G>) {
         let mut search = Self {
             tree: Tree::default(),
             root: None,
@@ -131,9 +170,6 @@ impl<G: Game> Search<G> {
             config: config.clone(),
             gumbel: None,
             vanilla_budget_remaining: config.num_simulations,
-            phase: Phase::ExpandingRoot {
-                player: Player::One,
-            },
         };
 
         // Terminal root — immediate result
@@ -155,17 +191,35 @@ impl<G: Game> Search<G> {
                 (search, step)
             }
             ExpandResult::NeedsEval(player) => {
-                search.phase = Phase::ExpandingRoot { player };
-                let step = Step::NeedsEval(root_state.clone());
+                let step = Step::NeedsEval(PendingEval {
+                    state: root_state.clone(),
+                    context: Phase::ExpandingRoot { player },
+                });
                 (search, step)
             }
         }
     }
 
-    pub fn supply(&mut self, eval: NnOutput, config: &Config, rng: &mut fastrand::Rng) -> Step<G> {
-        self.config = config.clone();
-
-        match self.phase {
+    /// Feed a neural-network evaluation back into the search.
+    ///
+    /// `pending` is the [`PendingEval`] token from the most recent
+    /// `NeedsEval` step — it carries the private context describing *where*
+    /// in the tree the new node should be attached.  Consuming the token
+    /// (rather than reading a mutable `phase` field on `self`) makes
+    /// mis-use a compile error: you can't call `supply` twice for the same
+    /// evaluation, and you can't call it without a preceding `NeedsEval`.
+    ///
+    /// Config is *not* accepted here because the search is mid-flight;
+    /// changing simulation budget or Gumbel parameters between leaf
+    /// expansions would invalidate Sequential Halving bookkeeping.  Config
+    /// changes take effect at the next [`step_to`](Self::step_to).
+    pub fn supply(
+        &mut self,
+        eval: Evaluation,
+        pending: PendingEval<G>,
+        rng: &mut fastrand::Rng,
+    ) -> Step<G> {
+        match pending.context {
             Phase::ExpandingRoot { player } => {
                 let state_key = self.root_state.state_key();
                 let root = self
@@ -206,15 +260,40 @@ impl<G: Game> Search<G> {
         self.run_simulations(rng)
     }
 
-    pub fn advance(&mut self, action: usize) {
-        let Some(root) = self.root else { return };
-        self.root = self.tree.child_for_action(root, action);
+    /// Advance the tree through `actions` played since the last search,
+    /// update config, and begin a new search from `root_state`.
+    ///
+    /// `actions` should contain every action applied to the game state since
+    /// the previous `start` or `step_to` — both player decisions and chance
+    /// outcomes — so the tree can follow the corresponding edges and reuse
+    /// the subtree.  The slice is walked left-to-right; if any action leads
+    /// to an unexpanded or missing child the remaining actions are skipped,
+    /// the old tree is discarded, and a fresh tree is built from scratch
+    /// (equivalent to calling `start`).
+    ///
+    /// `config` is stored for the duration of this search, so callers can
+    /// adjust simulation budget or Gumbel parameters between moves (e.g.
+    /// fewer sims late in a game when the position is decided).
+    pub fn step_to(
+        &mut self,
+        root_state: &G,
+        actions: &[usize],
+        config: &Config,
+        rng: &mut fastrand::Rng,
+    ) -> Step<G> {
+        // Advance tree through played actions
+        for &action in actions {
+            if let Some(root) = self.root {
+                self.root = self.tree.child_for_action(root, action);
+            }
+        }
         self.gumbel = None;
-    }
 
-    pub fn resume(&mut self, root_state: &G, config: &Config, rng: &mut fastrand::Rng) -> Step<G> {
+        // If any action in the slice wasn't found in the tree (e.g. an
+        // unexpanded chance outcome), root is None and we silently discard
+        // the old tree and start fresh.
         let Some(old_root) = self.root else {
-            let (new_search, step) = Search::new(root_state, config, rng);
+            let (new_search, step) = Search::start(root_state, config, rng);
             *self = new_search;
             return step;
         };
@@ -259,7 +338,8 @@ impl<G: Game> Search<G> {
     /// The current root node. Panics if root is unset (only possible for
     /// terminal roots returned as Step::Done, or after advance with no child).
     fn root(&self) -> NodeId {
-        self.root.unwrap()
+        self.root
+            .expect("root accessed before initialization or after terminal")
     }
 
     fn run_simulations(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
@@ -326,13 +406,15 @@ impl<G: Game> Search<G> {
                     player,
                     state_key,
                 } => {
-                    self.phase = Phase::Simulating {
-                        parent,
-                        edge_idx,
-                        player,
-                        state_key,
-                    };
-                    return Step::NeedsEval(state);
+                    return Step::NeedsEval(PendingEval {
+                        state,
+                        context: Phase::Simulating {
+                            parent,
+                            edge_idx,
+                            player,
+                            state_key,
+                        },
+                    });
                 }
             }
         }
@@ -362,13 +444,15 @@ impl<G: Game> Search<G> {
                     player,
                     state_key,
                 } => {
-                    self.phase = Phase::Simulating {
-                        parent,
-                        edge_idx,
-                        player,
-                        state_key,
-                    };
-                    return Step::NeedsEval(state);
+                    return Step::NeedsEval(PendingEval {
+                        state,
+                        context: Phase::Simulating {
+                            parent,
+                            edge_idx,
+                            player,
+                            state_key,
+                        },
+                    });
                 }
             }
         }
@@ -602,6 +686,12 @@ fn init_gumbel(
         (m as f32).log2().ceil() as u32
     };
     let budget = config.num_simulations;
+    // The paper's Sequential Halving allocates floor(n / (ceil(log2(m)) * |S_k|))
+    // per candidate per phase, where |S_k| shrinks each phase — so later phases
+    // with fewer candidates get proportionally more sims each. Here we allocate
+    // uniformly for phase 0; halve_candidates then redistributes the remaining
+    // budget over fewer candidates, achieving the same escalation adaptively
+    // while also reclaiming any rounding leftovers.
     let sims_per_candidate = if m > 0 && total_phases > 0 {
         (budget / (total_phases * m as u32)).max(1)
     } else {
@@ -665,6 +755,8 @@ fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Co
     let keep = scored.len().div_ceil(2);
     gs.candidates = scored.into_iter().take(keep).map(|(idx, _)| idx).collect();
 
+    // Reset round-robin for the new phase — candidate_idx = 0 is intentional
+    // since candidates has been re-sorted by score and the old indices are gone.
     gs.phase += 1;
     gs.candidates_simmed = 0;
     gs.candidate_idx = 0;
@@ -845,12 +937,12 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::new(&game, &config, &mut rng);
+        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
         let result = loop {
             step = match step {
-                Step::NeedsEval(s) => {
-                    let output = evaluator.evaluate(&s, &mut rng);
-                    sm.supply(output, &config, &mut rng)
+                Step::NeedsEval(pending) => {
+                    let output = evaluator.evaluate(&pending.state, &mut rng);
+                    sm.supply(output, pending, &mut rng)
                 }
                 Step::Done(r) => break r,
             };
@@ -877,12 +969,12 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::new(&game, &config, &mut rng);
+        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
         let result = loop {
             step = match step {
-                Step::NeedsEval(s) => {
-                    let output = evaluator.evaluate(&s, &mut rng);
-                    sm.supply(output, &config, &mut rng)
+                Step::NeedsEval(pending) => {
+                    let output = evaluator.evaluate(&pending.state, &mut rng);
+                    sm.supply(output, pending, &mut rng)
                 }
                 Step::Done(r) => break r,
             };
@@ -956,12 +1048,12 @@ mod tests {
         let mut rng = fastrand::Rng::new();
 
         let mut game = TwoStepGame::new();
-        let (mut search, mut step) = Search::new(&game, &config, &mut rng);
+        let (mut search, mut step) = Search::start(&game, &config, &mut rng);
         let result = loop {
             step = match step {
-                Step::NeedsEval(s) => {
-                    let output = evaluator.evaluate(&s, &mut rng);
-                    search.supply(output, &config, &mut rng)
+                Step::NeedsEval(pending) => {
+                    let output = evaluator.evaluate(&pending.state, &mut rng);
+                    search.supply(output, pending, &mut rng)
                 }
                 Step::Done(r) => break r,
             };
@@ -969,10 +1061,9 @@ mod tests {
 
         let action = result.selected_action;
         game.apply_action(action);
-        search.advance(action);
 
         let node_count_before = search.tree.node_count();
-        step = search.resume(&game, &config, &mut rng);
+        step = search.step_to(&game, &[action], &config, &mut rng);
         let node_count_after_compact = search.tree.node_count();
         assert!(
             node_count_after_compact < node_count_before,
@@ -981,9 +1072,9 @@ mod tests {
 
         let result2 = loop {
             step = match step {
-                Step::NeedsEval(s) => {
-                    let output = evaluator.evaluate(&s, &mut rng);
-                    search.supply(output, &config, &mut rng)
+                Step::NeedsEval(pending) => {
+                    let output = evaluator.evaluate(&pending.state, &mut rng);
+                    search.supply(output, pending, &mut rng)
                 }
                 Step::Done(r) => break r,
             };
@@ -1005,7 +1096,7 @@ mod tests {
         let config = Config::default();
         let mut rng = fastrand::Rng::new();
 
-        let (_sm, step) = Search::new(&game, &config, &mut rng);
+        let (_sm, step) = Search::start(&game, &config, &mut rng);
         match step {
             Step::Done(result) => {
                 assert_eq!(result.value, 1.0);
@@ -1025,12 +1116,12 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::new(&game, &config, &mut rng);
+        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
         let result = loop {
             step = match step {
-                Step::NeedsEval(s) => {
-                    let output = evaluator.evaluate(&s, &mut rng);
-                    sm.supply(output, &config, &mut rng)
+                Step::NeedsEval(pending) => {
+                    let output = evaluator.evaluate(&pending.state, &mut rng);
+                    sm.supply(output, pending, &mut rng)
                 }
                 Step::Done(r) => break r,
             };
@@ -1055,12 +1146,12 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::new(&game, &config, &mut rng);
+        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
         let result = loop {
             step = match step {
-                Step::NeedsEval(s) => {
-                    let output = evaluator.evaluate(&s, &mut rng);
-                    sm.supply(output, &config, &mut rng)
+                Step::NeedsEval(pending) => {
+                    let output = evaluator.evaluate(&pending.state, &mut rng);
+                    sm.supply(output, pending, &mut rng)
                 }
                 Step::Done(r) => break r,
             };

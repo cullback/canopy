@@ -1,4 +1,4 @@
-use canopy2::eval::{Evaluator, NnOutput};
+use canopy2::eval::{Evaluation, Evaluator};
 
 use crate::game::action::{
     self, BUY_DEV_CARD, CITY_END, CITY_START, END_TURN, MARITIME_END, MARITIME_START, MONOPOLY_END,
@@ -25,7 +25,7 @@ pub struct HeuristicEvaluator {
 }
 
 impl Evaluator<GameState> for HeuristicEvaluator {
-    fn evaluate(&self, state: &GameState, rng: &mut fastrand::Rng) -> NnOutput {
+    fn evaluate(&self, state: &GameState, rng: &mut fastrand::Rng) -> Evaluation {
         let mut out = self.rollout.evaluate(state, rng);
         out.policy_logits = policy_logits(state);
         out

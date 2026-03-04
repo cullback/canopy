@@ -2,7 +2,7 @@ use std::marker::PhantomData;
 
 use burn::prelude::*;
 
-use crate::eval::{Evaluator, NnOutput};
+use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
 
 /// Encodes a game state into a fixed-size feature vector for neural network input.
@@ -71,15 +71,10 @@ where
     E: StateEncoder<G>,
     M: PolicyValueNet<B>,
 {
-    fn evaluate(&self, state: &G, _rng: &mut fastrand::Rng) -> NnOutput {
+    fn evaluate(&self, state: &G, _rng: &mut fastrand::Rng) -> Evaluation {
         let current = match state.status() {
             Status::Ongoing(p) => p,
-            Status::Terminal(reward) => {
-                return NnOutput {
-                    policy_logits: vec![0.0; G::NUM_ACTIONS],
-                    value: reward,
-                };
-            }
+            Status::Terminal(reward) => return Evaluation::uniform(G::NUM_ACTIONS, reward),
         };
 
         let mut features = Vec::with_capacity(E::FEATURE_SIZE);
@@ -107,7 +102,7 @@ where
         let raw_value = value_data[0];
         let value = raw_value * current.sign();
 
-        NnOutput {
+        Evaluation {
             policy_logits: logits_data,
             value,
         }

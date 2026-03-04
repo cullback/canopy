@@ -1,16 +1,30 @@
 use crate::game::{Game, Status};
 
-/// Output from a neural network (or any position evaluator).
-pub struct NnOutput {
+/// Policy logits and value estimate produced by any [`Evaluator`].
+pub struct Evaluation {
     /// Logits over the full action space `[0, NUM_ACTIONS)`.
     pub policy_logits: Vec<f32>,
     /// Value estimate from P1's perspective.
     pub value: f32,
 }
 
+impl Evaluation {
+    /// Uniform-logit evaluation (all zeros) with the given value.
+    ///
+    /// Used for terminal states and rollout evaluators where there is no
+    /// meaningful policy signal — zero logits become a uniform distribution
+    /// after softmax.
+    pub fn uniform(num_actions: usize, value: f32) -> Self {
+        Self {
+            policy_logits: vec![0.0; num_actions],
+            value,
+        }
+    }
+}
+
 /// Evaluates a game state, producing policy logits and a value estimate.
 pub trait Evaluator<G: Game> {
-    fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> NnOutput;
+    fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation;
 }
 
 /// Default evaluator: random rollouts with uniform policy logits.
@@ -19,7 +33,7 @@ pub struct RolloutEvaluator {
 }
 
 impl<G: Game> Evaluator<G> for RolloutEvaluator {
-    fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> NnOutput {
+    fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation {
         assert!(self.num_rollouts > 0, "num_rollouts must be at least 1");
         let mut action_buf = Vec::with_capacity(G::NUM_ACTIONS);
         let mut chance_buf = Vec::with_capacity(G::NUM_ACTIONS);
@@ -28,10 +42,7 @@ impl<G: Game> Evaluator<G> for RolloutEvaluator {
             let mut s = state.clone();
             total += rollout(&mut s, &mut action_buf, &mut chance_buf, rng);
         }
-        NnOutput {
-            policy_logits: vec![0.0; G::NUM_ACTIONS],
-            value: total / self.num_rollouts as f32,
-        }
+        Evaluation::uniform(G::NUM_ACTIONS, total / self.num_rollouts as f32)
     }
 }
 

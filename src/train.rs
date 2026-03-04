@@ -104,12 +104,12 @@ fn run_search<G: Game, E: Evaluator<G>>(
     config: &Config,
     rng: &mut fastrand::Rng,
 ) -> SearchResult {
-    let (mut search, mut step) = Search::new(state, config, rng);
+    let (mut search, mut step) = Search::start(state, config, rng);
     loop {
         match step {
-            Step::NeedsEval(s) => {
-                let output = evaluator.evaluate(&s, rng);
-                step = search.supply(output, config, rng);
+            Step::NeedsEval(pending) => {
+                let output = evaluator.evaluate(&pending.state, rng);
+                step = search.supply(output, pending, rng);
             }
             Step::Done(result) => return result,
         }

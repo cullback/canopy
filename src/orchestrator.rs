@@ -1,12 +1,13 @@
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
-use crate::mcts::{Config, Search, Step};
+use crate::mcts::{Config, PendingEval, Search, Step};
 
 struct Slot<G: Game> {
     state: G,
     search: Option<Search<G>>,
     pending_step: Option<Step<G>>,
     chance_buf: Vec<(usize, f32)>,
+    actions_since_search: Vec<usize>,
 }
 
 /// Run `num_games` self-play games with batched evaluation.
@@ -31,6 +32,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
             search: None,
             pending_step: None,
             chance_buf: Vec::new(),
+            actions_since_search: Vec::new(),
         })
         .collect();
     let mut games_started = active as u32;
@@ -38,7 +40,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
 
     // Scratch space for batch collection
     let mut batch_indices = Vec::new();
-    let mut batch_states: Vec<G> = Vec::new();
+    let mut batch_pendings: Vec<PendingEval<G>> = Vec::new();
 
     while results.len() < num_games as usize {
         // Phase A — Advance non-search states
@@ -52,6 +54,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                         slot.state = game.clone();
                         slot.search = None;
                         slot.pending_step = None;
+                        slot.actions_since_search.clear();
                         games_started += 1;
                     } else {
                         slot.search = None;
@@ -69,18 +72,19 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                 if !slot.chance_buf.is_empty() {
                     let action = sample_chance(&slot.chance_buf, rng);
                     slot.state.apply_action(action);
-                    if let Some(search) = &mut slot.search {
-                        search.advance(action);
+                    if slot.search.is_some() {
+                        slot.actions_since_search.push(action);
                     }
                     continue;
                 }
 
                 // Decision node — resume existing search or start fresh
                 if let Some(search) = &mut slot.search {
-                    let step = search.resume(&slot.state, config, rng);
+                    let step = search.step_to(&slot.state, &slot.actions_since_search, config, rng);
+                    slot.actions_since_search.clear();
                     slot.pending_step = Some(step);
                 } else {
-                    let (search, step) = Search::new(&slot.state, config, rng);
+                    let (search, step) = Search::start(&slot.state, config, rng);
                     slot.search = Some(search);
                     slot.pending_step = Some(step);
                 }
@@ -91,13 +95,13 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
 
         // Phase B — Collect NeedsEval batch
         batch_indices.clear();
-        batch_states.clear();
+        batch_pendings.clear();
         for (i, slot) in slots.iter_mut().enumerate() {
             if let Some(Step::NeedsEval(_)) = &slot.pending_step
-                && let Some(Step::NeedsEval(state)) = slot.pending_step.take()
+                && let Some(Step::NeedsEval(pending)) = slot.pending_step.take()
             {
                 batch_indices.push(i);
-                batch_states.push(state);
+                batch_pendings.push(pending);
             }
         }
 
@@ -109,32 +113,30 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                 {
                     let action = result.selected_action;
                     slot.state.apply_action(action);
-                    if let Some(search) = &mut slot.search {
-                        search.advance(action);
-                    }
+                    slot.actions_since_search.push(action);
                 }
             }
             continue;
         }
 
         // Phase C — Evaluate batch
-        let outputs: Vec<_> = batch_states
+        let outputs: Vec<_> = batch_pendings
             .iter()
-            .map(|state| evaluator.evaluate(state, rng))
+            .map(|pending| evaluator.evaluate(&pending.state, rng))
             .collect();
 
         // Phase D — Supply results back
+        let mut pending_iter = batch_pendings.drain(..);
         for (idx, output) in batch_indices.iter().zip(outputs) {
+            let pending = pending_iter.next().unwrap();
             let slot = &mut slots[*idx];
             let search = slot.search.as_mut().unwrap();
-            let step = search.supply(output, config, rng);
+            let step = search.supply(output, pending, rng);
             match step {
                 Step::Done(result) => {
                     let action = result.selected_action;
                     slot.state.apply_action(action);
-                    if let Some(search) = &mut slot.search {
-                        search.advance(action);
-                    }
+                    slot.actions_since_search.push(action);
                     slot.pending_step = None;
                 }
                 needs_eval @ Step::NeedsEval(_) => {

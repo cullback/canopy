@@ -1,7 +1,7 @@
 use std::collections::{HashMap, VecDeque};
 use std::ops::{Index, IndexMut};
 
-use crate::eval::NnOutput;
+use crate::eval::Evaluation;
 use crate::game::{Game, Status};
 use crate::player::Player;
 
@@ -193,7 +193,7 @@ impl Tree {
 
     pub fn complete_expand(
         &mut self,
-        eval: &NnOutput,
+        eval: &Evaluation,
         bufs: &mut Bufs,
         player: Player,
         state_key: Option<u64>,
@@ -208,6 +208,15 @@ impl Tree {
 
     // ── Backprop ─────────────────────────────────────────────────
 
+    /// Walk the simulation path in reverse, updating edge visits and node Q values.
+    ///
+    /// Backprop walks only the current traversal path. Transposed nodes (reachable
+    /// via multiple paths) receive Q updates from whichever path visits them —
+    /// their Q is read correctly by all parents on the *next* visit, so the
+    /// approximation is self-correcting. Full DAG backprop (upward BFS from every
+    /// modified node) would be more precise but adds parent pointers, cycle
+    /// detection, and O(tree) worst-case cost per simulation. Standard practice
+    /// (AlphaZero, KataGo) is path-only backprop even with deduplication.
     pub fn backprop(&mut self, path: &[(NodeId, usize)]) {
         for &(nid, eidx) in path.iter().rev() {
             self.edges_mut(nid)[eidx].visits += 1;
@@ -271,7 +280,11 @@ impl Tree {
             }
         }
 
-        // Wrap old vecs in Option so we can .take() to move elements out
+        // Rust doesn't allow moving out of a Vec by index (it would leave a hole),
+        // so we wrap each element in Option and use .take() to move ownership out.
+        // This costs one extra allocation + bool per element; an alternative would
+        // be unsafe swap-remove or sentinel values, but this is only called once
+        // per move (between turns) so clarity wins over micro-optimization.
         let mut old_nodes: Vec<Option<NodeEntry>> = std::mem::take(&mut self.nodes)
             .into_iter()
             .map(Some)

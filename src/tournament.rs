@@ -40,12 +40,12 @@ pub fn play_match<G: Game>(
             let seat = if swap { player.opponent() } else { player };
             let eval = evaluators.0[seat as usize];
             let config = &configs[seat];
-            let (mut search, mut step) = Search::new(&state, config, rng);
+            let (mut search, mut step) = Search::start(&state, config, rng);
             let result = loop {
                 step = match step {
-                    Step::NeedsEval(s) => {
-                        let output = eval.evaluate(&s, rng);
-                        search.supply(output, config, rng)
+                    Step::NeedsEval(pending) => {
+                        let output = eval.evaluate(&pending.state, rng);
+                        search.supply(output, pending, rng)
                     }
                     Step::Done(r) => break r,
                 };
