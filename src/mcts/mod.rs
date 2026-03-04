@@ -804,7 +804,14 @@ fn advance_round_robin(
     }
 }
 
-/// Update q_min/q_max from nodes touched in backprop path.
+/// Update q_min/q_max from nodes touched in the backprop path.
+///
+/// Only walks the path (O(depth)), not the full tree (O(nodes)).  This
+/// means bounds are underestimates of the true range early in search,
+/// which compresses σ and makes selection more policy-driven.  As more
+/// of the tree is visited the bounds widen and Q gets more influence —
+/// a reasonable warmup: trust the policy when search data is sparse,
+/// trust Q as it becomes reliable.
 fn update_q_bounds(gs: &mut GumbelState, tree: &Tree, path: &[(NodeId, usize)]) {
     for &(nid, eidx) in path {
         let node_q = tree.q(nid);
