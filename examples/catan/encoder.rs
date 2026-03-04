@@ -24,10 +24,6 @@ const DICE_PROB: [f32; 13] = [
 /// Original deck composition per card type.
 const ORIGINAL_DECK: [f32; 5] = [14.0, 5.0, 2.0, 2.0, 2.0];
 
-fn b(x: bool) -> f32 {
-    f32::from(x)
-}
-
 pub struct CatanEncoder;
 
 impl CatanEncoder {
@@ -70,13 +66,13 @@ impl CatanEncoder {
         let has_lr = state
             .longest_road
             .is_some_and(|(lr_pid, _)| lr_pid == player_to_encode);
-        out.push(b(has_lr));
+        out.push(f32::from(has_lr));
 
         // Has largest army award (1)
         let has_la = state
             .largest_army
             .is_some_and(|(la_pid, _)| la_pid == player_to_encode);
-        out.push(b(has_la));
+        out.push(f32::from(has_la));
 
         // Longest road path length (1)
         out.push(state.boards[player_to_encode].road_network.longest_road() as f32 / 15.0);
@@ -163,7 +159,7 @@ impl StateEncoder<GameState> for CatanEncoder {
             Phase::GameOver(_) => unreachable!(),
         };
         for i in 0..8 {
-            out.push(b(i == phase_idx));
+            out.push(f32::from(i == phase_idx));
         }
 
         // === Per-player features (21 x 2 = 42) ===
@@ -177,7 +173,7 @@ impl StateEncoder<GameState> for CatanEncoder {
             // Resource one-hot (5)
             let resource_idx = tile.terrain.resource().map(|r| r as usize);
             for i in 0..5 {
-                out.push(b(resource_idx == Some(i)));
+                out.push(f32::from(resource_idx == Some(i)));
             }
             // Dice probability (1)
             let mut prob = 0.0f32;
@@ -188,7 +184,7 @@ impl StateEncoder<GameState> for CatanEncoder {
             }
             out.push(prob / MAX_DICE_PROB);
             // Robber (1)
-            out.push(b(state.robber == tile.id));
+            out.push(f32::from(state.robber == tile.id));
         }
 
         // === Node stream (54 x 2 = 108) ===
@@ -202,15 +198,15 @@ impl StateEncoder<GameState> for CatanEncoder {
         // === Edge stream (72 x 2 = 144) ===
         for i in 0..72u8 {
             let mask = 1u128 << i;
-            out.push(b(cur_board.road_network.roads & mask != 0));
-            out.push(b(opp_board.road_network.roads & mask != 0));
+            out.push(f32::from(cur_board.road_network.roads & mask != 0));
+            out.push(f32::from(opp_board.road_network.roads & mask != 0));
         }
 
         // === Port stream (9 x 5 = 45) ===
         for &port_type in &topo.port_types {
             let resource_idx = port_type.map(|r| r as usize);
             for i in 0..5 {
-                out.push(b(resource_idx == Some(i)));
+                out.push(f32::from(resource_idx == Some(i)));
             }
         }
 
