@@ -41,11 +41,11 @@ pub struct SearchResult {
     pub selected_action: usize,
 }
 
-/// Continuation token for a pending neural-network evaluation.
+/// Continuation token for a pending evaluation.
 ///
 /// Returned inside [`Step::NeedsEval`] when the search cannot proceed without
-/// an NN forward pass.  The caller evaluates `state` to produce an
-/// [`Evaluation`], then hands *both* the output and this token to
+/// an evaluation of a new state.  The caller evaluates `state` to produce an
+/// [`Evaluation`], then hands *both* the evaluation and this token to
 /// [`Search::supply`].  The token's private `context` carries the internal
 /// bookkeeping (which node is being expanded, where in the tree to attach the
 /// result) so that `Search` itself needs no mutable "phase" field — all
@@ -58,7 +58,7 @@ pub struct PendingEval<G: Game> {
 
 /// One step of the MCTS state machine.
 pub enum Step<G: Game> {
-    /// Search needs an NN evaluation for this state.
+    /// Search needs an evaluation for this state.
     NeedsEval(PendingEval<G>),
     /// Search complete — improved policy, value, and selected action are ready.
     Done(SearchResult),
@@ -71,7 +71,7 @@ pub enum Step<G: Game> {
 /// `step_to`).  The three public methods form a simple protocol:
 ///
 /// 1. [`start`](Self::start) — construct the search and begin the first search.
-/// 2. [`supply`](Self::supply) — feed an NN result back; may yield another
+/// 2. [`supply`](Self::supply) — feed an evaluation back; may yield another
 ///    `NeedsEval` or a final `Done`.
 /// 3. [`step_to`](Self::step_to) — after playing one or more actions, advance
 ///    the tree and begin the next search with a (possibly updated) config.
@@ -200,7 +200,7 @@ impl<G: Game> Search<G> {
         }
     }
 
-    /// Feed a neural-network evaluation back into the search.
+    /// Feed an evaluation back into the search.
     ///
     /// `pending` is the [`PendingEval`] token from the most recent
     /// `NeedsEval` step — it carries the private context describing *where*

@@ -17,7 +17,7 @@ pub(super) struct Edge {
     pub child: Option<NodeId>,
     /// Softmax probability (for v_mix weighting, chance sampling).
     pub prior: f32,
-    /// Raw NN logit (for Gumbel/improved-policy selection).
+    /// Raw policy logit (for Gumbel/improved-policy selection).
     pub logit: f32,
     pub visits: u32,
 }
