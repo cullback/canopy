@@ -26,6 +26,7 @@ pub struct Sample {
     pub q: f32,
 }
 
+#[derive(Serialize)]
 pub struct TrainConfig {
     pub iterations: usize,
     pub games_per_iter: usize,
@@ -36,9 +37,8 @@ pub struct TrainConfig {
     pub lr_final: f64,
     pub lr_decay_after: usize,
     pub replay_window: usize,
-    /// Save a checkpoint every N iterations (0 = every iteration)
-    pub checkpoint_every: usize,
     pub output_dir: String,
+    #[serde(skip)]
     pub resume: Option<String>,
     /// Iteration at which q fully replaces z as value target (0 = pure z always)
     pub q_blend_generations: usize,
@@ -829,6 +829,11 @@ pub fn run_training<G, E, M>(
     };
     eprintln!("run directory: {}", run_dir.display());
 
+    // Save config snapshot
+    let config_path = run_dir.join("config.json");
+    std::fs::write(&config_path, serde_json::to_string_pretty(&config).unwrap())
+        .expect("failed to write config.json");
+
     // CSV metrics file
     let csv_path = run_dir.join("metrics.csv");
     let mut csv = if start_iteration > 0 && csv_path.exists() {
@@ -845,7 +850,13 @@ pub fn run_training<G, E, M>(
             w,
             "iteration,train_policy_loss,train_value_loss,val_policy_loss,val_value_loss,\
              avg_game_length,p1_wins,p2_wins,draws,avg_policy_entropy,replay_buffer_samples,\
-             bench_wins,bench_losses,bench_draws,lr,q_alpha,self_play_secs,train_secs,bench_secs"
+             bench_wins,bench_losses,bench_draws,lr,q_alpha,self_play_secs,train_secs,bench_secs,\
+             games,samples_this_iter,min_game_length,max_game_length,\
+             avg_z,avg_q,stddev_z,stddev_q,avg_value_target,\
+             avg_policy_max_prob,\
+             games_per_sec,samples_per_sec,total_elapsed_secs,\
+             bench_win_rate,\
+             mcts_sims,gumbel_m,c_visit,c_scale,epochs,batch_size,replay_window,explore_moves,games_per_iter"
         )
         .expect("failed to write CSV header");
         w
@@ -891,9 +902,13 @@ pub fn run_training<G, E, M>(
         let mut p2_wins = 0u32;
         let mut draws = 0u32;
         let mut total_turns = 0u32;
+        let mut min_game_length = u32::MAX;
+        let mut max_game_length = 0u32;
 
         for (game_samples, stats) in results {
             total_turns += stats.num_turns;
+            min_game_length = min_game_length.min(stats.num_turns);
+            max_game_length = max_game_length.max(stats.num_turns);
             match stats.winner {
                 Some(Player::One) => p1_wins += 1,
                 Some(Player::Two) => p2_wins += 1,
@@ -903,6 +918,13 @@ pub fn run_training<G, E, M>(
         }
 
         let self_play_elapsed = iter_start.elapsed();
+        let games_done = p1_wins + p2_wins + draws;
+        let samples_this_iter = iter_samples.len();
+
+        // Fix min_game_length when no games played
+        if games_done == 0 {
+            min_game_length = 0;
+        }
 
         // Compute average policy entropy
         let avg_entropy: f64 = if iter_samples.is_empty() {
@@ -917,6 +939,39 @@ pub fn run_training<G, E, M>(
                         .map(|&p| -(p as f64) * (p as f64).ln())
                         .sum::<f64>()
                 })
+                .sum::<f64>()
+                / iter_samples.len() as f64
+        };
+
+        // Value diagnostics
+        let (avg_z, avg_q, stddev_z, stddev_q) = if iter_samples.is_empty() {
+            (0.0f64, 0.0f64, 0.0f64, 0.0f64)
+        } else {
+            let n = iter_samples.len() as f64;
+            let sum_z: f64 = iter_samples.iter().map(|s| s.z as f64).sum();
+            let sum_q: f64 = iter_samples.iter().map(|s| s.q as f64).sum();
+            let mean_z = sum_z / n;
+            let mean_q = sum_q / n;
+            let var_z: f64 = iter_samples
+                .iter()
+                .map(|s| (s.z as f64 - mean_z).powi(2))
+                .sum::<f64>()
+                / n;
+            let var_q: f64 = iter_samples
+                .iter()
+                .map(|s| (s.q as f64 - mean_q).powi(2))
+                .sum::<f64>()
+                / n;
+            (mean_z, mean_q, var_z.sqrt(), var_q.sqrt())
+        };
+
+        // Policy confidence: mean max probability in improved policy
+        let avg_policy_max_prob: f64 = if iter_samples.is_empty() {
+            0.0
+        } else {
+            iter_samples
+                .iter()
+                .map(|s| s.policy_target.iter().copied().fold(0.0f32, f32::max) as f64)
                 .sum::<f64>()
                 / iter_samples.len() as f64
         };
@@ -956,30 +1011,23 @@ pub fn run_training<G, E, M>(
 
         let train_elapsed = train_start.elapsed();
 
-        // Checkpoint
-        let ckpt_every = if config.checkpoint_every == 0 {
-            1
-        } else {
-            config.checkpoint_every
+        // Checkpoint every iteration
+        let iter_num = iteration + 1;
+
+        model.save(&run_dir, iter_num);
+
+        let meta = CheckpointMeta {
+            iteration: iter_num,
+            rng_seed: rng.u64(..),
         };
-        if (iteration + 1) % ckpt_every == 0 || iteration + 1 == config.iterations {
-            let iter_num = iteration + 1;
+        let meta_path = run_dir.join(format!("checkpoint_iter_{iter_num}.json"));
+        std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
+            .expect("failed to save checkpoint metadata");
 
-            model.save(&run_dir, iter_num);
-
-            let meta = CheckpointMeta {
-                iteration: iter_num,
-                rng_seed: rng.u64(..),
-            };
-            let meta_path = run_dir.join(format!("checkpoint_iter_{iter_num}.json"));
-            std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
-                .expect("failed to save checkpoint metadata");
-
-            eprintln!(
-                "checkpoint: {}",
-                run_dir.join(format!("model_iter_{iter_num}")).display()
-            );
-        }
+        eprintln!(
+            "checkpoint: {}",
+            run_dir.join(format!("model_iter_{iter_num}")).display()
+        );
 
         // Benchmark
         let bench_start = Instant::now();
@@ -1004,7 +1052,6 @@ pub fn run_training<G, E, M>(
         let avg_iter_time = total_elapsed / iters_this_session as u32;
         let eta = avg_iter_time * iters_remaining as u32;
 
-        let games_done = p1_wins + p2_wins + draws;
         let avg_turns = if games_done > 0 {
             total_turns / games_done
         } else {
@@ -1046,9 +1093,39 @@ pub fn run_training<G, E, M>(
         } else {
             0.0
         };
+
+        // Throughput
+        let iter_total_secs = iter_start.elapsed().as_secs_f64();
+        let games_per_sec = if self_play_elapsed.as_secs_f64() > 0.0 {
+            games_done as f64 / self_play_elapsed.as_secs_f64()
+        } else {
+            0.0
+        };
+        let samples_per_sec = if iter_total_secs > 0.0 {
+            samples_this_iter as f64 / iter_total_secs
+        } else {
+            0.0
+        };
+
+        // avg_value_target = (1-alpha)*avg_z + alpha*avg_q
+        let avg_value_target = (1.0 - alpha as f64) * avg_z + alpha as f64 * avg_q;
+
+        // Bench win rate (NaN if bench disabled)
+        let bench_win_rate: f64 = if config.bench_games > 0 {
+            bench_wins as f64 / config.bench_games as f64
+        } else {
+            f64::NAN
+        };
+
         writeln!(
             csv,
-            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.6},{},{},{},{},{:.6},{:.4},{:.3},{:.3},{:.3}",
+            "{},{:.6},{:.6},{:.6},{:.6},{:.6},{},{},{},{:.6},{},{},{},{},{:.6},{:.4},{:.3},{:.3},{:.3},\
+             {},{},{},{},\
+             {:.6},{:.6},{:.6},{:.6},{:.6},\
+             {:.6},\
+             {:.3},{:.3},{:.3},\
+             {:.6},\
+             {},{},{},{},{},{},{},{},{}",
             iters_done,
             metrics.train_policy_loss,
             metrics.train_value_loss,
@@ -1068,6 +1145,30 @@ pub fn run_training<G, E, M>(
             self_play_elapsed.as_secs_f64(),
             train_elapsed.as_secs_f64(),
             bench_elapsed.as_secs_f64(),
+            // New columns
+            games_done,
+            samples_this_iter,
+            min_game_length,
+            max_game_length,
+            avg_z,
+            avg_q,
+            stddev_z,
+            stddev_q,
+            avg_value_target,
+            avg_policy_max_prob,
+            games_per_sec,
+            samples_per_sec,
+            total_elapsed.as_secs_f64(),
+            bench_win_rate,
+            config.mcts_sims,
+            config.gumbel_m,
+            config.c_visit,
+            config.c_scale,
+            config.epochs,
+            config.batch_size,
+            config.replay_window,
+            config.explore_moves,
+            config.games_per_iter,
         )
         .expect("failed to write CSV row");
         csv.flush().ok();

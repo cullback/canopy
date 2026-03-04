@@ -139,11 +139,6 @@ fn train_command() -> Command {
                 .default_value("40"),
         )
         .arg(
-            Arg::new("checkpoint-every")
-                .long("checkpoint-every")
-                .default_value("5"),
-        )
-        .arg(
             Arg::new("output")
                 .long("output")
                 .default_value("checkpoints"),
@@ -234,7 +229,6 @@ fn run_train(matches: &clap::ArgMatches) {
         lr_final: parse("lr-final").parse().unwrap(),
         lr_decay_after: parse("lr-decay-after").parse().unwrap(),
         replay_window: parse("replay-window").parse().unwrap(),
-        checkpoint_every: parse("checkpoint-every").parse().unwrap(),
         output_dir: parse("output"),
         resume: matches.get_one::<String>("resume").cloned(),
         q_blend_generations: parse("q-blend-gen").parse().unwrap(),
