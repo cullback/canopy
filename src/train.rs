@@ -97,14 +97,13 @@ pub trait TrainableModel<G: Game>: Send {
 // Search helper
 // ---------------------------------------------------------------------------
 
-/// Drive the MCTS search state machine to completion.
-fn run_search<G: Game, E: Evaluator<G>>(
-    state: &G,
+/// Drive an in-progress MCTS search state machine to completion.
+fn drive_search<G: Game, E: Evaluator<G>>(
+    search: &mut Search<G>,
+    mut step: Step<G>,
     evaluator: &E,
-    config: &Config,
     rng: &mut fastrand::Rng,
 ) -> SearchResult {
-    let (mut search, mut step) = Search::start(state, config, rng);
     loop {
         match step {
             Step::NeedsEval(pending) => {
@@ -114,6 +113,17 @@ fn run_search<G: Game, E: Evaluator<G>>(
             Step::Done(result) => return result,
         }
     }
+}
+
+/// Create a fresh search and drive it to completion.
+fn run_search<G: Game, E: Evaluator<G>>(
+    state: &G,
+    evaluator: &E,
+    config: &Config,
+    rng: &mut fastrand::Rng,
+) -> SearchResult {
+    let (mut search, step) = Search::start(state, config, rng);
+    drive_search(&mut search, step, evaluator, rng)
 }
 
 // ---------------------------------------------------------------------------
@@ -174,12 +184,17 @@ where
     let mut turn_count: u32 = 0;
     let mut last_player: Option<Player> = None;
 
+    // Tree reuse: persist search across moves, track intermediate actions
+    let mut search: Option<Search<G>> = None;
+    let mut actions_since_search: Vec<usize> = Vec::new();
+
     loop {
         // Resolve chance events
         chance_buf.clear();
         state.chance_outcomes(&mut chance_buf);
         if !chance_buf.is_empty() {
             let action = sample_chance(&chance_buf, &mut rng);
+            actions_since_search.push(action);
             state.apply_action(action);
             continue;
         }
@@ -200,12 +215,26 @@ where
 
         // Skip forced moves (single legal action)
         if actions.len() == 1 {
+            actions_since_search.push(actions[0]);
             state.apply_action(actions[0]);
             continue;
         }
 
-        // Run MCTS
-        let result = run_search(&state, evaluator, &mcts_config, &mut rng);
+        // Run MCTS, reusing tree from previous search
+        let result = match search {
+            Some(ref mut s) => {
+                let step = s.step_to(&state, &actions_since_search, &mcts_config, &mut rng);
+                actions_since_search.clear();
+                drive_search(s, step, evaluator, &mut rng)
+            }
+            None => {
+                let (mut s, step) = Search::start(&state, &mcts_config, &mut rng);
+                let result = drive_search(&mut s, step, evaluator, &mut rng);
+                search = Some(s);
+                actions_since_search.clear();
+                result
+            }
+        };
 
         // Use improved policy directly as training target
         let policy_target = result.policy.clone();
@@ -231,6 +260,7 @@ where
         } else {
             result.selected_action
         };
+        actions_since_search.push(chosen);
         state.apply_action(chosen);
     }
 
