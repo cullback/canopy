@@ -59,7 +59,12 @@ Controls how training data is sampled and aged out — e.g., sampling each posit
 ## References
 
 - https://davidstarsilver.wordpress.com/wp-content/uploads/2025/04/gumbel-alphazero.pdf
+- https://brantondemoss.com/writing/kata/
 - https://gwern.net/doc/reinforcement-learning/model/alphago/2017-silver.pdf#page=5
 - https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md
 - [Enhancements for Real-Time Monte-Carlo Tree Search in General Video Game Playing (2024)](https://arxiv.org/html/2407.03049v1)
   - progressive simulation
+
+  repos
+
+  - https://github.com/google-deepmind/mctx
