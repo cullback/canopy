@@ -16,8 +16,6 @@ MCTS framework for two player games.
 
 ## Optimizations
 
----
-
 > **DAG-based graph search instead of a tree**
 
 Replaces the tree with a directed acyclic graph, enabling transposition tables where different move sequences reaching the same board state share a single node. Used by KataGo since v1.12. Degrades gracefully to normal MCTS if no transpositions exist. Retrofit cost is extreme: backpropagation must handle multiple parents, node lifetime management changes completely, and every traversal routine needs rewriting.
@@ -34,13 +32,13 @@ Splits the MCTS loop so that search pauses at leaf nodes, batches multiple pendi
 
 Stores all nodes in a pre-allocated arena (no per-node heap allocation), using integer indices instead of pointers. Supports tree reuse by rerooting the DAG after each move rather than discarding it. If you start with standard heap-allocated nodes, switching to arena indexing later means rewriting every node access pattern across the codebase.
 
-> **Canonical board representation**
-
-For games with symmetry, the game model always maps to a single canonical state (e.g., always placing the first settlement in a canonical position, or normalizing player identity). Eliminates the need for data augmentation and makes transposition tables far more effective. Must be designed into the game model interface from the start — retrofitting changes state hashing, transposition keys, and invalidates all previously stored training data.
-
 > **Value target mixing**
 
 Mixes the actual game outcome `z` with the MCTS root Q-value `q` as the training target: `target = α·z + (1-α)·q`, where α linearly falls from 1.0 to 0.0 over ~20 generations. Critical for Catan where dice variance makes pure `z` noisy. The key architectural requirement is storing `(state, π, z, q)` tuples in training samples from day one — if you only store `(state, π, z)`, adding `q` later means discarding all historical training data.
+
+> **Canonical board representation**
+
+For games with symmetry, the game model always maps to a single canonical state (e.g., always placing the first settlement in a canonical position, or normalizing player identity). Eliminates the need for data augmentation and makes transposition tables far more effective. Must be designed into the game model interface from the start — retrofitting changes state hashing, transposition keys, and invalidates all previously stored training data.
 
 > **Progressive simulation**
 
