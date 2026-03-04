@@ -25,7 +25,7 @@ const DICE_PROB: [f32; 13] = [
 const ORIGINAL_DECK: [f32; 5] = [14.0, 5.0, 2.0, 2.0, 2.0];
 
 fn b(x: bool) -> f32 {
-    x as u8 as f32
+    f32::from(x)
 }
 
 pub struct CatanEncoder;
