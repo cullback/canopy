@@ -9,8 +9,8 @@ use crate::game;
 use crate::game::action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
     MARITIME_END, MARITIME_START, MONOPOLY_END, MONOPOLY_START, PLAY_KNIGHT, PLAY_ROAD_BUILDING,
-    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, SETTLEMENT_END, SETTLEMENT_START, STEAL,
-    YOP_END, YOP_START,
+    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, SETTLEMENT_END, SETTLEMENT_START, YOP_END,
+    YOP_START,
 };
 use crate::game::board::{Port, TileId};
 use crate::game::dice::Dice;
@@ -290,7 +290,6 @@ fn format_action(action: ActionId, state: &GameState) -> String {
         }
         MONOPOLY_START..MONOPOLY_END => format!("Monopoly: {}", action.monopoly_resource()),
         ROBBER_START..ROBBER_END => format!("Move robber to tile {}", action.robber_tile().0),
-        STEAL => "Steal from opponent".to_string(),
         DISCARD_START..DISCARD_END => format!("Discard {}", action.discard_resource()),
         MARITIME_START..MARITIME_END => {
             let (give, recv) = action.maritime_trade();
@@ -309,7 +308,6 @@ fn format_phase(phase: &Phase) -> String {
         Phase::Roll => "Roll".to_string(),
         Phase::Discard { player, remaining } => format!("{player} discards ({remaining} left)"),
         Phase::MoveRobber => "Move Robber".to_string(),
-        Phase::Steal => "Steal".to_string(),
         Phase::StealResolve => "Steal Resolve".to_string(),
         Phase::Main => "Main".to_string(),
         Phase::RoadBuilding { roads_left } => format!("Road Building ({roads_left} left)"),

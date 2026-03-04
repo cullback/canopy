@@ -6,7 +6,11 @@ pub mod game;
 pub mod game_log;
 pub mod graph;
 pub mod mcts;
+#[cfg(feature = "nn")]
+pub mod nn;
 pub mod orchestrator;
 pub mod player;
 pub mod tournament;
+#[cfg(feature = "nn")]
+pub mod train;
 pub mod utils;

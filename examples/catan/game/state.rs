@@ -42,6 +42,8 @@ pub struct PlayerState {
     pub roads_left: u8,
     /// Whether a dev card has been played this turn (limit one per turn).
     pub has_played_dev_card_this_turn: bool,
+    /// Cumulative count of each dev card type played (for information tracking).
+    pub dev_cards_played: DevCardArray,
     /// VP from buildings only: +1 per settlement, +1 more per city upgrade.
     /// Does **not** include longest road, largest army, or VP dev cards.
     /// For total VP, combine with `dev_cards[VictoryPoint]` and the
@@ -65,6 +67,7 @@ impl Default for PlayerState {
             cities_left: 4,
             roads_left: 15,
             has_played_dev_card_this_turn: false,
+            dev_cards_played: DevCardArray::default(),
             building_vps: 0,
             trade_ratios: [4; 5],
         }
@@ -78,7 +81,6 @@ pub enum Phase {
     Roll,
     Discard { player: Player, remaining: u8 },
     MoveRobber,
-    Steal,
     StealResolve,
     Main,
     RoadBuilding { roads_left: u8 },

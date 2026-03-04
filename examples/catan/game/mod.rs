@@ -14,8 +14,8 @@ use canopy2::player::Player;
 use action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
     MARITIME_END, MARITIME_START, MONOPOLY_END, MONOPOLY_START, PLAY_KNIGHT, PLAY_ROAD_BUILDING,
-    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, SETTLEMENT_END, SETTLEMENT_START, STEAL,
-    YOP_END, YOP_START,
+    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, SETTLEMENT_END, SETTLEMENT_START, YOP_END,
+    YOP_START,
 };
 use board::{EdgeId, NodeId, TileId};
 use dev_card::DevCardKind;
@@ -152,7 +152,6 @@ pub fn apply(state: &mut GameState, action: ActionId) {
             let tid = action.robber_tile();
             apply_move_robber(state, tid);
         }
-        STEAL => apply_steal(state),
         DISCARD_START..DISCARD_END => {
             let r = action.discard_resource();
             apply_discard_resource(state, r);
@@ -455,6 +454,7 @@ fn apply_buy_dev_card(state: &mut GameState) {
 fn apply_play_knight(state: &mut GameState) {
     state.current_mut().dev_cards[DevCardKind::Knight] -= 1;
     state.current_mut().has_played_dev_card_this_turn = true;
+    state.current_mut().dev_cards_played[DevCardKind::Knight] += 1;
     state.current_mut().knights_played += 1;
 
     update_largest_army(state);
@@ -464,12 +464,14 @@ fn apply_play_knight(state: &mut GameState) {
 fn apply_play_road_building(state: &mut GameState) {
     state.current_mut().dev_cards[DevCardKind::RoadBuilding] -= 1;
     state.current_mut().has_played_dev_card_this_turn = true;
+    state.current_mut().dev_cards_played[DevCardKind::RoadBuilding] += 1;
     state.phase = Phase::RoadBuilding { roads_left: 2 };
 }
 
 fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
     state.current_mut().dev_cards[DevCardKind::YearOfPlenty] -= 1;
     state.current_mut().has_played_dev_card_this_turn = true;
+    state.current_mut().dev_cards_played[DevCardKind::YearOfPlenty] += 1;
 
     if state.bank[r1] > 0 {
         state.bank[r1] -= 1;
@@ -484,6 +486,7 @@ fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
 fn apply_monopoly(state: &mut GameState, resource: Resource) {
     state.current_mut().dev_cards[DevCardKind::Monopoly] -= 1;
     state.current_mut().has_played_dev_card_this_turn = true;
+    state.current_mut().dev_cards_played[DevCardKind::Monopoly] += 1;
 
     let current = state.current_player;
     let opponent = current.opponent();
@@ -501,14 +504,10 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
     let has_target = (tile_mask & opp_buildings) != 0 && state.players[opp].hand.total() > 0;
 
     if has_target && state.public_vps(opp) >= FRIENDLY_ROBBER_VP {
-        state.phase = Phase::Steal;
+        state.phase = Phase::StealResolve;
     } else {
         state.phase = Phase::Main;
     }
-}
-
-fn apply_steal(state: &mut GameState) {
-    state.phase = Phase::StealResolve;
 }
 
 fn apply_discard_resource(state: &mut GameState, resource: Resource) {
@@ -1401,8 +1400,8 @@ mod tests {
             state.phase = Phase::MoveRobber;
             apply(&mut state, robber_id(tid));
             assert!(
-                matches!(state.phase, Phase::Steal),
-                "above threshold with cards, should enter Steal, got {:?}",
+                matches!(state.phase, Phase::StealResolve),
+                "above threshold with cards, should enter StealResolve, got {:?}",
                 state.phase
             );
         }

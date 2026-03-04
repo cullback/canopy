@@ -69,6 +69,10 @@ impl DevCardDeck {
         Some(self.cards[self.len as usize])
     }
 
+    pub fn remaining(&self) -> u8 {
+        self.len
+    }
+
     pub fn is_empty(&self) -> bool {
         self.len == 0
     }

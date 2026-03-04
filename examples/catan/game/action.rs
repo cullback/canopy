@@ -9,7 +9,7 @@ use super::state::{GameState, Phase};
 
 // --- Action space ---
 
-pub const ACTION_SPACE: usize = 250;
+pub const ACTION_SPACE: usize = 249;
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ActionId(pub u8);
@@ -53,7 +53,6 @@ impl std::fmt::Display for ActionId {
                 write!(f, "mono({r})")
             }
             ROBBER_START..ROBBER_END => write!(f, "robber({})", i - ROBBER_START),
-            STEAL => write!(f, "steal"),
             DISCARD_START..DISCARD_END => {
                 let r = ALL_RESOURCES[(i - DISCARD_START) as usize];
                 write!(f, "discard({r})")
@@ -86,11 +85,10 @@ pub const MONOPOLY_START: u8 = 200; // 200..205
 pub const MONOPOLY_END: u8 = 205;
 pub const ROBBER_START: u8 = 205; // 205..224
 pub const ROBBER_END: u8 = 224;
-pub const STEAL: u8 = 224;
-pub const DISCARD_START: u8 = 225; // 225..230
-pub const DISCARD_END: u8 = 230;
-pub const MARITIME_START: u8 = 230; // 230..250
-pub const MARITIME_END: u8 = 250;
+pub const DISCARD_START: u8 = 224; // 224..229
+pub const DISCARD_END: u8 = 229;
+pub const MARITIME_START: u8 = 229; // 229..249
+pub const MARITIME_END: u8 = 249;
 
 // --- Encode helpers ---
 
@@ -224,9 +222,6 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
         }
         Phase::Discard { player, .. } => populate_discard(state, *player, actions),
         Phase::MoveRobber => populate_move_robber(state, actions),
-        Phase::Steal => {
-            actions.push(ActionId(STEAL));
-        }
         Phase::Main => populate_main(state, actions),
         Phase::RoadBuilding { roads_left } => {
             populate_road_building(state, *roads_left, actions);
