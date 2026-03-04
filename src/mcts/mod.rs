@@ -617,11 +617,27 @@ fn completed_q(tree: &Tree, edge: &tree::Edge, vmix_val: f32) -> f32 {
     }
 }
 
-/// Policy-weighted value mixing (paper's formula).
+/// Mixed value approximation (Appendix D, Equation 33).
 ///
-/// Weights over *all* edges using the full prior distribution: visited
-/// edges contribute their child's Q, unvisited edges fall back to the
-/// node's own value estimate (same stand-in `completed_q` uses).
+/// Approximates v_π = Σ_a π(a)·q(a), the expected value under the policy.
+///
+/// ```text
+/// v_mix = (v̂ + N_total · Σ_{visited} π(a)·q(a) / Σ_{visited} π(b)) / (1 + N_total)
+/// ```
+///
+/// **Why prior weights, not visit counts?**  We're estimating an expectation
+/// under the *policy*, so the natural weights are the policy probabilities.
+/// Visit counts reflect where the search happened to look (biased by
+/// Gumbel's forced root edges), not what the policy believes.
+///
+/// **Why renormalize over visited edges only?**  We only know q(a) for
+/// visited actions.  Dividing by the visited prior mass gives the
+/// conditional expectation E_π[q | visited], the best estimate we have.
+///
+/// **Why interpolate with v̂?**  Early in search, few edges are visited and
+/// the Q estimates are noisy, so we lean on the value network's prior.  As
+/// N_total grows, the prior-weighted Q average becomes reliable and
+/// dominates.
 fn v_mix(tree: &Tree, id: NodeId) -> f32 {
     let edges = tree.edges(id);
     let n_total: f32 = edges.iter().map(|e| e.visits).sum::<u32>() as f32;
@@ -630,14 +646,20 @@ fn v_mix(tree: &Tree, id: NodeId) -> f32 {
     }
 
     let v = tree.utility(id);
-    let mut weighted_q = 0.0f32;
+    let mut prior_weighted_q = 0.0f32;
+    let mut visited_prior_sum = 0.0f32;
     for edge in edges {
-        let q = match edge.child {
-            Some(child) => tree.q(child),
-            None => v,
-        };
-        weighted_q += edge.prior * q;
+        if let Some(child) = edge.child {
+            prior_weighted_q += edge.prior * tree.q(child);
+            visited_prior_sum += edge.prior;
+        }
     }
+    // Conditional expectation of q under the policy, restricted to visited edges.
+    let weighted_q = if visited_prior_sum > 0.0 {
+        prior_weighted_q / visited_prior_sum
+    } else {
+        0.0
+    };
 
     (v + n_total * weighted_q) / (1.0 + n_total)
 }
