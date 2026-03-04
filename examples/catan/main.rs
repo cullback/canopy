@@ -169,16 +169,19 @@ fn train_command() -> Command {
                 .long("bench-mcts")
                 .default_value("400"),
         )
-        .arg(Arg::new("cpuct").long("cpuct").default_value("2.5"))
         .arg(
-            Arg::new("temperature")
-                .long("temperature")
-                .default_value("1.0"),
+            Arg::new("gumbel-m")
+                .long("gumbel-m")
+                .default_value("16")
+                .help("Gumbel-Top-k sampled actions at root"),
         )
+        .arg(Arg::new("c-visit").long("c-visit").default_value("50.0"))
+        .arg(Arg::new("c-scale").long("c-scale").default_value("1.0"))
         .arg(
-            Arg::new("temp-threshold")
-                .long("temp-threshold")
-                .default_value("20"),
+            Arg::new("explore-moves")
+                .long("explore-moves")
+                .default_value("30")
+                .help("Early-game turns where action is sampled from improved policy"),
         )
         .arg(
             Arg::new("balanced")
@@ -237,9 +240,10 @@ fn run_train(matches: &clap::ArgMatches) {
         q_blend_generations: parse("q-blend-gen").parse().unwrap(),
         bench_games: parse("bench-games").parse().unwrap(),
         bench_mcts: parse("bench-mcts").parse().unwrap(),
-        cpuct: parse("cpuct").parse().unwrap(),
-        temperature: parse("temperature").parse().unwrap(),
-        temp_threshold: parse("temp-threshold").parse().unwrap(),
+        gumbel_m: parse("gumbel-m").parse().unwrap(),
+        c_visit: parse("c-visit").parse().unwrap(),
+        c_scale: parse("c-scale").parse().unwrap(),
+        explore_moves: parse("explore-moves").parse().unwrap(),
     };
 
     let device = NdArrayDevice::Cpu;

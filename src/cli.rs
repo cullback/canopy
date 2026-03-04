@@ -11,18 +11,15 @@ fn prefixed_args(prefix: &str) -> Vec<Arg> {
         Arg::new(format!("{prefix}-simulations"))
             .long(format!("{prefix}-simulations"))
             .default_value(d.num_simulations.to_string()),
-        Arg::new(format!("{prefix}-cpuct"))
-            .long(format!("{prefix}-cpuct"))
-            .default_value(d.cpuct.to_string()),
-        Arg::new(format!("{prefix}-fpu-reduction"))
-            .long(format!("{prefix}-fpu-reduction"))
-            .default_value(d.fpu_reduction.to_string()),
-        Arg::new(format!("{prefix}-dirichlet-alpha"))
-            .long(format!("{prefix}-dirichlet-alpha"))
-            .default_value(d.dirichlet_alpha.to_string()),
-        Arg::new(format!("{prefix}-dirichlet-epsilon"))
-            .long(format!("{prefix}-dirichlet-epsilon"))
-            .default_value(d.dirichlet_epsilon.to_string()),
+        Arg::new(format!("{prefix}-gumbel-m"))
+            .long(format!("{prefix}-gumbel-m"))
+            .default_value(d.num_sampled_actions.to_string()),
+        Arg::new(format!("{prefix}-c-visit"))
+            .long(format!("{prefix}-c-visit"))
+            .default_value(d.c_visit.to_string()),
+        Arg::new(format!("{prefix}-c-scale"))
+            .long(format!("{prefix}-c-scale"))
+            .default_value(d.c_scale.to_string()),
     ]
 }
 
@@ -33,10 +30,9 @@ fn parse_one(matches: &ArgMatches, prefix: &str) -> Config {
     };
     Config {
         num_simulations: get("simulations").parse().unwrap(),
-        cpuct: get("cpuct").parse().unwrap(),
-        fpu_reduction: get("fpu-reduction").parse().unwrap(),
-        dirichlet_alpha: get("dirichlet-alpha").parse().unwrap(),
-        dirichlet_epsilon: get("dirichlet-epsilon").parse().unwrap(),
+        num_sampled_actions: get("gumbel-m").parse().unwrap(),
+        c_visit: get("c-visit").parse().unwrap(),
+        c_scale: get("c-scale").parse().unwrap(),
     }
 }
 

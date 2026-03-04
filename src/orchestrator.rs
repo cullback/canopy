@@ -107,7 +107,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                 if let Some(Step::Done(_)) = &slot.pending_step
                     && let Some(Step::Done(result)) = slot.pending_step.take()
                 {
-                    let action = greedy_action(&result.policy);
+                    let action = result.selected_action;
                     slot.state.apply_action(action);
                     if let Some(search) = &mut slot.search {
                         search.advance(action);
@@ -130,7 +130,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
             let step = search.supply(output, config, rng);
             match step {
                 Step::Done(result) => {
-                    let action = greedy_action(&result.policy);
+                    let action = result.selected_action;
                     slot.state.apply_action(action);
                     if let Some(search) = &mut slot.search {
                         search.advance(action);
@@ -145,15 +145,6 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
     }
 
     results
-}
-
-fn greedy_action(policy: &[f32]) -> usize {
-    policy
-        .iter()
-        .enumerate()
-        .max_by(|a, b| a.1.total_cmp(b.1))
-        .unwrap()
-        .0
 }
 
 fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {

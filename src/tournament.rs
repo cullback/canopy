@@ -51,13 +51,7 @@ pub fn play_match<G: Game>(
                 };
             };
 
-            let action = result
-                .policy
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .unwrap()
-                .0;
+            let action = result.selected_action;
 
             actions.push(action);
             state.apply_action(action);

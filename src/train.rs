@@ -46,12 +46,15 @@ pub struct TrainConfig {
     pub bench_games: u32,
     /// MCTS simulations for the NN bot during benchmark games
     pub bench_mcts: u32,
-    /// PUCT exploration constant
-    pub cpuct: f32,
-    /// Temperature for move sampling (applied for the first `temp_threshold` moves)
-    pub temperature: f32,
-    /// Move count after which temperature drops to zero (argmax)
-    pub temp_threshold: u32,
+    /// Gumbel-Top-k sampled actions at root
+    pub gumbel_m: u32,
+    /// σ scaling parameter
+    pub c_visit: f32,
+    /// σ scaling parameter
+    pub c_scale: f32,
+    /// Number of early-game turns where action is sampled from improved policy
+    /// (for exploration diversity). After this, use selected_action deterministically.
+    pub explore_moves: u32,
 }
 
 /// Per-iteration config passed to the model's train_step method.
@@ -158,8 +161,9 @@ where
     let mut rng = fastrand::Rng::with_seed(seed);
     let mcts_config = Config {
         num_simulations: config.mcts_sims,
-        cpuct: config.cpuct,
-        ..Default::default()
+        num_sampled_actions: config.gumbel_m,
+        c_visit: config.c_visit,
+        c_scale: config.c_scale,
     };
 
     let mut state = new_state(&mut rng);
@@ -203,39 +207,8 @@ where
         // Run MCTS
         let result = run_search(&state, evaluator, &mcts_config, &mut rng);
 
-        // Build policy target with temperature
-        let temperature = if turn_count <= config.temp_threshold {
-            config.temperature
-        } else {
-            0.0
-        };
-        let mut policy_target = vec![0.0f32; G::NUM_ACTIONS];
-
-        if temperature > 0.0 {
-            let mut total = 0.0f32;
-            for (action_idx, &visits) in result.policy.iter().enumerate() {
-                if visits > 0.0 {
-                    let tempered = visits.powf(1.0 / temperature);
-                    policy_target[action_idx] = tempered;
-                    total += tempered;
-                }
-            }
-            if total > 0.0 {
-                for p in &mut policy_target {
-                    *p /= total;
-                }
-            }
-        } else {
-            // Argmax: put all weight on the most-visited action
-            if let Some((best_idx, _)) = result
-                .policy
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-            {
-                policy_target[best_idx] = 1.0;
-            }
-        }
+        // Use improved policy directly as training target
+        let policy_target = result.policy.clone();
 
         // Root Q from current player's perspective.
         // result.value is in [-1,1] from P1's perspective.
@@ -246,13 +219,18 @@ where
 
         records.push(GameRecord {
             features: features_buf.clone(),
-            policy_target: policy_target.clone(),
+            policy_target,
             player: current,
             q,
         });
 
-        // Sample action from tempered visit distribution
-        let chosen = sample_from_policy(&policy_target, &mut rng);
+        // Early-game: sample from improved policy for diversity.
+        // After explore_moves: use SH survivor deterministically.
+        let chosen = if turn_count <= config.explore_moves {
+            sample_from_policy(&result.policy, &mut rng)
+        } else {
+            result.selected_action
+        };
         state.apply_action(chosen);
     }
 
@@ -327,7 +305,6 @@ fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
 fn run_benchmark<G: Game, Ev: Evaluator<G>>(
     evaluator: &Ev,
     mcts_sims: u32,
-    cpuct: f32,
     num_games: u32,
     rng: &mut fastrand::Rng,
     new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
@@ -336,7 +313,6 @@ fn run_benchmark<G: Game, Ev: Evaluator<G>>(
 
     let nn_config = Config {
         num_simulations: mcts_sims,
-        cpuct,
         ..Default::default()
     };
     let baseline_config = Config {
@@ -385,14 +361,7 @@ fn run_benchmark<G: Game, Ev: Evaluator<G>>(
                 run_search(&state, &baseline_eval, &baseline_config, rng)
             };
 
-            let action = result
-                .policy
-                .iter()
-                .enumerate()
-                .max_by(|a, b| a.1.total_cmp(b.1))
-                .unwrap()
-                .0;
-            state.apply_action(action);
+            state.apply_action(result.selected_action);
         }
 
         if let Status::Terminal(reward) = state.status() {
@@ -989,7 +958,6 @@ pub fn run_training<G, E, M>(
             run_benchmark::<G, M::Evaluator>(
                 &eval,
                 config.bench_mcts,
-                config.cpuct,
                 config.bench_games,
                 &mut rng,
                 &new_state,
