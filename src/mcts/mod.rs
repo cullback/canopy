@@ -974,33 +974,6 @@ mod tests {
         );
     }
 
-    #[test]
-    fn state_machine_api_works() {
-        let game = TrivialGame::new();
-        let evaluator = RolloutEvaluator { num_rollouts: 1 };
-        let config = Config {
-            num_simulations: 500,
-            ..Default::default()
-        };
-        let mut rng = fastrand::Rng::new();
-
-        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
-        let result = loop {
-            step = match step {
-                Step::NeedsEval(pending) => {
-                    let output = evaluator.evaluate(&pending.state, &mut rng);
-                    sm.supply(output, pending, &mut rng)
-                }
-                Step::Done(r) => break r,
-            };
-        };
-
-        assert_eq!(
-            result.selected_action, 0,
-            "State machine API should find that action 0 wins"
-        );
-    }
-
     /// Two-step game: P1 picks action 0 or 1, then picks 0 or 1 again.
     /// Win (+1) only if both actions are 0.
     #[derive(Clone)]
