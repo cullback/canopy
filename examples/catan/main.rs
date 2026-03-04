@@ -59,13 +59,13 @@ fn app() -> Command {
             Arg::new("p1-eval")
                 .long("p1-eval")
                 .default_value("rollout")
-                .help("Evaluator for player 1: rollout, heuristic, policy, or nn"),
+                .help("Evaluator for player 1: rollout, heuristic, or nn"),
         )
         .arg(
             Arg::new("p2-eval")
                 .long("p2-eval")
                 .default_value("rollout")
-                .help("Evaluator for player 2: rollout, heuristic, policy, or nn"),
+                .help("Evaluator for player 2: rollout, heuristic, or nn"),
         );
 
     #[cfg(feature = "nn")]
@@ -287,8 +287,7 @@ fn run_tournament(matches: &clap::ArgMatches) {
     let p2_eval_name = matches.get_one::<String>("p2-eval").unwrap().as_str();
 
     let rollout = RolloutEvaluator { num_rollouts: 1 };
-    let heuristic_eval = heuristic::HeuristicEvaluator;
-    let policy_eval = heuristic::PolicyEvaluator {
+    let heuristic_eval = heuristic::HeuristicEvaluator {
         rollout: RolloutEvaluator { num_rollouts: 1 },
     };
 
@@ -308,13 +307,10 @@ fn run_tournament(matches: &clap::ArgMatches) {
         match name {
             "rollout" => &rollout,
             "heuristic" => &heuristic_eval,
-            "policy" => &policy_eval,
             #[cfg(feature = "nn")]
             "nn" => nn_eval.as_ref().unwrap(),
             other => {
-                panic!(
-                    "unknown evaluator '{other}', expected 'rollout', 'heuristic', 'policy', or 'nn'"
-                )
+                panic!("unknown evaluator '{other}', expected 'rollout', 'heuristic', or 'nn'")
             }
         }
     };

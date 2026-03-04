@@ -52,6 +52,16 @@ impl DevCardDeck {
         Self { cards, len: 25 }
     }
 
+    #[cfg(test)]
+    pub fn from_cards(cards: &[DevCardKind]) -> Self {
+        let mut deck = Self {
+            cards: [DevCardKind::Knight; 25],
+            len: cards.len() as u8,
+        };
+        deck.cards[..cards.len()].copy_from_slice(cards);
+        deck
+    }
+
     pub fn draw(&mut self) -> Option<DevCardKind> {
         if self.len == 0 {
             return None;
