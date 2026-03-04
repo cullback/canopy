@@ -87,8 +87,14 @@ pub struct Search<G: Game> {
     root_state: G,
     bufs: Bufs,
     config: Config,
+    /// Gumbel Sequential Halving state — present for decision roots, `None`
+    /// for chance roots.  When `Some`, simulation budget is tracked inside
+    /// `GumbelState::budget_remaining` (per-candidate round-robin with
+    /// halving).  When `None`, `vanilla_budget_remaining` is used instead
+    /// as a simple countdown.
     gumbel: Option<GumbelState>,
-    /// Budget counter for vanilla (non-Gumbel) simulations (chance roots).
+    /// Simulation budget for chance roots (no Gumbel).  Ignored when
+    /// `gumbel` is `Some`, since that state tracks its own budget.
     vanilla_budget_remaining: u32,
 }
 
@@ -132,7 +138,9 @@ struct GumbelState {
     q_min: f32,
     /// Max Q across tree (P1 perspective) for normalization.
     q_max: f32,
-    /// Total simulation budget remaining.
+    /// Simulation budget remaining (Gumbel decision roots only).
+    /// Decremented each simulation; when exhausted the search finishes
+    /// even if Sequential Halving hasn't reduced to one candidate.
     budget_remaining: u32,
 }
 
@@ -610,6 +618,10 @@ fn completed_q(tree: &Tree, edge: &tree::Edge, vmix_val: f32) -> f32 {
 }
 
 /// Policy-weighted value mixing (paper's formula).
+///
+/// Weights over *all* edges using the full prior distribution: visited
+/// edges contribute their child's Q, unvisited edges fall back to the
+/// node's own value estimate (same stand-in `completed_q` uses).
 fn v_mix(tree: &Tree, id: NodeId) -> f32 {
     let edges = tree.edges(id);
     let n_total: f32 = edges.iter().map(|e| e.visits).sum::<u32>() as f32;
@@ -617,21 +629,17 @@ fn v_mix(tree: &Tree, id: NodeId) -> f32 {
         return tree.utility(id);
     }
 
+    let v = tree.utility(id);
     let mut weighted_q = 0.0f32;
-    let mut weight_sum = 0.0f32;
     for edge in edges {
-        if let Some(child) = edge.child {
-            weighted_q += edge.prior * tree.q(child);
-            weight_sum += edge.prior;
-        }
+        let q = match edge.child {
+            Some(child) => tree.q(child),
+            None => v,
+        };
+        weighted_q += edge.prior * q;
     }
-    let search_q = if weight_sum > 0.0 {
-        weighted_q / weight_sum
-    } else {
-        0.0
-    };
 
-    (tree.utility(id) + n_total * search_q) / (1.0 + n_total)
+    (v + n_total * weighted_q) / (1.0 + n_total)
 }
 
 fn softmax(logits: &[f32]) -> Vec<f32> {
