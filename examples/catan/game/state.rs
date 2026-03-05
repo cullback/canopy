@@ -78,6 +78,7 @@ impl Default for PlayerState {
 pub enum Phase {
     PlaceSettlement,
     PlaceRoad,
+    PreRoll,
     Roll,
     Discard { player: Player, remaining: u8 },
     MoveRobber,
@@ -102,6 +103,7 @@ pub struct GameState {
 
     pub phase: Phase,
     pub turn_number: u16,
+    pub pre_roll: bool,
 
     pub setup_count: u8,
 
@@ -155,6 +157,7 @@ impl GameState {
             robber,
             phase: Phase::PlaceSettlement,
             turn_number: 0,
+            pre_roll: false,
             setup_count: 0,
             longest_road: None,
             largest_army: None,

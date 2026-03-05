@@ -305,6 +305,7 @@ fn format_phase(phase: &Phase) -> String {
     match phase {
         Phase::PlaceSettlement => "Place Settlement".to_string(),
         Phase::PlaceRoad => "Place Road".to_string(),
+        Phase::PreRoll => "Pre-Roll".to_string(),
         Phase::Roll => "Roll".to_string(),
         Phase::Discard { player, remaining } => format!("{player} discards ({remaining} left)"),
         Phase::MoveRobber => "Move Robber".to_string(),

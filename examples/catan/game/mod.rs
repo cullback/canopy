@@ -14,8 +14,8 @@ use canopy2::player::Player;
 use action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
     MARITIME_END, MARITIME_START, MONOPOLY_END, MONOPOLY_START, PLAY_KNIGHT, PLAY_ROAD_BUILDING,
-    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, SETTLEMENT_END, SETTLEMENT_START, YOP_END,
-    YOP_START,
+    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, ROLL, SETTLEMENT_END, SETTLEMENT_START,
+    YOP_END, YOP_START,
 };
 use board::{EdgeId, NodeId, TileId};
 use dev_card::DevCardKind;
@@ -85,7 +85,7 @@ impl Game for GameState {
     fn apply_action(&mut self, action: usize) {
         match self.phase {
             Phase::Roll => {
-                self.turn_number += 1;
+                self.pre_roll = false;
                 let total = (action + 2) as u8;
                 if let Dice::Balanced(ref mut b) = self.dice {
                     b.draw(total, self.current_player);
@@ -103,7 +103,11 @@ impl Game for GameState {
                 let target = current.opponent();
                 self.players[target].hand[resource] -= 1;
                 self.players[current].hand[resource] += 1;
-                self.phase = Phase::Main;
+                if self.pre_roll {
+                    self.phase = Phase::Roll;
+                } else {
+                    self.phase = Phase::Main;
+                }
             }
             _ => {
                 apply(self, ActionId(action as u8));
@@ -186,6 +190,9 @@ pub fn apply(state: &mut GameState, action: ActionId) {
         CITY_START..CITY_END => {
             let nid = action.city_node();
             apply_build_city(state, nid);
+        }
+        ROLL => {
+            state.phase = Phase::Roll;
         }
         END_TURN => apply_end_turn(state),
         BUY_DEV_CARD => apply_buy_dev_card(state),
@@ -313,7 +320,8 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
         }
         4 => {
             state.current_player = Player::One;
-            state.phase = Phase::Roll;
+            state.pre_roll = true;
+            state.phase = Phase::PreRoll;
         }
         _ => unreachable!("setup_count should be 1-4"),
     }
@@ -387,6 +395,8 @@ fn distribute_resources(state: &mut GameState, roll: u8) {
 }
 
 fn apply_end_turn(state: &mut GameState) {
+    state.turn_number += 1;
+
     if state.turn_number >= MAX_TURNS {
         // Timed out — status() will return a heuristic VP-difference reward.
         state.phase = Phase::GameOver(Player::One);
@@ -400,7 +410,8 @@ fn apply_end_turn(state: &mut GameState) {
     player.has_played_dev_card_this_turn = false;
 
     state.current_player = state.current_player.opponent();
-    state.phase = Phase::Roll;
+    state.pre_roll = true;
+    state.phase = Phase::PreRoll;
 }
 
 fn apply_build_road(state: &mut GameState, eid: EdgeId) {
@@ -428,7 +439,11 @@ fn apply_build_road(state: &mut GameState, eid: EdgeId) {
     if let Phase::RoadBuilding { roads_left } = state.phase {
         let remaining = roads_left - 1;
         if remaining == 0 || state.current().roads_left == 0 {
-            state.phase = Phase::Main;
+            if state.pre_roll {
+                state.phase = Phase::Roll;
+            } else {
+                state.phase = Phase::Main;
+            }
         } else {
             state.phase = Phase::RoadBuilding {
                 roads_left: remaining,
@@ -526,6 +541,10 @@ fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
         state.bank[r2] -= 1;
         state.current_mut().hand[r2] += 1;
     }
+
+    if state.pre_roll {
+        state.phase = Phase::Roll;
+    }
 }
 
 fn apply_monopoly(state: &mut GameState, resource: Resource) {
@@ -538,6 +557,10 @@ fn apply_monopoly(state: &mut GameState, resource: Resource) {
     let stolen = state.players[opponent].hand[resource];
     state.players[opponent].hand[resource] = 0;
     state.players[current].hand[resource] += stolen;
+
+    if state.pre_roll {
+        state.phase = Phase::Roll;
+    }
 }
 
 fn apply_move_robber(state: &mut GameState, tid: TileId) {
@@ -550,6 +573,8 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
 
     if has_target && state.public_vps(opp) >= FRIENDLY_ROBBER_VP {
         state.phase = Phase::StealResolve;
+    } else if state.pre_roll {
+        state.phase = Phase::Roll;
     } else {
         state.phase = Phase::Main;
     }
@@ -659,8 +684,8 @@ fn update_longest_road(state: &mut GameState) {
 #[cfg(test)]
 mod tests {
     use super::action::{
-        self, BUY_DEV_CARD, END_TURN, PLAY_KNIGHT, ROAD_END, ROAD_START, SETTLEMENT_END,
-        SETTLEMENT_START, maritime_id, road_id, robber_id, settlement_id,
+        self, BUY_DEV_CARD, END_TURN, PLAY_KNIGHT, PLAY_ROAD_BUILDING, ROAD_END, ROAD_START, ROLL,
+        SETTLEMENT_END, SETTLEMENT_START, maritime_id, road_id, robber_id, settlement_id, yop_id,
     };
     use super::board::AdjacencyBitboards;
     use super::dev_card::{DevCardDeck, DevCardKind};
@@ -686,7 +711,7 @@ mod tests {
             let i = rng.usize(..actions.len());
             apply(state, actions[i]);
         }
-        assert!(matches!(state.phase, Phase::Roll));
+        assert!(matches!(state.phase, Phase::PreRoll));
         rng
     }
 
@@ -694,6 +719,11 @@ mod tests {
     fn fast_forward(state: &mut GameState, rng: &mut fastrand::Rng) {
         let mut actions = Vec::new();
         while !matches!(state.phase, Phase::Main | Phase::GameOver(_)) {
+            // In PreRoll, apply ROLL to proceed to dice roll
+            if matches!(state.phase, Phase::PreRoll) {
+                apply(state, ActionId(ROLL));
+                continue;
+            }
             if let Some(outcome) = state.sample_chance(rng) {
                 state.apply_action(outcome);
                 continue;
@@ -1264,6 +1294,7 @@ mod tests {
         let mut rng = play_setup(&mut state);
 
         state.current_player = Player::One;
+        state.pre_roll = false;
 
         // Find a tile where P2 has a building
         let opp_buildings = state.player_buildings(Player::Two);
@@ -1308,6 +1339,7 @@ mod tests {
         let mut rng = play_setup(&mut state);
 
         state.current_player = Player::One;
+        state.pre_roll = false;
         // P2 has 2 VP from setup settlements (< FRIENDLY_ROBBER_VP=3)
         assert!(
             state.public_vps(Player::Two) < FRIENDLY_ROBBER_VP,
@@ -1572,6 +1604,7 @@ mod tests {
         let mut rng = play_setup(&mut state);
 
         state.current_player = Player::One;
+        state.pre_roll = false;
         state.phase = Phase::Main;
         state.players[Player::One].roads_left = 1;
         state.players[Player::One].dev_cards[DevCardKind::RoadBuilding] = 1;
@@ -1626,6 +1659,7 @@ mod tests {
         play_setup(&mut state);
 
         state.current_player = Player::One;
+        state.pre_roll = false;
         state.phase = Phase::Main;
         state.players[Player::One].roads_left = 1;
         state.players[Player::One].dev_cards[DevCardKind::RoadBuilding] = 1;
@@ -2155,6 +2189,163 @@ mod tests {
         assert!(
             matches!(state.phase, Phase::GameOver(Player::One)),
             "P1 should win at 15 VP, got {:?}",
+            state.phase
+        );
+    }
+
+    // --- PreRoll tests ---
+
+    /// PreRoll offers ROLL action plus playable dev cards.
+    #[test]
+    fn preroll_offers_dev_cards_and_roll() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+        state.players[Player::One].dev_cards[DevCardKind::Knight] = 1;
+        state.players[Player::One].dev_cards[DevCardKind::Monopoly] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+        assert!(actions.contains(&ActionId(ROLL)), "PreRoll must offer ROLL");
+        assert!(
+            actions.contains(&ActionId(PLAY_KNIGHT)),
+            "PreRoll should offer playable knight"
+        );
+        // Monopoly actions are in range 200..205
+        let has_monopoly = actions.iter().any(|a| a.0 >= 200 && a.0 < 205);
+        assert!(has_monopoly, "PreRoll should offer playable monopoly");
+    }
+
+    /// PreRoll with no dev cards still offers ROLL.
+    #[test]
+    fn preroll_no_dev_cards_still_has_roll() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+        assert_eq!(actions.len(), 1, "only ROLL should be available");
+        assert_eq!(actions[0], ActionId(ROLL));
+    }
+
+    /// Playing knight in PreRoll → MoveRobber → resolve → lands in Roll.
+    #[test]
+    fn knight_from_preroll_returns_to_roll() {
+        let mut state = make_state_with_seed(42);
+        let mut rng = play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+        state.players[Player::One].dev_cards[DevCardKind::Knight] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        apply(&mut state, ActionId(PLAY_KNIGHT));
+        assert!(matches!(state.phase, Phase::MoveRobber));
+
+        // Move robber to a tile without opponent buildings to skip steal
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+        // Find a tile where opponent has no buildings
+        let opp_buildings = state.player_buildings(Player::Two);
+        let topo = &state.topology;
+        let safe_tile = actions
+            .iter()
+            .find(|a| {
+                let tid = a.robber_tile();
+                let tile_mask = topo.adj.tile_nodes[tid.0 as usize];
+                tile_mask & opp_buildings == 0
+            })
+            .copied()
+            .unwrap();
+        apply(&mut state, safe_tile);
+
+        assert!(
+            matches!(state.phase, Phase::Roll),
+            "knight from PreRoll should return to Roll, got {:?}",
+            state.phase
+        );
+    }
+
+    /// Playing road building in PreRoll → build roads → lands in Roll.
+    #[test]
+    fn road_building_from_preroll_returns_to_roll() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+        state.players[Player::One].dev_cards[DevCardKind::RoadBuilding] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        apply(&mut state, ActionId(PLAY_ROAD_BUILDING));
+        assert!(matches!(state.phase, Phase::RoadBuilding { roads_left: 2 }));
+
+        // Build two roads
+        let mut actions = Vec::new();
+        for _ in 0..2 {
+            action::legal_actions(&state, &mut actions);
+            let road = actions
+                .iter()
+                .find(|a| a.0 >= ROAD_START && a.0 < ROAD_END)
+                .copied()
+                .unwrap();
+            apply(&mut state, road);
+        }
+
+        assert!(
+            matches!(state.phase, Phase::Roll),
+            "road building from PreRoll should return to Roll, got {:?}",
+            state.phase
+        );
+    }
+
+    /// Playing Year of Plenty in PreRoll transitions to Roll.
+    #[test]
+    fn yop_from_preroll_transitions_to_roll() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+        state.players[Player::One].dev_cards[DevCardKind::YearOfPlenty] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        apply(&mut state, yop_id(Resource::Lumber, Resource::Brick));
+
+        assert!(
+            matches!(state.phase, Phase::Roll),
+            "YoP from PreRoll should transition to Roll, got {:?}",
+            state.phase
+        );
+    }
+
+    /// Playing Monopoly in PreRoll transitions to Roll.
+    #[test]
+    fn monopoly_from_preroll_transitions_to_roll() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+        state.players[Player::One].dev_cards[DevCardKind::Monopoly] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        apply(&mut state, action::monopoly_id(Resource::Lumber));
+
+        assert!(
+            matches!(state.phase, Phase::Roll),
+            "Monopoly from PreRoll should transition to Roll, got {:?}",
             state.phase
         );
     }

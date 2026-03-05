@@ -9,7 +9,7 @@ use burn::prelude::*;
 
 // Stream constants — fixed board topology sizes
 const GLOBAL_START: usize = 0;
-const GLOBAL_LEN: usize = 50;
+const GLOBAL_LEN: usize = 49;
 const TILES_N: usize = 19;
 const NODES_N: usize = 54;
 const EDGES_N: usize = 72;

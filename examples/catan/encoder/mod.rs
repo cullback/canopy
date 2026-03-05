@@ -73,20 +73,21 @@ pub(crate) fn compute_hop_distances(topo: &Topology, buildings: u64, cap: u8) ->
 /// Original deck composition per card type.
 pub(crate) const ORIGINAL_DECK: [f32; 5] = [14.0, 5.0, 2.0, 2.0, 2.0];
 
-/// Push phase one-hot (8 features).
+/// Push phase one-hot (7 features).
+/// Chance nodes (Roll, StealResolve) are excluded — the agent never sees those states.
 pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
     let phase_idx = match &state.phase {
         Phase::PlaceSettlement => 0,
         Phase::PlaceRoad => 1,
-        Phase::Roll => 2,
+        Phase::PreRoll => 2,
         Phase::Discard { .. } => 3,
         Phase::MoveRobber => 4,
-        Phase::StealResolve => 5,
-        Phase::Main => 6,
-        Phase::RoadBuilding { .. } => 7,
+        Phase::Main => 5,
+        Phase::RoadBuilding { .. } => 6,
+        Phase::Roll | Phase::StealResolve => unreachable!(),
         Phase::GameOver(_) => unreachable!(),
     };
-    for i in 0..8 {
+    for i in 0..7 {
         out.push(f32::from(i == phase_idx));
     }
 }

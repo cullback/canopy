@@ -217,6 +217,7 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
     match &state.phase {
         Phase::PlaceSettlement => populate_place_settlement(state, actions),
         Phase::PlaceRoad => populate_place_road(state, actions),
+        Phase::PreRoll => populate_preroll(state, actions),
         Phase::Roll | Phase::StealResolve => {
             // Chance nodes — resolved by chance_outcomes/apply_chance, not player actions
         }
@@ -302,6 +303,52 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
             }
         }
         actions.push(robber_id(tile.id));
+    }
+}
+
+fn populate_preroll(state: &GameState, actions: &mut Vec<ActionId>) {
+    actions.push(ActionId(ROLL));
+
+    let player = state.current();
+    if !player.has_played_dev_card_this_turn {
+        let playable_knights = player.dev_cards[DevCardKind::Knight]
+            - player.dev_cards_bought_this_turn[DevCardKind::Knight];
+        if playable_knights > 0 {
+            actions.push(ActionId(PLAY_KNIGHT));
+        }
+
+        let playable_rb = player.dev_cards[DevCardKind::RoadBuilding]
+            - player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding];
+        if playable_rb > 0 && player.roads_left > 0 {
+            actions.push(ActionId(PLAY_ROAD_BUILDING));
+        }
+
+        let playable_yop = player.dev_cards[DevCardKind::YearOfPlenty]
+            - player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty];
+        if playable_yop > 0 {
+            for (i, &r1) in ALL_RESOURCES.iter().enumerate() {
+                if state.bank[r1] == 0 {
+                    continue;
+                }
+                for &r2 in &ALL_RESOURCES[i..] {
+                    if r1 == r2 && state.bank[r1] < 2 {
+                        continue;
+                    }
+                    if state.bank[r2] == 0 {
+                        continue;
+                    }
+                    actions.push(yop_id(r1, r2));
+                }
+            }
+        }
+
+        let playable_mono = player.dev_cards[DevCardKind::Monopoly]
+            - player.dev_cards_bought_this_turn[DevCardKind::Monopoly];
+        if playable_mono > 0 {
+            for &r in &ALL_RESOURCES {
+                actions.push(monopoly_id(r));
+            }
+        }
     }
 }
 
@@ -508,7 +555,7 @@ mod tests {
             let i = rng.usize(..actions.len());
             game::apply(state, actions[i]);
         }
-        assert!(matches!(state.phase, Phase::Roll));
+        assert!(matches!(state.phase, Phase::PreRoll));
         rng
     }
 
@@ -1022,7 +1069,7 @@ mod tests {
         legal_actions(&state, &mut actions);
         game::apply(&mut state, actions[0]);
 
-        assert!(matches!(state.phase, Phase::Roll));
+        assert!(matches!(state.phase, Phase::PreRoll));
 
         // Check trade ratios were set by the game logic
         let p1 = &state.players[Player::One];

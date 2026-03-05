@@ -14,21 +14,21 @@ impl BasicEncoder {
 }
 
 impl StateEncoder<GameState> for BasicEncoder {
-    // Global: 8
+    // Global: 7
     // Per-player (x2): 21 x 2 = 42
     // Tile stream: 19 x 7 = 133  (resource one-hot 5 + dice prob 1 + robber 1)
     // Node stream: 54 x 2 = 108  (current building + opponent building)
     // Edge stream: 72 x 2 = 144  (current road + opponent road)
     // Port stream: 9 x 5 = 45
-    // Total: 8 + 42 + 133 + 108 + 144 + 45 = 480
-    const FEATURE_SIZE: usize = 480;
+    // Total: 7 + 42 + 133 + 108 + 144 + 45 = 479
+    const FEATURE_SIZE: usize = 479;
 
     fn encode(state: &GameState, out: &mut Vec<f32>) {
         out.clear();
         let current = state.current_player;
         let opp = current.opponent();
 
-        // === Phase one-hot (8) ===
+        // === Phase one-hot (7) ===
         encode_phase(state, out);
 
         // === Per-player features (21 x 2 = 42) ===
@@ -139,10 +139,10 @@ mod tests {
         BasicEncoder::encode(&state, &mut features);
 
         // Opponent dev card features start at offset:
-        // 8 (phase) + 21 (self) + 5 (opp resources) = 34
+        // 7 (phase) + 21 (self) + 5 (opp resources) = 33
         for i in 0..5 {
             assert_eq!(
-                features[34 + i],
+                features[33 + i],
                 0.0,
                 "opponent expected dev card {i} should be 0.0 when they hold no cards"
             );

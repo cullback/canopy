@@ -29,19 +29,19 @@ impl RichNodeEncoder {
 ///   already in the per-player block.
 /// - **Turn number**: VP serves as a sufficient proxy for game progress.
 impl StateEncoder<GameState> for RichNodeEncoder {
-    // Global: 8
+    // Global: 7
     // Per-player (x2): 21 x 2 = 42
     // Node stream: 54 x 24 = 1296
     // Edge stream: 72 x 2 = 144
-    // Total: 8 + 42 + 1296 + 144 = 1490
-    const FEATURE_SIZE: usize = 1490;
+    // Total: 7 + 42 + 1296 + 144 = 1489
+    const FEATURE_SIZE: usize = 1489;
 
     fn encode(state: &GameState, out: &mut Vec<f32>) {
         out.clear();
         let current = state.current_player;
         let opp = current.opponent();
 
-        // === Phase one-hot (8) ===
+        // === Phase one-hot (7) ===
         encode_phase(state, out);
 
         // === Per-player features (21 x 2 = 42) ===
