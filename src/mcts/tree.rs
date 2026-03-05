@@ -121,6 +121,15 @@ impl Tree {
         &mut self.edges[entry.edge_start as usize..(entry.edge_start + entry.edge_count) as usize]
     }
 
+    /// Maximum visit count across all edges of a node (0 if no edges).
+    pub fn max_edge_visits(&self, id: NodeId) -> u32 {
+        self.edges(id).iter().map(|e| e.visits).max().unwrap_or(0)
+    }
+
+    pub fn set_child(&mut self, parent: NodeId, edge_idx: usize, child: NodeId) {
+        self.edges_mut(parent)[edge_idx].child = Some(child);
+    }
+
     pub fn q(&self, id: NodeId) -> f32 {
         self.nodes[id.0 as usize].data.q
     }
@@ -412,8 +421,8 @@ mod tests {
         let c = tree.insert(None, NodeKind::Terminal, 0.0, std::iter::empty());
 
         // Patch child pointers
-        tree.edges_mut(a)[0].child = Some(b);
-        tree.edges_mut(b)[0].child = Some(c);
+        tree.set_child(a, 0, b);
+        tree.set_child(b, 0, c);
 
         assert_eq!(tree.node_count(), 3);
 

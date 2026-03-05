@@ -147,13 +147,7 @@ struct GumbelState {
 
 enum SimResult<G: Game> {
     Complete,
-    NeedsEval {
-        state: G,
-        parent: NodeId,
-        edge_idx: usize,
-        player: Player,
-        state_key: Option<u64>,
-    },
+    NeedsEval(PendingEval<G>),
 }
 
 // ── Public API ────────────────────────────────────────────────────────
@@ -244,7 +238,7 @@ impl<G: Game> Search<G> {
                 ExpandResult::Leaf(_) => unreachable!("empty non-terminal tree"),
                 ExpandResult::Chance(id) => {
                     self.root = Some(id);
-                    self.run_simulations(rng)
+                    self.run_vanilla_sims(rng)
                 }
                 ExpandResult::NeedsEval(player) => Step::NeedsEval(PendingEval {
                     state: self.root_state.clone(),
@@ -320,7 +314,7 @@ impl<G: Game> Search<G> {
                 let child = self
                     .tree
                     .complete_expand(&eval, &mut self.bufs, player, state_key);
-                self.tree.edges_mut(parent)[edge_idx].child = Some(child);
+                self.tree.set_child(parent, edge_idx, child);
                 self.tree.backprop(&self.bufs.path);
 
                 let root = self.root();
@@ -328,6 +322,7 @@ impl<G: Game> Search<G> {
                     advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
                 } else {
                     self.vanilla_budget_remaining = self.vanilla_budget_remaining.saturating_sub(1);
+                    return self.run_vanilla_sims(rng);
                 }
             }
         };
@@ -343,14 +338,10 @@ impl<G: Game> Search<G> {
 
     fn run_simulations(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
         let root = self.root();
-
-        let gs = match &mut self.gumbel {
-            Some(gs) => gs,
-            None => {
-                // No gumbel state (e.g. chance root) — just run vanilla sims
-                return self.run_vanilla_sims(rng);
-            }
-        };
+        let gs = self
+            .gumbel
+            .as_mut()
+            .expect("run_simulations called without gumbel state");
 
         // Single legal action fast path
         if gs.candidates.len() <= 1 {
@@ -382,39 +373,29 @@ impl<G: Game> Search<G> {
                 ));
             }
 
-            // Get the forced root edge for this simulation
             let forced_edge = gs.candidates[gs.candidate_idx];
-
-            match simulate_one(
+            let q_bounds = (gs.q_min, gs.q_max);
+            let config = &self.config;
+            let mut first = true;
+            match simulate(
                 &mut self.tree,
                 root,
                 &self.root_state,
-                &self.config,
                 rng,
                 &mut self.bufs,
-                Some(forced_edge),
-                (gs.q_min, gs.q_max),
+                |tree, node, player| {
+                    if first {
+                        first = false;
+                        forced_edge
+                    } else {
+                        gumbel_interior_select(tree, node, player, config, q_bounds)
+                    }
+                },
             ) {
                 SimResult::Complete => {
                     advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
                 }
-                SimResult::NeedsEval {
-                    state,
-                    parent,
-                    edge_idx,
-                    player,
-                    state_key,
-                } => {
-                    return Step::NeedsEval(PendingEval {
-                        state,
-                        context: Phase::Simulating {
-                            parent,
-                            edge_idx,
-                            player,
-                            state_key,
-                        },
-                    });
-                }
+                SimResult::NeedsEval(pending) => return Step::NeedsEval(pending),
             }
         }
     }
@@ -422,37 +403,20 @@ impl<G: Game> Search<G> {
     /// Fallback for roots without Gumbel state (chance roots).
     fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
         let root = self.root();
+        let config = &self.config;
         while self.vanilla_budget_remaining > 0 {
-            match simulate_one(
+            match simulate(
                 &mut self.tree,
                 root,
                 &self.root_state,
-                &self.config,
                 rng,
                 &mut self.bufs,
-                None,
-                (0.0, 0.0), // equal bounds → normalize_q returns 0.5, selection is policy-driven
+                |tree, node, player| gumbel_interior_select(tree, node, player, config, (0.0, 0.0)),
             ) {
                 SimResult::Complete => {
                     self.vanilla_budget_remaining -= 1;
                 }
-                SimResult::NeedsEval {
-                    state,
-                    parent,
-                    edge_idx,
-                    player,
-                    state_key,
-                } => {
-                    return Step::NeedsEval(PendingEval {
-                        state,
-                        context: Phase::Simulating {
-                            parent,
-                            edge_idx,
-                            player,
-                            state_key,
-                        },
-                    });
-                }
+                SimResult::NeedsEval(pending) => return Step::NeedsEval(pending),
             }
         }
         Step::Done(visit_count_result::<G>(&self.tree, root))
@@ -461,21 +425,17 @@ impl<G: Game> Search<G> {
 
 // ── Simulation ────────────────────────────────────────────────────────
 
-#[allow(clippy::too_many_arguments)]
-fn simulate_one<G: Game>(
+fn simulate<G: Game>(
     tree: &mut Tree,
     root: NodeId,
     root_state: &G,
-    config: &Config,
     rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
-    forced_root_edge: Option<usize>,
-    q_bounds: (f32, f32),
+    mut select_decision: impl FnMut(&Tree, NodeId, Player) -> usize,
 ) -> SimResult<G> {
     bufs.path.clear();
     let mut current = root;
     let mut state = root_state.clone();
-    let mut is_root = true;
 
     loop {
         let edges = tree.edges(current);
@@ -483,16 +443,9 @@ fn simulate_one<G: Game>(
         let edge_idx = match *tree.kind(current) {
             NodeKind::Terminal => break,
             NodeKind::Chance => tree.sample_chance_edge(current, rng),
-            NodeKind::Decision(player) => {
-                if is_root && let Some(forced) = forced_root_edge {
-                    forced
-                } else {
-                    gumbel_interior_select(tree, current, player, config, q_bounds)
-                }
-            }
+            NodeKind::Decision(player) => select_decision(tree, current, player),
         };
 
-        is_root = false;
         bufs.path.push((current, edge_idx));
         let action = edges[edge_idx].action;
         let child_opt = edges[edge_idx].child;
@@ -506,20 +459,22 @@ fn simulate_one<G: Game>(
         match tree.try_expand(&state, bufs) {
             ExpandResult::NeedsEval(player) => {
                 let state_key = state.state_key();
-                return SimResult::NeedsEval {
+                return SimResult::NeedsEval(PendingEval {
                     state,
-                    parent: current,
-                    edge_idx,
-                    player,
-                    state_key,
-                };
+                    context: Phase::Simulating {
+                        parent: current,
+                        edge_idx,
+                        player,
+                        state_key,
+                    },
+                });
             }
             ExpandResult::Chance(id) => {
-                tree.edges_mut(current)[edge_idx].child = Some(id);
+                tree.set_child(current, edge_idx, id);
                 current = id;
             }
             ExpandResult::Leaf(id) => {
-                tree.edges_mut(current)[edge_idx].child = Some(id);
+                tree.set_child(current, edge_idx, id);
                 break;
             }
         }
@@ -549,7 +504,7 @@ fn gumbel_interior_select(
 ) -> usize {
     let edges = tree.edges(node_id);
     let total_child_visits: u32 = edges.iter().map(|e| e.visits).sum();
-    let max_visits = edges.iter().map(|e| e.visits).max().unwrap_or(0);
+    let max_visits = tree.max_edge_visits(node_id);
     let vmix_val = v_mix(tree, node_id);
 
     // Build improved policy logits: logit + σ(normalized Q)
@@ -760,7 +715,7 @@ fn score_candidate(
 fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Config) {
     let edges = tree.edges(root);
     let vmix_val = v_mix(tree, root);
-    let max_visits = edges.iter().map(|e| e.visits).max().unwrap_or(0);
+    let max_visits = tree.max_edge_visits(root);
 
     // Score all candidates
     let mut scored: Vec<(usize, f32)> = gs
@@ -875,7 +830,7 @@ fn extract_gumbel_result<G: Game>(
 ) -> SearchResult {
     let edges = tree.edges(root);
     let vmix_val = v_mix(tree, root);
-    let max_visits = edges.iter().map(|e| e.visits).max().unwrap_or(0);
+    let max_visits = tree.max_edge_visits(root);
 
     // selected_action: argmax over final candidates of g + logit + σ(completedQ)
     let selected_edge = gs
