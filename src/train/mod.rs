@@ -215,8 +215,6 @@ pub fn run_training<G, M>(
     let mut csv = metrics::CsvLogger::open(&run_dir, start_iteration);
     let mut replay_buffer: VecDeque<Vec<Sample>> = VecDeque::new();
     let training_start = Instant::now();
-    let mut total_games = 0u64;
-    let mut total_gradient_steps = 0u64;
 
     for iteration in start_iteration..config.iterations {
         let iter_start = Instant::now();
@@ -236,7 +234,6 @@ pub fn run_training<G, M>(
         let self_play_elapsed = iter_start.elapsed();
         let games_done = sp.p1_wins + sp.p2_wins + sp.draws;
         let samples_this_iter = sp.samples.len();
-        total_games += games_done as u64;
 
         // Stats
         let stats = metrics::compute_iter_stats(&sp.samples);
@@ -261,7 +258,6 @@ pub fn run_training<G, M>(
             alpha,
         };
         let train_metrics = model.train_step(&samples, &step_cfg);
-        total_gradient_steps += train_metrics.gradient_steps as u64;
         let train_elapsed = train_start.elapsed();
 
         // Checkpoint
@@ -305,7 +301,7 @@ pub fn run_training<G, M>(
             String::new()
         };
         eprintln!(
-            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.2}{} | self-play {}, train {}, bench {} | total {}, ETA {}",
+            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | self-play {}, train {}, bench {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             games_done,
@@ -330,24 +326,6 @@ pub fn run_training<G, M>(
         } else {
             0.0
         };
-        let iter_total_secs = iter_start.elapsed().as_secs_f64();
-        let games_per_sec = if self_play_elapsed.as_secs_f64() > 0.0 {
-            games_done as f64 / self_play_elapsed.as_secs_f64()
-        } else {
-            0.0
-        };
-        let samples_per_sec = if iter_total_secs > 0.0 {
-            samples_this_iter as f64 / iter_total_secs
-        } else {
-            0.0
-        };
-        let avg_value_target = (1.0 - alpha as f64) * stats.avg_z + alpha as f64 * stats.avg_q;
-        let bench_win_rate: f64 = if run_bench {
-            bench_wins as f64 / config.bench_games as f64
-        } else {
-            f64::NAN
-        };
-
         csv.write_row(&metrics::CsvRow {
             iteration: iters_done,
             train_policy_loss: train_metrics.train_policy_loss,
@@ -368,7 +346,6 @@ pub fn run_training<G, M>(
             self_play_secs: self_play_elapsed.as_secs_f64(),
             train_secs: train_elapsed.as_secs_f64(),
             bench_secs: bench_elapsed.as_secs_f64(),
-            games: games_done,
             samples_this_iter,
             min_game_length,
             max_game_length: sp.max_game_length,
@@ -376,23 +353,11 @@ pub fn run_training<G, M>(
             avg_q: stats.avg_q,
             stddev_z: stats.stddev_z,
             stddev_q: stats.stddev_q,
-            avg_value_target,
             avg_policy_max_prob: stats.avg_policy_max_prob,
-            games_per_sec,
-            samples_per_sec,
-            total_elapsed_secs: total_elapsed.as_secs_f64(),
-            bench_win_rate,
+            avg_entropy_high_branch: stats.avg_entropy_high_branch,
+            avg_max_prob_high_branch: stats.avg_max_prob_high_branch,
             mcts_sims: effective_sims,
-            gumbel_m: config.gumbel_m,
-            c_visit: config.c_visit,
-            c_scale: config.c_scale,
-            epochs: config.epochs,
-            batch_size: config.batch_size,
-            replay_window: config.replay_window,
-            explore_moves: config.explore_moves,
-            games_per_iter: config.games_per_iter,
-            total_games,
-            total_gradient_steps,
+            gradient_steps: train_metrics.gradient_steps,
         });
     }
 }

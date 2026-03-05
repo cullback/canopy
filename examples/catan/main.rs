@@ -142,6 +142,7 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
             batch_size: 128,
             replay_window: 10,
             games_per_iter: 100,
+            bench_interval: 30,
             bench_baseline_sims: 50,
             ..TrainConfig::default()
         },
