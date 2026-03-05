@@ -98,6 +98,7 @@ Differences
 - <https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md>
 - [Enhancements for Real-Time Monte-Carlo Tree Search in General Video Game Playing (2024)](https://arxiv.org/html/2407.03049v1)
   - progressive simulation
+- [cosine learning rate](https://medium.com/@utkrisht14/cosine-learning-rate-schedulers-in-pytorch-486d8717d541)
 
 repos
 
