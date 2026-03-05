@@ -255,6 +255,7 @@ where
     M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend> + Send + 'static,
     M::InnerModule: PolicyValueNet<InferBackend> + Send,
 {
+    type Encoder = E;
     type Evaluator = NeuralEvaluator<InferBackend, E, M::InnerModule>;
 
     fn evaluator(&self) -> Self::Evaluator {

@@ -95,6 +95,7 @@ pub struct CheckpointMeta {
 // ---------------------------------------------------------------------------
 
 pub trait TrainableModel<G: Game>: Send {
+    type Encoder: StateEncoder<G>;
     type Evaluator: Evaluator<G> + Clone + Send;
 
     fn evaluator(&self) -> Self::Evaluator;
@@ -120,13 +121,12 @@ fn cosine_lr(config: &TrainConfig, iteration: usize) -> f64 {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_training<G, E, M>(
+pub fn run_training<G, M>(
     config: TrainConfig,
     model: &mut M,
     new_state: impl Fn(&mut fastrand::Rng) -> G + Sync,
 ) where
     G: Game,
-    E: StateEncoder<G>,
     M: TrainableModel<G>,
     M::Evaluator: 'static,
 {
@@ -147,7 +147,7 @@ pub fn run_training<G, E, M>(
         let evaluator = model.evaluator();
 
         // Self-play
-        let sp = self_play::run_self_play_iteration::<G, E, M::Evaluator>(
+        let sp = self_play::run_self_play_iteration::<G, M::Encoder, M::Evaluator>(
             evaluator,
             &config,
             config.mcts_sims,

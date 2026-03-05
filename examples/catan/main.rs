@@ -156,11 +156,7 @@ fn run_train(matches: &clap::ArgMatches) {
                 move |dev| model_config.init(dev),
                 &device,
             );
-            canopy2::train::run_training::<GameState, encoder::CatanEncoder, _>(
-                config,
-                &mut trainable,
-                new_state,
-            );
+            canopy2::train::run_training::<GameState, _>(config, &mut trainable, new_state);
         }
         "resnet" => {
             let model_config = model::CatanResModelConfig::new(GameState::NUM_ACTIONS);
@@ -168,11 +164,7 @@ fn run_train(matches: &clap::ArgMatches) {
                 move |dev| model_config.init(dev),
                 &device,
             );
-            canopy2::train::run_training::<GameState, encoder::CatanEncoder, _>(
-                config,
-                &mut trainable,
-                new_state,
-            );
+            canopy2::train::run_training::<GameState, _>(config, &mut trainable, new_state);
         }
         other => panic!("unknown model '{other}', expected 'simple' or 'resnet'"),
     }
