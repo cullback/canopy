@@ -24,6 +24,8 @@ pub struct Sample {
     pub z: f32,
     /// Root Q from current player's perspective, in [-1, 1]
     pub q: f32,
+    /// Whether this position used full search (for playout cap randomization)
+    pub full_search: bool,
 }
 
 #[derive(Serialize)]
@@ -34,8 +36,8 @@ pub struct TrainConfig {
     pub epochs: usize,
     pub batch_size: usize,
     pub lr: f64,
-    pub lr_final: f64,
-    pub lr_decay_after: usize,
+    /// Minimum learning rate at end of cosine cycle
+    pub lr_min: f64,
     pub replay_window: usize,
     pub output_dir: String,
     #[serde(skip)]
@@ -55,6 +57,12 @@ pub struct TrainConfig {
     /// Number of early-game turns where action is sampled from improved policy
     /// (for exploration diversity). After this, use selected_action deterministically.
     pub explore_moves: u32,
+    /// Probability of full search per move (playout cap randomization)
+    pub playout_cap_full_prob: f32,
+    /// Simulations for fast (non-full) search moves
+    pub playout_cap_fast_sims: u32,
+    /// Starting simulation budget for progressive ramp (defaults to mcts_sims = no ramp)
+    pub mcts_sims_init: u32,
 }
 
 /// Per-iteration config passed to the model's train_step method.
@@ -135,6 +143,7 @@ struct GameRecord {
     policy_target: Vec<f32>,
     player: Player,
     q: f32,
+    full_search: bool,
 }
 
 struct GameStats {
@@ -160,6 +169,7 @@ impl fmt::Display for HumanDuration {
 fn self_play_game<G, Ev, E>(
     evaluator: &Ev,
     config: &TrainConfig,
+    effective_sims: u32,
     seed: u64,
     new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
 ) -> (Vec<Sample>, GameStats)
@@ -169,12 +179,13 @@ where
     E: StateEncoder<G>,
 {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let mcts_config = Config {
-        num_simulations: config.mcts_sims,
+    let base_config = Config {
+        num_simulations: effective_sims,
         num_sampled_actions: config.gumbel_m,
         c_visit: config.c_visit,
         c_scale: config.c_scale,
     };
+    let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
     let mut state = new_state(&mut rng);
     let mut actions = Vec::new();
@@ -220,15 +231,22 @@ where
             continue;
         }
 
+        // Playout cap randomization: coin flip for full vs fast search
+        let is_full = rng.f32() < config.playout_cap_full_prob;
+        let move_config = Config {
+            num_simulations: if is_full { effective_sims } else { fast_sims },
+            ..base_config.clone()
+        };
+
         // Run MCTS, reusing tree from previous search
         let result = match search {
             Some(ref mut s) => {
-                let step = s.step_to(&state, &actions_since_search, &mcts_config, &mut rng);
+                let step = s.step_to(&state, &actions_since_search, &move_config, &mut rng);
                 actions_since_search.clear();
                 drive_search(s, step, evaluator, &mut rng)
             }
             None => {
-                let (mut s, step) = Search::start(&state, &mcts_config, &mut rng);
+                let (mut s, step) = Search::start(&state, &move_config, &mut rng);
                 let result = drive_search(&mut s, step, evaluator, &mut rng);
                 search = Some(s);
                 actions_since_search.clear();
@@ -251,6 +269,7 @@ where
             policy_target,
             player: current,
             q,
+            full_search: is_full,
         });
 
         // Early-game: sample from improved policy for diversity.
@@ -295,6 +314,7 @@ where
                 policy_target: r.policy_target,
                 z,
                 q: r.q,
+                full_search: r.full_search,
             }
         })
         .collect();
@@ -499,12 +519,21 @@ mod burn_train {
 
             let (policy_logits, value_pred) = model.forward(features_tensor);
 
+            // Per-sample cross-entropy, masked by full_search (playout cap)
             let log_probs = log_softmax(policy_logits, 1);
-            let policy_loss = policy_tensor
-                .mul(log_probs)
-                .sum()
-                .neg()
-                .div_scalar(bs as f32);
+            let per_sample_ce = policy_tensor.mul(log_probs).sum_dim(1).neg();
+            let mask_data: Vec<f32> = batch_indices
+                .iter()
+                .map(|&i| if samples[i].full_search { 1.0 } else { 0.0 })
+                .collect();
+            let mask_tensor =
+                Tensor::<TrainBackend, 2>::from_data(TensorData::new(mask_data, [bs, 1]), device);
+            let num_full: usize = batch_indices
+                .iter()
+                .filter(|&&i| samples[i].full_search)
+                .count();
+            let denom = if num_full > 0 { num_full as f32 } else { 1.0 };
+            let policy_loss = per_sample_ce.mul(mask_tensor).sum().div_scalar(denom);
 
             let value_diff = value_pred.sub(value_tensor);
             let value_loss = value_diff.clone().mul(value_diff).mean();
@@ -586,12 +615,18 @@ mod burn_train {
 
             let (policy_logits, value_pred) = model.forward(features_tensor);
 
+            // Per-sample cross-entropy, masked by full_search (playout cap)
             let log_probs = log_softmax(policy_logits, 1);
-            let policy_loss = policy_tensor
-                .mul(log_probs)
-                .sum()
-                .neg()
-                .div_scalar(bs as f32);
+            let per_sample_ce = policy_tensor.mul(log_probs).sum_dim(1).neg();
+            let mask_data: Vec<f32> = batch
+                .iter()
+                .map(|s| if s.full_search { 1.0 } else { 0.0 })
+                .collect();
+            let mask_tensor =
+                Tensor::<InferBackend, 2>::from_data(TensorData::new(mask_data, [bs, 1]), device);
+            let num_full: usize = batch.iter().filter(|s| s.full_search).count();
+            let denom = if num_full > 0 { num_full as f32 } else { 1.0 };
+            let policy_loss = per_sample_ce.mul(mask_tensor).sum().div_scalar(denom);
 
             let value_diff = value_pred.sub(value_tensor);
             let value_loss = value_diff.clone().mul(value_diff).mean();
@@ -868,6 +903,19 @@ pub fn run_training<G, E, M>(
     for iteration in start_iteration..config.iterations {
         let iter_start = Instant::now();
 
+        // Progressive simulation ramp
+        let t = if config.iterations > 1 {
+            iteration as f64 / (config.iterations - 1) as f64
+        } else {
+            1.0
+        };
+        let effective_sims =
+            config.mcts_sims_init + ((config.mcts_sims - config.mcts_sims_init) as f64 * t) as u32;
+
+        // Cosine LR schedule
+        let effective_lr = config.lr_min
+            + 0.5 * (config.lr - config.lr_min) * (1.0 + (std::f64::consts::PI * t).cos());
+
         let evaluator = model.evaluator();
 
         let pb = indicatif::ProgressBar::new(config.games_per_iter as u64);
@@ -878,9 +926,10 @@ pub fn run_training<G, E, M>(
             .unwrap()
         );
         pb.set_message(format!(
-            "iter {}/{} self-play",
+            "iter {}/{} self-play (sims={})",
             iteration + 1,
             config.iterations,
+            effective_sims,
         ));
 
         let seeds: Vec<u64> = (0..config.games_per_iter).map(|_| rng.u64(..)).collect();
@@ -889,7 +938,13 @@ pub fn run_training<G, E, M>(
         let results: Vec<(Vec<Sample>, GameStats)> = seeds
             .into_par_iter()
             .map_with(evaluator, |ev, seed| {
-                let result = self_play_game::<G, M::Evaluator, E>(ev, &config, seed, &new_state);
+                let result = self_play_game::<G, M::Evaluator, E>(
+                    ev,
+                    &config,
+                    effective_sims,
+                    seed,
+                    &new_state,
+                );
                 let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
                 pb.set_position(done as u64);
                 result
@@ -985,12 +1040,6 @@ pub fn run_training<G, E, M>(
         }
 
         let mut samples: Vec<&Sample> = replay_buffer.iter().flat_map(|v| v.iter()).collect();
-
-        let effective_lr = if iteration < config.lr_decay_after {
-            config.lr
-        } else {
-            config.lr_final
-        };
 
         let alpha = if config.q_blend_generations > 0 {
             ((iteration + 1) as f32 / config.q_blend_generations as f32).min(1.0)
@@ -1160,7 +1209,7 @@ pub fn run_training<G, E, M>(
             samples_per_sec,
             total_elapsed.as_secs_f64(),
             bench_win_rate,
-            config.mcts_sims,
+            effective_sims,
             config.gumbel_m,
             config.c_visit,
             config.c_scale,

@@ -124,14 +124,9 @@ fn train_command() -> Command {
         )
         .arg(Arg::new("lr").long("lr").default_value("0.001"))
         .arg(
-            Arg::new("lr-final")
-                .long("lr-final")
-                .default_value("0.0001"),
-        )
-        .arg(
-            Arg::new("lr-decay-after")
-                .long("lr-decay-after")
-                .default_value("300"),
+            Arg::new("lr-min")
+                .long("lr-min")
+                .help("Minimum learning rate at end of cosine schedule (default: lr/10)"),
         )
         .arg(
             Arg::new("replay-window")
@@ -179,6 +174,23 @@ fn train_command() -> Command {
                 .help("Early-game turns where action is sampled from improved policy"),
         )
         .arg(
+            Arg::new("playout-cap-prob")
+                .long("playout-cap-prob")
+                .default_value("0.25")
+                .help("Probability of full search per move (playout cap randomization)"),
+        )
+        .arg(
+            Arg::new("playout-cap-fast-sims")
+                .long("playout-cap-fast-sims")
+                .default_value("32")
+                .help("Simulations for fast (non-full) search moves"),
+        )
+        .arg(
+            Arg::new("mcts-sims-init")
+                .long("mcts-sims-init")
+                .help("Starting simulation budget for progressive ramp (default: train-mcts)"),
+        )
+        .arg(
             Arg::new("balanced")
                 .long("balanced")
                 .action(clap::ArgAction::SetTrue)
@@ -219,15 +231,20 @@ fn run_train(matches: &clap::ArgMatches) {
 
     let parse = |name: &str| -> String { matches.get_one::<String>(name).unwrap().clone() };
 
+    let lr: f64 = parse("lr").parse().unwrap();
+    let mcts_sims: u32 = parse("train-mcts").parse().unwrap();
+
     let config = TrainConfig {
         iterations: parse("iterations").parse().unwrap(),
         games_per_iter: parse("games").parse().unwrap(),
-        mcts_sims: parse("train-mcts").parse().unwrap(),
+        mcts_sims,
         epochs: parse("epochs").parse().unwrap(),
         batch_size: parse("batch-size").parse().unwrap(),
-        lr: parse("lr").parse().unwrap(),
-        lr_final: parse("lr-final").parse().unwrap(),
-        lr_decay_after: parse("lr-decay-after").parse().unwrap(),
+        lr,
+        lr_min: matches
+            .get_one::<String>("lr-min")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(lr / 10.0),
         replay_window: parse("replay-window").parse().unwrap(),
         output_dir: parse("output"),
         resume: matches.get_one::<String>("resume").cloned(),
@@ -238,6 +255,12 @@ fn run_train(matches: &clap::ArgMatches) {
         c_visit: parse("c-visit").parse().unwrap(),
         c_scale: parse("c-scale").parse().unwrap(),
         explore_moves: parse("explore-moves").parse().unwrap(),
+        playout_cap_full_prob: parse("playout-cap-prob").parse().unwrap(),
+        playout_cap_fast_sims: parse("playout-cap-fast-sims").parse().unwrap(),
+        mcts_sims_init: matches
+            .get_one::<String>("mcts-sims-init")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(mcts_sims),
     };
 
     let device = NdArrayDevice::Cpu;
