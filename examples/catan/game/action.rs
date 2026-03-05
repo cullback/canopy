@@ -1,3 +1,44 @@
+//! # Action Space (249 total)
+//!
+//! | Range     | Count | Type            | Index mapping              |
+//! |-----------|-------|-----------------|----------------------------|
+//! |   0..54   |    54 | Settlement      | node_id                    |
+//! |  54..126  |    72 | Road            | edge_id                    |
+//! | 126..180  |    54 | City            | node_id                    |
+//! | 180       |     1 | Roll            | —                          |
+//! | 181       |     1 | EndTurn         | —                          |
+//! | 182       |     1 | BuyDevCard      | —                          |
+//! | 183       |     1 | PlayKnight      | —                          |
+//! | 184       |     1 | PlayRoadBuilding| —                          |
+//! | 185..200  |    15 | YearOfPlenty    | unordered pair (see below) |
+//! | 200..205  |     5 | Monopoly        | resource                   |
+//! | 205..224  |    19 | MoveRobber      | tile_id                    |
+//! | 224..229  |     5 | Discard         | resource                   |
+//! | 229..249  |    20 | MaritimeTrade   | ordered pair (see below)   |
+//!
+//! ## Compound encoding rules
+//!
+//! **YearOfPlenty** — unordered pairs with replacement (15 combinations):
+//!   `index = OFFSETS[min(r1,r2)] + (max(r1,r2) - min(r1,r2))`
+//!   where `OFFSETS = [0, 5, 9, 12, 14]`
+//!
+//! **MaritimeTrade** — ordered pairs, give ≠ recv (20 combinations):
+//!   `index = give * 4 + adjusted_recv`
+//!   where `adjusted_recv = recv` if `recv < give`, else `recv - 1`
+//!
+//! ## Phase → legal actions
+//!
+//! | Phase           | Legal actions                                              |
+//! |-----------------|------------------------------------------------------------|
+//! | PlaceSettlement | Settlement                                                 |
+//! | PlaceRoad       | Road                                                       |
+//! | PreRoll         | Roll, Knight, RoadBuilding, YOP, Monopoly                  |
+//! | Discard         | Discard                                                    |
+//! | MoveRobber      | MoveRobber                                                 |
+//! | Main            | EndTurn, Settlement, Road, City, BuyDevCard, Knight,       |
+//! |                 | RoadBuilding, YOP, Monopoly, MaritimeTrade                 |
+//! | RoadBuilding    | Road (or EndTurn if none legal / no roads left)            |
+
 use canopy2::player::Player;
 
 use super::board::{EdgeId, NodeId, TileId};

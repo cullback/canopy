@@ -1,3 +1,33 @@
+//! # RichNodeEncoder (1489 features)
+//!
+//! | Block           | Shape   | Features |
+//! |-----------------|---------|----------|
+//! | Phase           |       7 |        7 |
+//! | Players         | 21 × 2  |       42 |
+//! | Nodes           | 54 × 24 |     1296 |
+//! | Edges           | 72 × 2  |      144 |
+//!
+//! No tile or port streams — that information is folded into per-node features.
+//!
+//! ## Rich node (24 features per node)
+//!
+//! | Features                              | Count | Norm      |
+//! |---------------------------------------|-------|-----------|
+//! | building_cur, building_opp            |     2 | 0/0.5/1.0 |
+//! | potential_production per resource     |     5 | pips/13   |
+//! | robbed_production per resource        |     5 | pips/13   |
+//! | port_type one-hot (L/B/W/G/O/generic) |     6 | binary    |
+//! | road_count_cur, road_count_opp        |     2 | /3        |
+//! | adj_buildings_cur, adj_buildings_opp  |     2 | /3        |
+//! | hop_distance_cur, hop_distance_opp    |     2 | /5 capped |
+//!
+//! ## Rich edge (2 features per edge)
+//!
+//! | Feature                    | Norm      | Note                                        |
+//! |----------------------------|-----------|---------------------------------------------|
+//! | best_endpoint_production   | pips/13   | zeroed if endpoint occupied or adj-occupied |
+//! | best_endpoint_hop_distance | /5 capped | min hop_cur of two endpoints                |
+
 use canopy2::nn::StateEncoder;
 
 use crate::game::board::Port;
