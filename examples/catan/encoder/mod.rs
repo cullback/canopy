@@ -2,29 +2,29 @@
 //!
 //! ## Phase (7 features) — one-hot with scalar value
 //!
-//! | Idx | Phase           | Value                   |
-//! |-----|-----------------|-------------------------|
-//! |  0  | PlaceSettlement | 1.0                     |
-//! |  1  | PlaceRoad       | 1.0                     |
-//! |  2  | PreRoll         | 1.0                     |
-//! |  3  | Discard         | min(1, remaining / 10)  |
-//! |  4  | MoveRobber      | 1.0                     |
-//! |  5  | Main            | 1.0                     |
-//! |  6  | RoadBuilding    | 1.0                     |
+//! | Idx | Phase           | Value                 |
+//! |-----|-----------------|-----------------------|
+//! |  0  | PlaceSettlement | 1.0                   |
+//! |  1  | PlaceRoad       | 1.0                   |
+//! |  2  | PreRoll         | 1.0                   |
+//! |  3  | Discard         | min(1, remaining/10)  |
+//! |  4  | MoveRobber      | 1.0                   |
+//! |  5  | Main            | 1.0                   |
+//! |  6  | RoadBuilding    | 1.0                   |
 //!
 //! ## Per-player (21 × 2 = 42 features) — current player first
 //!
-//! | Features | Count | Normalization                                 |
-//! |----------|-------|-----------------------------------------------|
-//! | Resources (L/B/W/G/O)          | 5 | / 19                        |
-//! | Dev cards held                 | 5 | / deck_max (14,5,2,2,2)     |
-//! | Dev cards played               | 5 | / deck_max                  |
-//! | Settlements remaining          | 1 | / 5                         |
-//! | Cities remaining               | 1 | / 4                         |
-//! | Roads remaining                | 1 | / 15                        |
-//! | Longest-road award             | 1 | binary                      |
-//! | Largest-army award             | 1 | binary                      |
-//! | Longest road length            | 1 | / 15                        |
+//! | Features              | Count | Normalization           |
+//! |-----------------------|-------|-------------------------|
+//! | Resources (L/B/W/G/O) | 5     | / 19                    |
+//! | Dev cards held        | 5     | / deck_max (14,5,2,2,2) |
+//! | Dev cards played      | 5     | / deck_max              |
+//! | Settlements remaining | 1     | / 5                     |
+//! | Cities remaining      | 1     | / 4                     |
+//! | Roads remaining       | 1     | / 15                    |
+//! | Longest-road award    | 1     | binary                  |
+//! | Largest-army award    | 1     | binary                  |
+//! | Longest road length   | 1     | / 15                    |
 //!
 //! Self dev-held = exact counts; opponent dev-held = hypergeometric expected
 //! values over the unknown pool (deck + opponent hand).
@@ -34,11 +34,11 @@
 //! | Block           | Shape   | Features |
 //! |-----------------|---------|----------|
 //! | Phase           |       7 |        7 |
-//! | Players         | 21 × 2  |       42 |
-//! | Tiles           | 19 × 7  |      133 |
-//! | Nodes           | 54 × 2  |      108 |
-//! | Edges           | 72 × 2  |      144 |
-//! | Ports           |  9 × 5  |       45 |
+//! | Players         | 21 x 2  |       42 |
+//! | Tiles           | 19 x 7  |      133 |
+//! | Nodes           | 54 x 2  |      108 |
+//! | Edges           | 72 x 2  |      144 |
+//! | Ports           |  9 x 5  |       45 |
 //!
 //! - **Tile (7)**: resource one-hot (5), dice_prob / max_prob (1), robber (1)
 //! - **Node (2)**: building_cur, building_opp — 0.0 empty, 0.5 settlement, 1.0 city
@@ -53,15 +53,15 @@
 //!
 //! | Divisor | Meaning                           |
 //! |---------|-----------------------------------|
-//! |      19 | max resource cards of one type     |
-//! |  14/5/2 | original deck count per dev type   |
-//! |       5 | max settlements                    |
-//! |       4 | max cities                         |
-//! |      15 | max roads                          |
-//! |      13 | max pips at a single node (5+4+4)  |
-//! |       3 | max adjacent edges/nodes per node  |
-//! |       5 | hop distance BFS cap               |
-//! | 5/36    | max single-tile dice probability   |
+//! |      19 | max resource cards of one type    |
+//! |  14/5/2 | original deck count per dev type  |
+//! |       5 | max settlements                   |
+//! |       4 | max cities                        |
+//! |      15 | max roads                         |
+//! |      13 | max pips at a single node (5+4+4) |
+//! |       3 | max adjacent edges/nodes per node |
+//! |       5 | hop distance BFS cap              |
+//! |    5/36 | max single-tile dice probability  |
 
 use std::collections::VecDeque;
 
