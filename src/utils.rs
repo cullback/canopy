@@ -13,17 +13,18 @@ pub fn softmax_masked(logits: &[f32], indices: &[usize]) -> Vec<f32> {
     probs
 }
 
-/// Sample from a weighted `(item, weight)` slice. Weights need not sum to 1.
-pub fn sample_weighted(items: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
+/// Sample from a weighted `(item, weight)` slice. Returns `None` if empty.
+/// Weights need not sum to 1.
+pub fn sample_weighted(items: &[(usize, f32)], rng: &mut fastrand::Rng) -> Option<usize> {
     let total: f32 = items.iter().map(|(_, p)| p).sum();
     let mut r = rng.f32() * total;
     for &(item, p) in items {
         r -= p;
         if r <= 0.0 {
-            return item;
+            return Some(item);
         }
     }
-    items.last().unwrap().0
+    items.last().map(|&(item, _)| item)
 }
 
 pub struct HumanDuration(pub std::time::Duration);

@@ -45,9 +45,6 @@ pub trait Game: Clone + Send + Sync {
     fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
         let mut buf = Vec::new();
         self.chance_outcomes(&mut buf);
-        if buf.is_empty() {
-            return None;
-        }
-        Some(crate::utils::sample_weighted(&buf, rng))
+        crate::utils::sample_weighted(&buf, rng)
     }
 }

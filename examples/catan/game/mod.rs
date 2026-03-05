@@ -141,7 +141,7 @@ impl Game for GameState {
                         bp.map(|(i, p)| (i as usize, p))
                     }
                 };
-                Some(canopy2::utils::sample_weighted(&probs, rng))
+                canopy2::utils::sample_weighted(&probs, rng)
             }
             Phase::StealResolve => {
                 let target = self.current_player.opponent();
