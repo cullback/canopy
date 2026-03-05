@@ -1,118 +1,84 @@
-use std::io::{BufWriter, Write};
+use std::io::BufWriter;
 use std::path::PathBuf;
 
 use super::Sample;
 
-/// Declare a CSV row struct with automatic header and serialization.
-///
-/// Usage:
-/// ```ignore
-/// define_csv_row! {
-///     struct CsvRow {
-///         iteration: usize,
-///         loss: f64,
-///     }
-/// }
-/// ```
-/// Generates `CsvRow` with `fn header() -> &'static str` and `fn to_csv_line(&self) -> String`.
-macro_rules! define_csv_row {
-    (struct $name:ident { $( $field:ident : $ty:ty ),* $(,)? }) => {
-        pub(super) struct $name {
-            $( pub $field: $ty, )*
-        }
-
-        impl $name {
-            pub fn header() -> &'static str {
-                concat!( $( stringify!($field), ",", )* )
-            }
-
-            pub fn to_csv_line(&self) -> String {
-                let mut parts: Vec<String> = Vec::new();
-                $( parts.push(format!("{}", self.$field)); )*
-                parts.join(",")
-            }
-        }
-    };
-}
-
-define_csv_row! {
-    struct CsvRow {
-        iteration: usize,
-        train_policy_loss: f32,
-        train_value_loss: f32,
-        val_policy_loss: f32,
-        val_value_loss: f32,
-        avg_game_length: f64,
-        p1_wins: u32,
-        p2_wins: u32,
-        draws: u32,
-        avg_policy_entropy: f64,
-        replay_buffer_samples: usize,
-        bench_wins: u32,
-        bench_losses: u32,
-        bench_draws: u32,
-        lr: f64,
-        q_alpha: f32,
-        self_play_secs: f64,
-        train_secs: f64,
-        bench_secs: f64,
-        games: u32,
-        samples_this_iter: usize,
-        min_game_length: u32,
-        max_game_length: u32,
-        avg_z: f64,
-        avg_q: f64,
-        stddev_z: f64,
-        stddev_q: f64,
-        avg_value_target: f64,
-        avg_policy_max_prob: f64,
-        games_per_sec: f64,
-        samples_per_sec: f64,
-        total_elapsed_secs: f64,
-        bench_win_rate: f64,
-        mcts_sims: u32,
-        gumbel_m: u32,
-        c_visit: f32,
-        c_scale: f32,
-        epochs: usize,
-        batch_size: usize,
-        replay_window: usize,
-        explore_moves: u32,
-        games_per_iter: usize,
-        total_games: u64,
-        total_gradient_steps: u64,
-    }
+#[derive(serde::Serialize)]
+pub(super) struct CsvRow {
+    pub iteration: usize,
+    pub train_policy_loss: f32,
+    pub train_value_loss: f32,
+    pub val_policy_loss: f32,
+    pub val_value_loss: f32,
+    pub avg_game_length: f64,
+    pub p1_wins: u32,
+    pub p2_wins: u32,
+    pub draws: u32,
+    pub avg_policy_entropy: f64,
+    pub replay_buffer_samples: usize,
+    pub bench_wins: u32,
+    pub bench_losses: u32,
+    pub bench_draws: u32,
+    pub lr: f64,
+    pub q_alpha: f32,
+    pub self_play_secs: f64,
+    pub train_secs: f64,
+    pub bench_secs: f64,
+    pub games: u32,
+    pub samples_this_iter: usize,
+    pub min_game_length: u32,
+    pub max_game_length: u32,
+    pub avg_z: f64,
+    pub avg_q: f64,
+    pub stddev_z: f64,
+    pub stddev_q: f64,
+    pub avg_value_target: f64,
+    pub avg_policy_max_prob: f64,
+    pub games_per_sec: f64,
+    pub samples_per_sec: f64,
+    pub total_elapsed_secs: f64,
+    pub bench_win_rate: f64,
+    pub mcts_sims: u32,
+    pub gumbel_m: u32,
+    pub c_visit: f32,
+    pub c_scale: f32,
+    pub epochs: usize,
+    pub batch_size: usize,
+    pub replay_window: usize,
+    pub explore_moves: u32,
+    pub games_per_iter: usize,
+    pub total_games: u64,
+    pub total_gradient_steps: u64,
 }
 
 pub(super) struct CsvLogger {
-    writer: BufWriter<std::fs::File>,
+    writer: csv::Writer<BufWriter<std::fs::File>>,
 }
 
 impl CsvLogger {
     pub fn open(run_dir: &PathBuf, start_iteration: usize) -> Self {
         let csv_path = run_dir.join("metrics.csv");
         let writer = if start_iteration > 0 && csv_path.exists() {
-            BufWriter::new(
+            let buf = BufWriter::new(
                 std::fs::OpenOptions::new()
                     .append(true)
                     .open(&csv_path)
                     .expect("failed to open metrics.csv for append"),
-            )
+            );
+            csv::WriterBuilder::new()
+                .has_headers(false)
+                .from_writer(buf)
         } else {
-            let mut w = BufWriter::new(
+            let buf = BufWriter::new(
                 std::fs::File::create(&csv_path).expect("failed to create metrics.csv"),
             );
-            // Trim trailing comma from header
-            let header = CsvRow::header();
-            let header = header.trim_end_matches(',');
-            writeln!(w, "{header}").expect("failed to write CSV header");
-            w
+            csv::Writer::from_writer(buf)
         };
         CsvLogger { writer }
     }
 
     pub fn write_row(&mut self, row: &CsvRow) {
-        writeln!(self.writer, "{}", row.to_csv_line()).expect("failed to write CSV row");
+        self.writer.serialize(row).expect("failed to write CSV row");
         self.writer.flush().ok();
     }
 }
