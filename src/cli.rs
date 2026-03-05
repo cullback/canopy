@@ -1,4 +1,4 @@
-use clap::{Arg, ArgMatches};
+use clap::{Arg, ArgMatches, Command};
 
 use crate::mcts::Config;
 use crate::player::PerPlayer;
@@ -44,4 +44,131 @@ pub fn config_args() -> Vec<Arg> {
 /// Parse both MCTS [`Config`]s from clap [`ArgMatches`].
 pub fn parse_configs(matches: &ArgMatches) -> PerPlayer<Config> {
     PerPlayer(PREFIXES.map(|p| parse_one(matches, p)))
+}
+
+/// Returns a `train` subcommand with all game-agnostic args.
+///
+/// The caller can append game-specific args via `.arg()`.
+#[cfg(feature = "nn")]
+pub fn train_command() -> Command {
+    Command::new("train")
+        .about("Run AlphaZero-style self-play training")
+        .arg(
+            Arg::new("iterations")
+                .long("iterations")
+                .default_value("1000"),
+        )
+        .arg(
+            Arg::new("games")
+                .long("games")
+                .default_value("500")
+                .help("Self-play games per iteration"),
+        )
+        .arg(
+            Arg::new("train-mcts")
+                .long("train-mcts")
+                .default_value("800")
+                .help("MCTS simulations per move during self-play"),
+        )
+        .arg(
+            Arg::new("epochs")
+                .long("epochs")
+                .default_value("3")
+                .help("Training epochs per iteration"),
+        )
+        .arg(
+            Arg::new("batch-size")
+                .long("batch-size")
+                .default_value("256"),
+        )
+        .arg(Arg::new("lr").long("lr").default_value("0.001"))
+        .arg(
+            Arg::new("lr-min")
+                .long("lr-min")
+                .help("Minimum learning rate at end of cosine schedule (default: lr/10)"),
+        )
+        .arg(
+            Arg::new("replay-window")
+                .long("replay-window")
+                .default_value("40"),
+        )
+        .arg(
+            Arg::new("output")
+                .long("output")
+                .default_value("checkpoints"),
+        )
+        .arg(
+            Arg::new("resume")
+                .long("resume")
+                .help("Resume training from checkpoint path (e.g. checkpoints/run/model_iter_10)"),
+        )
+        .arg(
+            Arg::new("q-blend-gen")
+                .long("q-blend-gen")
+                .default_value("100"),
+        )
+        .arg(
+            Arg::new("bench-games")
+                .long("bench-games")
+                .default_value("0")
+                .help("Benchmark games vs rollout bot per iteration (0 to skip)"),
+        )
+        .arg(
+            Arg::new("gumbel-m")
+                .long("gumbel-m")
+                .default_value("16")
+                .help("Gumbel-Top-k sampled actions at root"),
+        )
+        .arg(Arg::new("c-visit").long("c-visit").default_value("50.0"))
+        .arg(Arg::new("c-scale").long("c-scale").default_value("1.0"))
+        .arg(
+            Arg::new("explore-moves")
+                .long("explore-moves")
+                .default_value("30")
+                .help("Early-game turns where action is sampled from improved policy"),
+        )
+        .arg(
+            Arg::new("playout-cap-prob")
+                .long("playout-cap-prob")
+                .default_value("0.25")
+                .help("Probability of full search per move (playout cap randomization)"),
+        )
+        .arg(
+            Arg::new("playout-cap-fast-sims")
+                .long("playout-cap-fast-sims")
+                .default_value("32")
+                .help("Simulations for fast (non-full) search moves"),
+        )
+}
+
+/// Parse all common training fields from clap [`ArgMatches`].
+#[cfg(feature = "nn")]
+pub fn parse_train_config(matches: &ArgMatches) -> crate::train::TrainConfig {
+    let parse = |name: &str| -> String { matches.get_one::<String>(name).unwrap().clone() };
+
+    let lr: f64 = parse("lr").parse().unwrap();
+
+    crate::train::TrainConfig {
+        iterations: parse("iterations").parse().unwrap(),
+        games_per_iter: parse("games").parse().unwrap(),
+        mcts_sims: parse("train-mcts").parse().unwrap(),
+        epochs: parse("epochs").parse().unwrap(),
+        batch_size: parse("batch-size").parse().unwrap(),
+        lr,
+        lr_min: matches
+            .get_one::<String>("lr-min")
+            .map(|s| s.parse().unwrap())
+            .unwrap_or(lr / 10.0),
+        replay_window: parse("replay-window").parse().unwrap(),
+        output_dir: parse("output"),
+        resume: matches.get_one::<String>("resume").cloned(),
+        q_blend_generations: parse("q-blend-gen").parse().unwrap(),
+        bench_games: parse("bench-games").parse().unwrap(),
+        gumbel_m: parse("gumbel-m").parse().unwrap(),
+        c_visit: parse("c-visit").parse().unwrap(),
+        c_scale: parse("c-scale").parse().unwrap(),
+        explore_moves: parse("explore-moves").parse().unwrap(),
+        playout_cap_full_prob: parse("playout-cap-prob").parse().unwrap(),
+        playout_cap_fast_sims: parse("playout-cap-fast-sims").parse().unwrap(),
+    }
 }
