@@ -159,6 +159,20 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
             bench_baseline_sims: 50,
             ..TrainConfig::default()
         },
+        "resnet" => TrainConfig {
+            iterations: 1000,
+            epochs: 3,
+            lr: 0.0005,
+            batch_size: 256,
+            replay_window: 20,
+            games_per_iter: 150,
+            mcts_sims: 800,
+            mcts_sims_start: 400,
+            bench_games: 20,
+            bench_interval: 20,
+            bench_baseline_sims: 800,
+            ..TrainConfig::default()
+        },
         _ => TrainConfig::default(),
     }
 }

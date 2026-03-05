@@ -4,6 +4,8 @@ use canopy2::nn::PolicyValueNet;
 
 use super::*;
 
+const TRUNK_DIM: usize = 384;
+
 #[derive(Module, Debug)]
 struct ResBlock<B: Backend> {
     linear1: Linear<B>,
@@ -42,8 +44,10 @@ pub struct CatanResModel<B: Backend> {
     blocks: Vec<ResBlock<B>>,
     policy_head1: Linear<B>,
     policy_head2: Linear<B>,
+    value_block: ResBlock<B>,
     value_head1: Linear<B>,
     value_head2: Linear<B>,
+    value_head3: Linear<B>,
 }
 
 #[derive(Config, Debug)]
@@ -72,13 +76,15 @@ impl CatanResModelConfig {
             } else {
                 None
             },
-            input_linear: LinearConfig::new(sdim, 256).init(device),
-            input_norm: LayerNormConfig::new(256).init(device),
-            blocks: (0..6).map(|_| res_block(256, device)).collect(),
-            policy_head1: LinearConfig::new(256, 256).init(device),
-            policy_head2: LinearConfig::new(256, self.num_actions).init(device),
-            value_head1: LinearConfig::new(256, 128).init(device),
-            value_head2: LinearConfig::new(128, 1).init(device),
+            input_linear: LinearConfig::new(sdim, TRUNK_DIM).init(device),
+            input_norm: LayerNormConfig::new(TRUNK_DIM).init(device),
+            blocks: (0..6).map(|_| res_block(TRUNK_DIM, device)).collect(),
+            policy_head1: LinearConfig::new(TRUNK_DIM, TRUNK_DIM).init(device),
+            policy_head2: LinearConfig::new(TRUNK_DIM, self.num_actions).init(device),
+            value_block: res_block(TRUNK_DIM, device),
+            value_head1: LinearConfig::new(TRUNK_DIM, 128).init(device),
+            value_head2: LinearConfig::new(128, 128).init(device),
+            value_head3: LinearConfig::new(128, 1).init(device),
         }
     }
 }
@@ -102,8 +108,10 @@ impl<B: Backend> PolicyValueNet<B> for CatanResModel<B> {
         let policy = relu(self.policy_head1.forward(x.clone()));
         let policy = self.policy_head2.forward(policy);
 
-        let v = relu(self.value_head1.forward(x));
-        let v = self.value_head2.forward(v);
+        let v = self.value_block.forward(x);
+        let v = relu(self.value_head1.forward(v));
+        let v = relu(self.value_head2.forward(v));
+        let v = self.value_head3.forward(v);
         let value = burn::tensor::activation::tanh(v);
 
         (policy, value)

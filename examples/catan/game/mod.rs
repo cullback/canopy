@@ -26,7 +26,7 @@ use resource::{
 use state::{GameState, Phase};
 
 const VP_TO_WIN: u8 = 15;
-const MAX_TURNS: u16 = 200;
+const MAX_TURNS: u16 = 400;
 pub(crate) const DISCARD_THRESHOLD: u8 = 9;
 pub(crate) const FRIENDLY_ROBBER_VP: u8 = 3;
 
@@ -60,9 +60,15 @@ impl Game for GameState {
                     // Decisive win
                     Status::Terminal(p.sign())
                 } else {
-                    // Timed out — heuristic reward from VP difference
-                    let reward = (vp1 - vp2) / VP_TO_WIN as f32;
-                    Status::Terminal(reward.clamp(-1.0, 1.0))
+                    // Timed out — half score for the VP leader, 0 if tied
+                    let reward = if vp1 > vp2 {
+                        0.5
+                    } else if vp2 > vp1 {
+                        -0.5
+                    } else {
+                        0.0
+                    };
+                    Status::Terminal(reward)
                 }
             }
             _ => Status::Ongoing(self.current_player),
@@ -79,6 +85,7 @@ impl Game for GameState {
     fn apply_action(&mut self, action: usize) {
         match self.phase {
             Phase::Roll => {
+                self.turn_number += 1;
                 let total = (action + 2) as u8;
                 if let Dice::Balanced(ref mut b) = self.dice {
                     b.draw(total, self.current_player);
@@ -307,7 +314,6 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
         4 => {
             state.current_player = Player::One;
             state.phase = Phase::Roll;
-            state.turn_number = 1;
         }
         _ => unreachable!("setup_count should be 1-4"),
     }
@@ -394,7 +400,6 @@ fn apply_end_turn(state: &mut GameState) {
     player.has_played_dev_card_this_turn = false;
 
     state.current_player = state.current_player.opponent();
-    state.turn_number += 1;
     state.phase = Phase::Roll;
 }
 

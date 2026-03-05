@@ -17,7 +17,7 @@ pub(super) fn run_benchmark<G: Game, Ev: Evaluator<G>>(
     use crate::eval::RolloutEvaluator;
 
     let nn_config = Config {
-        num_simulations: config.bench_baseline_sims,
+        num_simulations: config.mcts_sims,
         ..Default::default()
     };
     let baseline_config = Config {
