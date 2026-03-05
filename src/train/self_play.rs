@@ -6,19 +6,14 @@ use crate::player::Player;
 
 use super::{Sample, TrainConfig};
 
-struct GameRecord {
-    features: Box<[f32]>,
-    policy_target: Box<[f32]>,
-    player: Player,
-    q: f32,
-    full_search: bool,
-}
-
-pub(super) struct GameStats {
+/// Result of a single self-play game.
+pub(super) struct GameResult {
+    pub samples: Vec<Sample>,
     pub winner: Option<Player>,
     pub num_turns: u32,
 }
 
+/// Aggregated results from one self-play iteration (many games).
 pub(super) struct IterGameResults {
     pub samples: Vec<Sample>,
     pub p1_wins: u32,
@@ -58,57 +53,13 @@ pub(super) fn run_search<G: Game, E: Evaluator<G>>(
     drive_search(&mut search, step, evaluator, rng)
 }
 
-/// Wraps MCTS tree reuse bookkeeping: persists the search tree across moves
-/// and tracks intermediate actions (chance outcomes, forced moves) so the
-/// tree can be advanced to the current state.
-struct ReusableSearch<G: Game> {
-    search: Option<Search<G>>,
-    pending_actions: Vec<usize>,
-}
-
-impl<G: Game> ReusableSearch<G> {
-    fn new() -> Self {
-        Self {
-            search: None,
-            pending_actions: Vec::new(),
-        }
-    }
-
-    fn track_action(&mut self, action: usize) {
-        self.pending_actions.push(action);
-    }
-
-    fn run<E: Evaluator<G>>(
-        &mut self,
-        state: &G,
-        evaluator: &E,
-        config: &Config,
-        rng: &mut fastrand::Rng,
-    ) -> SearchResult {
-        match self.search {
-            Some(ref mut s) => {
-                let step = s.step_to(state, &self.pending_actions, config, rng);
-                self.pending_actions.clear();
-                drive_search(s, step, evaluator, rng)
-            }
-            None => {
-                let (mut s, step) = Search::start(state, config, rng);
-                let result = drive_search(&mut s, step, evaluator, rng);
-                self.search = Some(s);
-                self.pending_actions.clear();
-                result
-            }
-        }
-    }
-}
-
 pub(super) fn self_play_game<G, Ev, E>(
     evaluator: &Ev,
     config: &TrainConfig,
     effective_sims: u32,
     seed: u64,
     new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
-) -> (Vec<Sample>, GameStats)
+) -> GameResult
 where
     G: Game,
     Ev: Evaluator<G> + Clone,
@@ -125,16 +76,17 @@ where
 
     let mut state = new_state(&mut rng);
     let mut actions = Vec::new();
-    let mut records = Vec::new();
-    let mut features_buf = Vec::new();
+    let mut samples = Vec::new();
+    let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
     let mut turn_count: u32 = 0;
     let mut last_player: Option<Player> = None;
-    let mut tree = ReusableSearch::new();
+    let mut search: Option<Search<G>> = None;
+    let mut pending_actions = Vec::new();
 
     loop {
         // Resolve chance events
         if let Some(action) = state.sample_chance(&mut rng) {
-            tree.track_action(action);
+            pending_actions.push(action);
             state.apply_action(action);
             continue;
         }
@@ -155,7 +107,7 @@ where
 
         // Skip forced moves (single legal action)
         if actions.len() == 1 {
-            tree.track_action(actions[0]);
+            pending_actions.push(actions[0]);
             state.apply_action(actions[0]);
             continue;
         }
@@ -167,7 +119,20 @@ where
             ..base_config.clone()
         };
 
-        let result = tree.run(&state, evaluator, &move_config, &mut rng);
+        let result = match search {
+            Some(ref mut s) => {
+                let step = s.step_to(&state, &pending_actions, &move_config, &mut rng);
+                pending_actions.clear();
+                drive_search(s, step, evaluator, &mut rng)
+            }
+            None => {
+                let (mut s, step) = Search::start(&state, &move_config, &mut rng);
+                let r = drive_search(&mut s, step, evaluator, &mut rng);
+                search = Some(s);
+                pending_actions.clear();
+                r
+            }
+        };
 
         // Root Q from current player's perspective.
         // result.value is in [-1,1] from P1's perspective.
@@ -182,55 +147,46 @@ where
         };
 
         // Encode state from current player's perspective
+        features_buf.clear();
         E::encode(&state, &mut features_buf);
 
-        records.push(GameRecord {
+        // z stores the player's sign as a placeholder; multiplied by the
+        // terminal reward once the game ends.
+        samples.push(Sample {
             features: features_buf.clone().into_boxed_slice(),
             policy_target: result.policy.into_boxed_slice(),
-            player: current,
+            z: current.sign(),
             q,
             full_search: is_full,
         });
-        tree.track_action(chosen);
+        pending_actions.push(chosen);
         state.apply_action(chosen);
     }
 
-    // Assign value targets from game outcome
-    let (terminal_value, winner) = match state.status() {
-        Status::Terminal(reward) => {
-            let winner = if reward > 0.0 {
-                Some(Player::One)
-            } else if reward < 0.0 {
-                Some(Player::Two)
-            } else {
-                None
-            };
-            (reward, winner)
-        }
-        _ => (0.0, None),
+    // Assign value targets from game outcome.
+    // z currently holds the player's sign; multiply by terminal reward
+    // to get the value target from each player's perspective.
+    let terminal_value = match state.status() {
+        Status::Terminal(reward) => reward,
+        _ => 0.0,
+    };
+    for s in &mut samples {
+        s.z *= terminal_value;
+    }
+
+    let winner = if terminal_value > 0.0 {
+        Some(Player::One)
+    } else if terminal_value < 0.0 {
+        Some(Player::Two)
+    } else {
+        None
     };
 
-    let stats = GameStats {
+    GameResult {
+        samples,
         winner,
         num_turns: turn_count,
-    };
-
-    let samples = records
-        .into_iter()
-        .map(|r| {
-            // terminal_value is from P1's perspective in [-1,1].
-            // Convert to current player's perspective.
-            let z = terminal_value * r.player.sign();
-            Sample {
-                features: r.features,
-                policy_target: r.policy_target,
-                z,
-                q: r.q,
-                full_search: r.full_search,
-            }
-        })
-        .collect();
-    (samples, stats)
+    }
 }
 
 fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
@@ -305,7 +261,7 @@ where
     let seeds: Vec<u64> = (0..config.games_per_iter).map(|_| rng.u64(..)).collect();
     let completed = std::sync::atomic::AtomicU32::new(0);
 
-    let results: Vec<(Vec<Sample>, GameStats)> = seeds
+    let results: Vec<GameResult> = seeds
         .into_par_iter()
         .map_with(evaluator, |ev, seed| {
             let result = self_play_game::<G, Ev, E>(ev, config, effective_sims, seed, new_state);
@@ -324,17 +280,17 @@ where
     let mut min_game_length: Option<u32> = None;
     let mut max_game_length = 0u32;
 
-    for (game_samples, stats) in results {
-        total_turns += stats.num_turns;
+    for game in results {
+        total_turns += game.num_turns;
         min_game_length =
-            Some(min_game_length.map_or(stats.num_turns, |m: u32| m.min(stats.num_turns)));
-        max_game_length = max_game_length.max(stats.num_turns);
-        match stats.winner {
+            Some(min_game_length.map_or(game.num_turns, |m: u32| m.min(game.num_turns)));
+        max_game_length = max_game_length.max(game.num_turns);
+        match game.winner {
             Some(Player::One) => p1_wins += 1,
             Some(Player::Two) => p2_wins += 1,
             None => draws += 1,
         }
-        samples.extend(game_samples);
+        samples.extend(game.samples);
     }
 
     IterGameResults {

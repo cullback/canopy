@@ -24,7 +24,9 @@ pub use burn_backend::BurnTrainableModel;
 pub struct Sample {
     pub features: Box<[f32]>,
     pub policy_target: Box<[f32]>,
-    /// Game outcome from current player's perspective: +1, -1, or 0
+    /// Value target: game outcome from current player's perspective (+1, -1, or 0).
+    /// During self-play construction this temporarily holds the player's sign,
+    /// then is multiplied by the terminal reward once the game ends.
     pub z: f32,
     /// Root Q from current player's perspective, in [-1, 1]
     pub q: f32,
