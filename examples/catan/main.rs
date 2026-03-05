@@ -70,11 +70,18 @@ fn app() -> Command {
 
     #[cfg(feature = "nn")]
     {
-        cmd = cmd.arg(
-            Arg::new("nn-model")
-                .long("nn-model")
-                .help("Path to neural network checkpoint (for nn evaluator)"),
-        );
+        cmd = cmd
+            .arg(
+                Arg::new("nn-model")
+                    .long("nn-model")
+                    .help("Path to neural network checkpoint (for nn evaluator)"),
+            )
+            .arg(
+                Arg::new("encoder")
+                    .long("encoder")
+                    .default_value("basic")
+                    .help("Encoder used for nn evaluator: basic or rich"),
+            );
     }
 
     cmd = cmd.arg(
@@ -98,6 +105,12 @@ fn train_command() -> Command {
                 .long("model")
                 .default_value("simple")
                 .help("Model architecture: simple (default) or resnet"),
+        )
+        .arg(
+            Arg::new("encoder")
+                .long("encoder")
+                .default_value("basic")
+                .help("Encoder: basic (480 features) or rich (1490 features)"),
         )
         .arg(
             Arg::new("balanced")
@@ -157,6 +170,7 @@ fn run_train(matches: &clap::ArgMatches) {
     use canopy2::train::BurnTrainableModel;
 
     let model_type = matches.get_one::<String>("model").unwrap().as_str();
+    let encoder_type = matches.get_one::<String>("encoder").unwrap().as_str();
     let config = cli::parse_train_config(matches, train_config(model_type));
     let device = NdArrayDevice::Cpu;
 
@@ -168,24 +182,59 @@ fn run_train(matches: &clap::ArgMatches) {
 
     let new_state = move |rng: &mut fastrand::Rng| game::new_game(rng.u64(..), dice);
 
-    match model_type {
-        "simple" => {
-            let model_config = model::CatanModelConfig::new(GameState::NUM_ACTIONS);
-            let mut trainable = BurnTrainableModel::<GameState, encoder::CatanEncoder, _>::new(
-                move |dev| model_config.init(dev),
-                &device,
-            );
+    macro_rules! train {
+        ($encoder:ty, $config_expr:expr) => {{
+            let mc = $config_expr;
+            let mut trainable =
+                BurnTrainableModel::<GameState, $encoder, _>::new(move |dev| mc.init(dev), &device);
             canopy2::train::run_training::<GameState, _>(config, &mut trainable, new_state);
+        }};
+    }
+
+    macro_rules! simple_cfg {
+        ($enc:ty) => {
+            model::CatanModelConfig::new(
+                GameState::NUM_ACTIONS,
+                <$enc>::NODES_F,
+                <$enc>::EDGES_F,
+                <$enc>::TILES_F,
+                <$enc>::PORTS_F,
+            )
+        };
+    }
+
+    macro_rules! resnet_cfg {
+        ($enc:ty) => {
+            model::CatanResModelConfig::new(
+                GameState::NUM_ACTIONS,
+                <$enc>::NODES_F,
+                <$enc>::EDGES_F,
+                <$enc>::TILES_F,
+                <$enc>::PORTS_F,
+            )
+        };
+    }
+
+    match (model_type, encoder_type) {
+        ("simple", "basic") => {
+            train!(encoder::BasicEncoder, simple_cfg!(encoder::BasicEncoder))
         }
-        "resnet" => {
-            let model_config = model::CatanResModelConfig::new(GameState::NUM_ACTIONS);
-            let mut trainable = BurnTrainableModel::<GameState, encoder::CatanEncoder, _>::new(
-                move |dev| model_config.init(dev),
-                &device,
-            );
-            canopy2::train::run_training::<GameState, _>(config, &mut trainable, new_state);
+        ("simple", "rich") => {
+            train!(
+                encoder::RichNodeEncoder,
+                simple_cfg!(encoder::RichNodeEncoder)
+            )
         }
-        other => panic!("unknown model '{other}', expected 'simple' or 'resnet'"),
+        ("resnet", "basic") => {
+            train!(encoder::BasicEncoder, resnet_cfg!(encoder::BasicEncoder))
+        }
+        ("resnet", "rich") => {
+            train!(
+                encoder::RichNodeEncoder,
+                resnet_cfg!(encoder::RichNodeEncoder)
+            )
+        }
+        (m, e) => panic!("unknown model '{m}' or encoder '{e}'"),
     }
 }
 
@@ -210,11 +259,13 @@ fn run_tournament(matches: &clap::ArgMatches) {
     };
 
     #[cfg(feature = "nn")]
-    let nn_eval = {
+    let nn_eval: Option<Box<dyn Evaluator<GameState>>> = {
         let nn_model_path = matches.get_one::<String>("nn-model");
         if p1_eval_name == "nn" || p2_eval_name == "nn" {
+            let encoder_type = matches.get_one::<String>("encoder").unwrap().as_str();
             Some(load_nn_eval(
                 nn_model_path.expect("--nn-model required when using nn evaluator"),
+                encoder_type,
             ))
         } else {
             None
@@ -226,7 +277,7 @@ fn run_tournament(matches: &clap::ArgMatches) {
             "rollout" => &rollout,
             "heuristic" => &heuristic_eval,
             #[cfg(feature = "nn")]
-            "nn" => nn_eval.as_ref().unwrap(),
+            "nn" => nn_eval.as_deref().unwrap(),
             other => {
                 panic!("unknown evaluator '{other}', expected 'rollout', 'heuristic', or 'nn'")
             }
@@ -273,13 +324,7 @@ fn run_tournament(matches: &clap::ArgMatches) {
 }
 
 #[cfg(feature = "nn")]
-fn load_nn_eval(
-    checkpoint_path: &str,
-) -> canopy2::nn::NeuralEvaluator<
-    burn::backend::NdArray,
-    encoder::CatanEncoder,
-    model::CatanModel<burn::backend::NdArray>,
-> {
+fn load_nn_eval(checkpoint_path: &str, encoder_type: &str) -> Box<dyn Evaluator<GameState>> {
     use burn::backend::NdArray;
     use burn::backend::ndarray::NdArrayDevice;
     use burn::module::Module;
@@ -288,13 +333,28 @@ fn load_nn_eval(
     use canopy2::nn::NeuralEvaluator;
 
     let device = NdArrayDevice::Cpu;
-    let model_config = model::CatanModelConfig::new(GameState::NUM_ACTIONS);
-    let model: model::CatanModel<NdArray> = model_config.init(&device);
-
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-    let model = model
-        .load_file(checkpoint_path, &recorder, &device)
-        .expect("failed to load nn checkpoint");
 
-    NeuralEvaluator::new(model, device)
+    macro_rules! load {
+        ($encoder:ty) => {{
+            let mc = model::CatanModelConfig::new(
+                GameState::NUM_ACTIONS,
+                <$encoder>::NODES_F,
+                <$encoder>::EDGES_F,
+                <$encoder>::TILES_F,
+                <$encoder>::PORTS_F,
+            );
+            let model: model::CatanModel<NdArray> = mc.init(&device);
+            let model = model
+                .load_file(checkpoint_path, &recorder, &device)
+                .expect("failed to load nn checkpoint");
+            Box::new(NeuralEvaluator::<NdArray, $encoder, _>::new(model, device))
+        }};
+    }
+
+    match encoder_type {
+        "basic" => load!(encoder::BasicEncoder),
+        "rich" => load!(encoder::RichNodeEncoder),
+        other => panic!("unknown encoder '{other}', expected 'basic' or 'rich'"),
+    }
 }

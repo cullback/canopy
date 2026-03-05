@@ -33,10 +33,10 @@ fn res_block<B: Backend>(dim: usize, device: &B::Device) -> ResBlock<B> {
 #[derive(Module, Debug)]
 pub struct CatanResModel<B: Backend> {
     proj_global: Linear<B>,
-    proj_tiles: Linear<B>,
+    proj_tiles: Option<Linear<B>>,
     proj_nodes: Linear<B>,
     proj_edges: Linear<B>,
-    proj_ports: Linear<B>,
+    proj_ports: Option<Linear<B>>,
     input_linear: Linear<B>,
     input_norm: LayerNorm<B>,
     blocks: Vec<ResBlock<B>>,
@@ -49,17 +49,30 @@ pub struct CatanResModel<B: Backend> {
 #[derive(Config, Debug)]
 pub struct CatanResModelConfig {
     num_actions: usize,
+    nodes_f: usize,
+    edges_f: usize,
+    tiles_f: usize,
+    ports_f: usize,
 }
 
 impl CatanResModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> CatanResModel<B> {
+        let sdim = stream_dim(self.tiles_f, self.ports_f);
         CatanResModel {
-            proj_global: LinearConfig::new(GLOBAL_LEN, 64).init(device),
-            proj_tiles: LinearConfig::new(TILES_F, 32).init(device),
-            proj_nodes: LinearConfig::new(NODES_F, 32).init(device),
-            proj_edges: LinearConfig::new(EDGES_F, 16).init(device),
-            proj_ports: LinearConfig::new(PORTS_F, 16).init(device),
-            input_linear: LinearConfig::new(STREAM_DIM, 256).init(device),
+            proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
+            proj_tiles: if self.tiles_f > 0 {
+                Some(LinearConfig::new(self.tiles_f, TILES_OUT).init(device))
+            } else {
+                None
+            },
+            proj_nodes: LinearConfig::new(self.nodes_f, NODES_OUT).init(device),
+            proj_edges: LinearConfig::new(self.edges_f, EDGES_OUT).init(device),
+            proj_ports: if self.ports_f > 0 {
+                Some(LinearConfig::new(self.ports_f, PORTS_OUT).init(device))
+            } else {
+                None
+            },
+            input_linear: LinearConfig::new(sdim, 256).init(device),
             input_norm: LayerNormConfig::new(256).init(device),
             blocks: (0..6).map(|_| res_block(256, device)).collect(),
             policy_head1: LinearConfig::new(256, 256).init(device),

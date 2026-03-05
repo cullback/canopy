@@ -7,23 +7,20 @@ pub use simple::{CatanModel, CatanModelConfig};
 use burn::nn::Linear;
 use burn::prelude::*;
 
-// Stream slices (must match encoder layout exactly)
+// Stream constants — fixed board topology sizes
 const GLOBAL_START: usize = 0;
 const GLOBAL_LEN: usize = 50;
-const TILES_START: usize = 50;
 const TILES_N: usize = 19;
-const TILES_F: usize = 7;
-const NODES_START: usize = 183;
 const NODES_N: usize = 54;
-const NODES_F: usize = 2;
-const EDGES_START: usize = 291;
 const EDGES_N: usize = 72;
-const EDGES_F: usize = 2;
-const PORTS_START: usize = 435;
 const PORTS_N: usize = 9;
-const PORTS_F: usize = 5;
 
-const STREAM_DIM: usize = 64 + 32 + 32 + 16 + 16; // 160
+// Projection output dimensions
+const GLOBAL_OUT: usize = 64;
+const TILES_OUT: usize = 32;
+const NODES_OUT: usize = 32;
+const EDGES_OUT: usize = 16;
+const PORTS_OUT: usize = 16;
 
 fn relu<B: Backend, const D: usize>(x: Tensor<B, D>) -> Tensor<B, D> {
     burn::tensor::activation::relu(x)
@@ -49,25 +46,62 @@ fn project_stream<B: Backend>(
     grouped.mean_dim(1).reshape([bs, out_dim])
 }
 
-/// Project the global stream: [bs, 50] → Linear+ReLU → [bs, 64].
+/// Project the global stream: [bs, GLOBAL_LEN] → Linear+ReLU → [bs, GLOBAL_OUT].
 fn project_global<B: Backend>(input: &Tensor<B, 2>, linear: &Linear<B>) -> Tensor<B, 2> {
     let slice = input.clone().narrow(1, GLOBAL_START, GLOBAL_LEN);
     relu(linear.forward(slice))
 }
 
-/// Run all stream projections and concatenate to [bs, 160].
+/// Run all stream projections and concatenate.
+///
+/// Supports variable encoder layouts: tile and port streams are optional.
+/// Stream feature dimensions are read from the Linear weight shapes so the
+/// function adapts to any encoder without stored layout metadata.
 fn project_streams<B: Backend>(
     input: &Tensor<B, 2>,
-    global: &Linear<B>,
-    tiles: &Linear<B>,
-    nodes: &Linear<B>,
-    edges: &Linear<B>,
-    ports: &Linear<B>,
+    proj_global: &Linear<B>,
+    proj_tiles: &Option<Linear<B>>,
+    proj_nodes: &Linear<B>,
+    proj_edges: &Linear<B>,
+    proj_ports: &Option<Linear<B>>,
 ) -> Tensor<B, 2> {
-    let g = project_global(input, global);
-    let t = project_stream(input, TILES_START, TILES_N, TILES_F, tiles);
-    let n = project_stream(input, NODES_START, NODES_N, NODES_F, nodes);
-    let e = project_stream(input, EDGES_START, EDGES_N, EDGES_F, edges);
-    let p = project_stream(input, PORTS_START, PORTS_N, PORTS_F, ports);
-    Tensor::cat(vec![g, t, n, e, p], 1)
+    let mut parts = vec![project_global(input, proj_global)];
+    let mut offset = GLOBAL_LEN;
+
+    // Tile stream (optional)
+    if let Some(ref tiles) = *proj_tiles {
+        let tiles_f = tiles.weight.dims()[1];
+        parts.push(project_stream(input, offset, TILES_N, tiles_f, tiles));
+        offset += TILES_N * tiles_f;
+    }
+
+    // Node stream (always present)
+    let nodes_f = proj_nodes.weight.dims()[1];
+    parts.push(project_stream(input, offset, NODES_N, nodes_f, proj_nodes));
+    offset += NODES_N * nodes_f;
+
+    // Edge stream (always present)
+    let edges_f = proj_edges.weight.dims()[1];
+    parts.push(project_stream(input, offset, EDGES_N, edges_f, proj_edges));
+    offset += EDGES_N * edges_f;
+
+    // Port stream (optional)
+    if let Some(ref ports) = *proj_ports {
+        let ports_f = ports.weight.dims()[1];
+        parts.push(project_stream(input, offset, PORTS_N, ports_f, ports));
+    }
+
+    Tensor::cat(parts, 1)
+}
+
+/// Compute the concatenated stream dimension from config parameters.
+fn stream_dim(tiles_f: usize, ports_f: usize) -> usize {
+    let mut dim = GLOBAL_OUT + NODES_OUT + EDGES_OUT;
+    if tiles_f > 0 {
+        dim += TILES_OUT;
+    }
+    if ports_f > 0 {
+        dim += PORTS_OUT;
+    }
+    dim
 }

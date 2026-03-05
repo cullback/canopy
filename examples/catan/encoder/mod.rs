@@ -1,0 +1,236 @@
+use std::collections::VecDeque;
+
+use canopy2::player::Player;
+
+use crate::game::resource::ALL_RESOURCES;
+use crate::game::state::{GameState, Phase, PlayerBoards};
+use crate::game::topology::Topology;
+
+mod basic;
+mod rich_node;
+
+pub use basic::BasicEncoder;
+pub use rich_node::RichNodeEncoder;
+
+/// Dice probability for each sum (indices 2..=12, 0 and 1 unused).
+pub(crate) const DICE_PROB: [f32; 13] = [
+    0.0,
+    0.0,
+    1.0 / 36.0, // 2
+    2.0 / 36.0, // 3
+    3.0 / 36.0, // 4
+    4.0 / 36.0, // 5
+    5.0 / 36.0, // 6
+    0.0,        // 7
+    5.0 / 36.0, // 8
+    4.0 / 36.0, // 9
+    3.0 / 36.0, // 10
+    2.0 / 36.0, // 11
+    1.0 / 36.0, // 12
+];
+
+pub(crate) const MAX_DICE_PROB: f32 = 5.0 / 36.0;
+
+/// Number of pips (dots on the number token) for each dice sum.
+/// pips[n] = 6 - |7 - n| for n in 2..=12, 0 otherwise.
+/// Maximum single-tile pips = 5 (for numbers 6 and 8).
+pub(crate) const PIPS: [u8; 13] = [0, 0, 1, 2, 3, 4, 5, 0, 5, 4, 3, 2, 1];
+
+/// Max total pips at a single node: 13 (5+4+4, due to no-adjacent-6-8 rule).
+pub(crate) const MAX_NODE_PIPS: f32 = 13.0;
+
+/// Compute shortest hop-distance from each node to the nearest building in
+/// `buildings` (bitmask). Uses multi-source BFS on the board topology graph.
+/// Returns distances capped at `cap`.
+pub(crate) fn compute_hop_distances(topo: &Topology, buildings: u64, cap: u8) -> [u8; 54] {
+    let mut dist = [cap; 54];
+    let mut queue = VecDeque::new();
+
+    for i in 0..54u8 {
+        if buildings & (1u64 << i) != 0 {
+            dist[i as usize] = 0;
+            queue.push_back(i);
+        }
+    }
+
+    while let Some(node_id) = queue.pop_front() {
+        let d = dist[node_id as usize];
+        if d >= cap {
+            continue;
+        }
+        for &adj in &topo.nodes[node_id as usize].adjacent_nodes {
+            let adj_idx = adj.0 as usize;
+            if dist[adj_idx] > d + 1 {
+                dist[adj_idx] = d + 1;
+                queue.push_back(adj.0);
+            }
+        }
+    }
+
+    dist
+}
+
+/// Original deck composition per card type.
+pub(crate) const ORIGINAL_DECK: [f32; 5] = [14.0, 5.0, 2.0, 2.0, 2.0];
+
+/// Push phase one-hot (8 features).
+pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
+    let phase_idx = match &state.phase {
+        Phase::PlaceSettlement => 0,
+        Phase::PlaceRoad => 1,
+        Phase::Roll => 2,
+        Phase::Discard { .. } => 3,
+        Phase::MoveRobber => 4,
+        Phase::StealResolve => 5,
+        Phase::Main => 6,
+        Phase::RoadBuilding { .. } => 7,
+        Phase::GameOver(_) => unreachable!(),
+    };
+    for i in 0..8 {
+        out.push(f32::from(i == phase_idx));
+    }
+}
+
+/// Push per-player features (21).
+///
+/// Dev card held values are exact counts for self, or hypergeometric
+/// expected values for the opponent.
+pub(crate) fn encode_player(state: &GameState, player_to_encode: Player, out: &mut Vec<f32>) {
+    let player = &state.players[player_to_encode];
+    let is_self = player_to_encode == state.current_player;
+
+    // Resources (5)
+    for &r in &ALL_RESOURCES {
+        out.push(player.hand[r] as f32 / 19.0);
+    }
+
+    // Dev cards held (5) — exact for self, expected for opponent
+    let dev_cards_held = if is_self {
+        self_dev_cards(state, player_to_encode)
+    } else {
+        opponent_expected_dev_cards(state, player_to_encode.opponent(), player_to_encode)
+    };
+    out.extend_from_slice(&dev_cards_held);
+
+    // Dev cards played — exact counts, visible for both (5)
+    for (count, max) in player.dev_cards_played.0.iter().zip(&ORIGINAL_DECK) {
+        out.push(*count as f32 / max);
+    }
+
+    // Settlements left (1)
+    out.push(player.settlements_left as f32 / 5.0);
+
+    // Cities left (1)
+    out.push(player.cities_left as f32 / 4.0);
+
+    // Roads left (1)
+    out.push(player.roads_left as f32 / 15.0);
+
+    // Has longest road award (1)
+    let has_lr = state
+        .longest_road
+        .is_some_and(|(lr_pid, _)| lr_pid == player_to_encode);
+    out.push(f32::from(has_lr));
+
+    // Has largest army award (1)
+    let has_la = state
+        .largest_army
+        .is_some_and(|(la_pid, _)| la_pid == player_to_encode);
+    out.push(f32::from(has_la));
+
+    // Longest road path length (1)
+    out.push(state.boards[player_to_encode].road_network.longest_road() as f32 / 15.0);
+}
+
+/// Compute normalized dev card held values for the perspective player (exact).
+fn self_dev_cards(state: &GameState, pid: Player) -> [f32; 5] {
+    let player = &state.players[pid];
+    let mut out = [0.0; 5];
+    for (i, (count, max)) in player.dev_cards.0.iter().zip(&ORIGINAL_DECK).enumerate() {
+        out[i] = *count as f32 / max;
+    }
+    out
+}
+
+/// Compute normalized expected dev card held values for the opponent
+/// using hypergeometric proportions over the unknown card pool.
+fn opponent_expected_dev_cards(state: &GameState, perspective: Player, opp: Player) -> [f32; 5] {
+    let self_player = &state.players[perspective];
+    let opp_player = &state.players[opp];
+
+    let opp_hand_size: f32 = opp_player.dev_cards.0.iter().sum::<u8>() as f32
+        + opp_player.dev_cards_bought_this_turn.0.iter().sum::<u8>() as f32;
+    let deck_remaining = state.dev_deck.remaining() as f32;
+    let total_unknown = deck_remaining + opp_hand_size;
+
+    let mut out = [0.0; 5];
+    if total_unknown > 0.0 {
+        for t in 0..5 {
+            let unknown_of_type = ORIGINAL_DECK[t]
+                - self_player.dev_cards.0[t] as f32
+                - self_player.dev_cards_bought_this_turn.0[t] as f32
+                - self_player.dev_cards_played.0[t] as f32
+                - opp_player.dev_cards_played.0[t] as f32;
+            out[t] = (unknown_of_type * opp_hand_size / total_unknown) / ORIGINAL_DECK[t];
+        }
+    }
+    out
+}
+
+/// Building value for a single node.
+/// 0.0 = empty, 0.5 = settlement, 1.0 = city.
+pub(crate) fn node_value(boards: &PlayerBoards, i: u8) -> f32 {
+    let mask = 1u64 << i;
+    if boards.cities & mask != 0 {
+        1.0
+    } else if boards.settlements & mask != 0 {
+        0.5
+    } else {
+        0.0
+    }
+}
+
+/// Push tile stream (19 × 7 = 133 features).
+pub(crate) fn encode_tiles(state: &GameState, out: &mut Vec<f32>) {
+    let topo = &state.topology;
+    for tile in &topo.tiles {
+        // Resource one-hot (5)
+        let resource_idx = tile.terrain.resource().map(|r| r as usize);
+        for i in 0..5 {
+            out.push(f32::from(resource_idx == Some(i)));
+        }
+        // Dice probability (1)
+        let mut prob = 0.0f32;
+        for roll in 2..=12u8 {
+            if topo.dice_to_tiles[roll as usize].contains(&tile.id) {
+                prob += DICE_PROB[roll as usize];
+            }
+        }
+        out.push(prob / MAX_DICE_PROB);
+        // Robber (1)
+        out.push(f32::from(state.robber == tile.id));
+    }
+}
+
+/// Push edge stream (72 × 2 = 144 features).
+pub(crate) fn encode_edges(state: &GameState, out: &mut Vec<f32>) {
+    let current = state.current_player;
+    let opp = current.opponent();
+    let cur_board = &state.boards[current];
+    let opp_board = &state.boards[opp];
+    for i in 0..72u8 {
+        let mask = 1u128 << i;
+        out.push(f32::from(cur_board.road_network.roads & mask != 0));
+        out.push(f32::from(opp_board.road_network.roads & mask != 0));
+    }
+}
+
+/// Push port stream (9 × 5 = 45 features).
+pub(crate) fn encode_ports(state: &GameState, out: &mut Vec<f32>) {
+    for &port_type in &state.topology.port_types {
+        let resource_idx = port_type.map(|r| r as usize);
+        for i in 0..5 {
+            out.push(f32::from(resource_idx == Some(i)));
+        }
+    }
+}

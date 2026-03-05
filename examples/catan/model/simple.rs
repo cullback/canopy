@@ -7,10 +7,10 @@ use super::*;
 #[derive(Module, Debug)]
 pub struct CatanModel<B: Backend> {
     proj_global: Linear<B>,
-    proj_tiles: Linear<B>,
+    proj_tiles: Option<Linear<B>>,
     proj_nodes: Linear<B>,
     proj_edges: Linear<B>,
-    proj_ports: Linear<B>,
+    proj_ports: Option<Linear<B>>,
     trunk1: Linear<B>,
     trunk2: Linear<B>,
     policy_head: Linear<B>,
@@ -21,17 +21,30 @@ pub struct CatanModel<B: Backend> {
 #[derive(Config, Debug)]
 pub struct CatanModelConfig {
     num_actions: usize,
+    nodes_f: usize,
+    edges_f: usize,
+    tiles_f: usize,
+    ports_f: usize,
 }
 
 impl CatanModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> CatanModel<B> {
+        let sdim = stream_dim(self.tiles_f, self.ports_f);
         CatanModel {
-            proj_global: LinearConfig::new(GLOBAL_LEN, 64).init(device),
-            proj_tiles: LinearConfig::new(TILES_F, 32).init(device),
-            proj_nodes: LinearConfig::new(NODES_F, 32).init(device),
-            proj_edges: LinearConfig::new(EDGES_F, 16).init(device),
-            proj_ports: LinearConfig::new(PORTS_F, 16).init(device),
-            trunk1: LinearConfig::new(STREAM_DIM, 256).init(device),
+            proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
+            proj_tiles: if self.tiles_f > 0 {
+                Some(LinearConfig::new(self.tiles_f, TILES_OUT).init(device))
+            } else {
+                None
+            },
+            proj_nodes: LinearConfig::new(self.nodes_f, NODES_OUT).init(device),
+            proj_edges: LinearConfig::new(self.edges_f, EDGES_OUT).init(device),
+            proj_ports: if self.ports_f > 0 {
+                Some(LinearConfig::new(self.ports_f, PORTS_OUT).init(device))
+            } else {
+                None
+            },
+            trunk1: LinearConfig::new(sdim, 256).init(device),
             trunk2: LinearConfig::new(256, 256).init(device),
             policy_head: LinearConfig::new(256, self.num_actions).init(device),
             value_head1: LinearConfig::new(256, 64).init(device),
