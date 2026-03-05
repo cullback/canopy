@@ -25,6 +25,14 @@ impl Evaluation {
 /// Evaluates a game state, producing policy logits and a value estimate.
 pub trait Evaluator<G: Game> {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation;
+
+    /// Evaluate multiple states in a single batch.
+    ///
+    /// The default implementation loops over each state individually.
+    /// Neural evaluators override this with a single batched forward pass.
+    fn evaluate_batch(&self, states: &[&G], rng: &mut fastrand::Rng) -> Vec<Evaluation> {
+        states.iter().map(|s| self.evaluate(s, rng)).collect()
+    }
 }
 
 /// Default evaluator: random rollouts with uniform policy logits.

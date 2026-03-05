@@ -179,14 +179,13 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
 
 #[cfg(feature = "nn")]
 fn run_train(matches: &clap::ArgMatches) {
-    use burn::backend::ndarray::NdArrayDevice;
     use canopy2::game::Game;
-    use canopy2::train::BurnTrainableModel;
+    use canopy2::train::{BurnTrainableModel, default_device};
 
     let model_type = matches.get_one::<String>("model").unwrap().as_str();
     let encoder_type = matches.get_one::<String>("encoder").unwrap().as_str();
     let config = cli::parse_train_config(matches, train_config(model_type));
-    let device = NdArrayDevice::Cpu;
+    let device = default_device();
 
     let dice = if matches.get_flag("balanced") {
         Dice::Balanced(game::dice::BalancedDice::new())
@@ -339,14 +338,13 @@ fn run_tournament(matches: &clap::ArgMatches) {
 
 #[cfg(feature = "nn")]
 fn load_nn_eval(checkpoint_path: &str, encoder_type: &str) -> Box<dyn Evaluator<GameState>> {
-    use burn::backend::NdArray;
-    use burn::backend::ndarray::NdArrayDevice;
     use burn::module::Module;
     use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
     use canopy2::game::Game;
     use canopy2::nn::NeuralEvaluator;
+    use canopy2::train::{InferBackend, default_device};
 
-    let device = NdArrayDevice::Cpu;
+    let device = default_device();
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
 
     macro_rules! load {
@@ -358,11 +356,13 @@ fn load_nn_eval(checkpoint_path: &str, encoder_type: &str) -> Box<dyn Evaluator<
                 <$encoder>::TILES_F,
                 <$encoder>::PORTS_F,
             );
-            let model: model::CatanModel<NdArray> = mc.init(&device);
+            let model: model::CatanModel<InferBackend> = mc.init(&device);
             let model = model
                 .load_file(checkpoint_path, &recorder, &device)
                 .expect("failed to load nn checkpoint");
-            Box::new(NeuralEvaluator::<NdArray, $encoder, _>::new(model, device))
+            Box::new(NeuralEvaluator::<InferBackend, $encoder, _>::new(
+                model, device,
+            ))
         }};
     }
 

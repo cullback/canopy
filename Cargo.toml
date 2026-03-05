@@ -10,15 +10,16 @@ path = "src/lib.rs"
 [features]
 cli = ["dep:clap"]
 visualize = ["dep:serde", "dep:serde_json"]
-nn = ["dep:burn", "dep:csv", "dep:rayon", "dep:serde", "dep:serde_json"]
+nn = ["dep:burn", "dep:csv", "dep:serde", "dep:serde_json"]
+cuda = ["nn", "burn/cuda"]
+wgpu = ["nn", "burn/wgpu"]
 
 [dependencies]
-burn = { version = "0.16", default-features = false, features = ["std", "ndarray", "autodiff"], optional = true }
+burn = { version = "0.20", default-features = false, features = ["std", "ndarray", "autodiff"], optional = true }
 clap = { version = "4", default-features = false, features = ["std", "string"], optional = true }
 csv = { version = "1", optional = true }
 fastrand = "2"
 indicatif = "0.17"
-rayon = { version = "1", optional = true }
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 

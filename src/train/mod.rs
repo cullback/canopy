@@ -15,7 +15,7 @@ use crate::game::Game;
 use crate::nn::StateEncoder;
 use crate::utils::HumanDuration;
 
-pub use burn_backend::BurnTrainableModel;
+pub use burn_backend::{BurnTrainableModel, Device, InferBackend, default_device};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -163,7 +163,7 @@ pub struct CheckpointMeta {
 
 pub trait TrainableModel<G: Game>: Send {
     type Encoder: StateEncoder<G>;
-    type Evaluator: Evaluator<G> + Clone + Send;
+    type Evaluator: Evaluator<G>;
 
     fn evaluator(&self) -> Self::Evaluator;
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics;
@@ -205,7 +205,6 @@ pub fn run_training<G, M>(
 ) where
     G: Game,
     M: TrainableModel<G>,
-    M::Evaluator: 'static,
 {
     let (mut rng, start_iteration) = checkpoint::resume_if_requested(&config, model);
     let run_dir = checkpoint::setup_run_dir(&config);
@@ -234,6 +233,8 @@ pub fn run_training<G, M>(
         let self_play_elapsed = iter_start.elapsed();
         let games_done = sp.p1_wins + sp.p2_wins + sp.draws;
         let samples_this_iter = sp.samples.len();
+        let num_workers = sp.num_workers;
+        let avg_batch_size = sp.avg_batch_size();
 
         // Stats
         let stats = metrics::compute_iter_stats(&sp.samples);
@@ -301,7 +302,7 @@ pub fn run_training<G, M>(
             String::new()
         };
         eprintln!(
-            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | self-play {}, train {}, bench {} | total {}, ETA {}",
+            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | workers={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             games_done,
@@ -312,6 +313,8 @@ pub fn run_training<G, M>(
             samples.len(),
             stats.avg_entropy,
             bench_str,
+            num_workers,
+            avg_batch_size,
             HumanDuration(self_play_elapsed),
             HumanDuration(train_elapsed),
             HumanDuration(bench_elapsed),

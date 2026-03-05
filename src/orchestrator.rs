@@ -95,10 +95,8 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
         }
 
         // Phase C — Evaluate batch
-        let outputs: Vec<_> = batch_pendings
-            .iter()
-            .map(|pending| evaluator.evaluate(&pending.state, rng))
-            .collect();
+        let states: Vec<&G> = batch_pendings.iter().map(|p| &p.state).collect();
+        let outputs = evaluator.evaluate_batch(&states, rng);
 
         // Phase D — Supply results back
         let mut pending_iter = batch_pendings.drain(..);

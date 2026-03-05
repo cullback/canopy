@@ -107,4 +107,70 @@ where
             value,
         }
     }
+
+    fn evaluate_batch(&self, states: &[&G], rng: &mut fastrand::Rng) -> Vec<Evaluation> {
+        if states.len() <= 1 {
+            return states.iter().map(|s| self.evaluate(s, rng)).collect();
+        }
+
+        // Determine which states are terminal vs ongoing; collect signs for ongoing
+        let mut signs = Vec::with_capacity(states.len());
+        let mut nn_indices = Vec::new();
+        let mut results: Vec<Option<Evaluation>> = (0..states.len()).map(|_| None).collect();
+
+        for (i, state) in states.iter().enumerate() {
+            match state.status() {
+                Status::Terminal(reward) => {
+                    results[i] = Some(Evaluation::uniform(G::NUM_ACTIONS, reward));
+                }
+                Status::Ongoing(player) => {
+                    signs.push(player.sign());
+                    nn_indices.push(i);
+                }
+            }
+        }
+
+        if nn_indices.is_empty() {
+            return results.into_iter().map(|r| r.unwrap()).collect();
+        }
+
+        // Encode all ongoing states into a single [N, FEATURE_SIZE] tensor
+        let n = nn_indices.len();
+        let mut features = Vec::with_capacity(n * E::FEATURE_SIZE);
+        let mut buf = Vec::with_capacity(E::FEATURE_SIZE);
+        for &i in &nn_indices {
+            buf.clear();
+            E::encode(states[i], &mut buf);
+            features.extend_from_slice(&buf);
+        }
+
+        let input = Tensor::<B, 2>::from_data(
+            TensorData::new(features, [n, E::FEATURE_SIZE]),
+            &self.device,
+        );
+
+        let (policy_tensor, value_tensor) = self.model.forward(input);
+
+        let all_logits: Vec<f32> = policy_tensor
+            .into_data()
+            .to_vec()
+            .expect("policy tensor to_vec");
+        let all_values: Vec<f32> = value_tensor
+            .into_data()
+            .to_vec()
+            .expect("value tensor to_vec");
+
+        // Split outputs per state and apply sign correction
+        for (j, &i) in nn_indices.iter().enumerate() {
+            let logits_start = j * G::NUM_ACTIONS;
+            let logits = all_logits[logits_start..logits_start + G::NUM_ACTIONS].to_vec();
+            let value = all_values[j] * signs[j];
+            results[i] = Some(Evaluation {
+                policy_logits: logits,
+                value,
+            });
+        }
+
+        results.into_iter().map(|r| r.unwrap()).collect()
+    }
 }

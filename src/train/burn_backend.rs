@@ -1,8 +1,6 @@
 use std::marker::PhantomData;
 use std::path::Path;
 
-use burn::backend::ndarray::NdArrayDevice;
-use burn::backend::{Autodiff, NdArray};
 use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
@@ -15,8 +13,38 @@ use crate::nn::{NeuralEvaluator, PolicyValueNet, StateEncoder};
 
 use super::{Sample, TrainMetrics, TrainStepConfig, TrainableModel};
 
+// Backend selection: cuda > wgpu > ndarray
+
+#[cfg(feature = "cuda")]
+use burn::backend::{Autodiff, Cuda};
+#[cfg(feature = "cuda")]
+type TrainBackend = Autodiff<Cuda>;
+#[cfg(feature = "cuda")]
+pub type InferBackend = Cuda;
+#[cfg(feature = "cuda")]
+pub type Device = burn::backend::cuda::CudaDevice;
+
+#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+use burn::backend::{Autodiff, Wgpu};
+#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+type TrainBackend = Autodiff<Wgpu>;
+#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+pub type InferBackend = Wgpu;
+#[cfg(all(feature = "wgpu", not(feature = "cuda")))]
+pub type Device = burn::backend::wgpu::WgpuDevice;
+
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+use burn::backend::{Autodiff, NdArray};
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 type TrainBackend = Autodiff<NdArray>;
-type InferBackend = NdArray;
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+pub type InferBackend = NdArray;
+#[cfg(not(any(feature = "cuda", feature = "wgpu")))]
+pub type Device = burn::backend::ndarray::NdArrayDevice;
+
+pub fn default_device() -> Device {
+    Device::default()
+}
 
 /// Prepare batch tensors from a slice of samples.
 /// Returns (features, policy_targets, value_targets, mask, num_full) tensors.
@@ -103,8 +131,8 @@ where
 {
     model: M,
     optimizer: OptimizerAdaptor<AdamW, M, TrainBackend>,
-    device: NdArrayDevice,
-    model_init: Box<dyn Fn(&NdArrayDevice) -> M + Send>,
+    device: Device,
+    model_init: Box<dyn Fn(&Device) -> M + Send>,
     _marker: PhantomData<fn() -> (G, E)>,
 }
 
@@ -112,16 +140,13 @@ impl<G, E, M> BurnTrainableModel<G, E, M>
 where
     M: AutodiffModule<TrainBackend>,
 {
-    pub fn new(
-        model_init: impl Fn(&NdArrayDevice) -> M + Send + 'static,
-        device: &NdArrayDevice,
-    ) -> Self {
+    pub fn new(model_init: impl Fn(&Device) -> M + Send + 'static, device: &Device) -> Self {
         let model = model_init(device);
         let optimizer = AdamWConfig::new().with_weight_decay(0.0004).init();
         Self {
             model,
             optimizer,
-            device: *device,
+            device: device.clone(),
             model_init: Box::new(model_init),
             _marker: PhantomData,
         }
@@ -260,7 +285,7 @@ where
 
     fn evaluator(&self) -> Self::Evaluator {
         let infer_model = self.model.valid();
-        NeuralEvaluator::new(infer_model, self.device)
+        NeuralEvaluator::new(infer_model, self.device.clone())
     }
 
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics {

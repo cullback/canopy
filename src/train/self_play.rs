@@ -1,6 +1,9 @@
-use crate::eval::Evaluator;
+use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::mpsc;
+
+use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
-use crate::mcts::{Config, Search};
+use crate::mcts::{Config, PendingEval, Search, Step};
 use crate::nn::StateEncoder;
 use crate::player::Player;
 
@@ -22,123 +25,25 @@ pub(super) struct IterGameResults {
     pub total_turns: u32,
     pub min_game_length: Option<u32>,
     pub max_game_length: u32,
+    pub num_workers: usize,
+    pub total_batches: u64,
+    pub total_evals: u64,
 }
 
-pub(super) fn self_play_game<G, Ev, E>(
-    evaluator: &Ev,
-    config: &TrainConfig,
-    effective_sims: u32,
-    seed: u64,
-    new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
-) -> GameResult
-where
-    G: Game,
-    Ev: Evaluator<G> + Clone,
-    E: StateEncoder<G>,
-{
-    let mut rng = fastrand::Rng::with_seed(seed);
-    let base_config = Config {
-        num_simulations: effective_sims,
-        num_sampled_actions: config.gumbel_m,
-        c_visit: config.c_visit,
-        c_scale: config.c_scale,
-    };
-    let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
-
-    let mut search = Search::new(new_state(&mut rng));
-    let mut actions = Vec::new();
-    let mut samples = Vec::new();
-    let mut turn_count: u32 = 0;
-    let mut last_player: Option<Player> = None;
-
-    loop {
-        // Resolve chance events
-        if let Some(action) = search.state().sample_chance(&mut rng) {
-            search.apply_action(action);
-            continue;
-        }
-
-        let current = match search.state().status() {
-            Status::Terminal(_) => break,
-            Status::Ongoing(p) => p,
-        };
-
-        // Track turn count via player changes
-        if last_player != Some(current) {
-            turn_count += 1;
-            last_player = Some(current);
-        }
-
-        actions.clear();
-        search.state().legal_actions(&mut actions);
-
-        // Skip forced moves (single legal action)
-        if actions.len() == 1 {
-            search.apply_action(actions[0]);
-            continue;
-        }
-
-        // Playout cap randomization: coin flip for full vs fast search
-        let is_full = rng.f32() < config.playout_cap_full_prob;
-        let move_config = Config {
-            num_simulations: if is_full { effective_sims } else { fast_sims },
-            ..base_config.clone()
-        };
-
-        // Encode state from current player's perspective
-        let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
-        E::encode(search.state(), &mut features_buf);
-
-        let result = search.run_to_completion(&move_config, evaluator, &mut rng);
-
-        // Root Q from current player's perspective.
-        // result.value is in [-1,1] from P1's perspective.
-        let q = result.value * current.sign();
-
-        // Early-game: sample from improved policy for diversity.
-        // After explore_moves: use SH survivor deterministically.
-        let chosen = if turn_count <= config.explore_moves {
-            sample_from_policy(&result.policy, &mut rng)
+impl IterGameResults {
+    pub fn avg_batch_size(&self) -> f64 {
+        if self.total_batches == 0 {
+            0.0
         } else {
-            result.selected_action
-        };
-
-        // z stores the player's sign as a placeholder; multiplied by the
-        // terminal reward once the game ends.
-        samples.push(Sample {
-            features: features_buf.into_boxed_slice(),
-            policy_target: result.policy.into_boxed_slice(),
-            z: current.sign(),
-            q,
-            full_search: is_full,
-        });
-        search.apply_action(chosen);
+            self.total_evals as f64 / self.total_batches as f64
+        }
     }
+}
 
-    // Assign value targets from game outcome.
-    // z currently holds the player's sign; multiply by terminal reward
-    // to get the value target from each player's perspective.
-    let terminal_value = match search.state().status() {
-        Status::Terminal(reward) => reward,
-        _ => 0.0,
-    };
-    for s in &mut samples {
-        s.z *= terminal_value;
-    }
-
-    let winner = if terminal_value > 0.0 {
-        Some(Player::One)
-    } else if terminal_value < 0.0 {
-        Some(Player::Two)
-    } else {
-        None
-    };
-
-    GameResult {
-        samples,
-        winner,
-        num_turns: turn_count,
-    }
+/// A leaf-node evaluation request sent from a worker thread to the batcher.
+struct EvalRequest<G: Game> {
+    pending: PendingEval<G>,
+    response_tx: mpsc::SyncSender<(Evaluation, PendingEval<G>)>,
 }
 
 fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
@@ -180,7 +85,185 @@ pub(super) fn play_game<G: Game>(
     }
 }
 
-/// Run self-play games in parallel and aggregate results.
+/// Worker thread: plays sequential games, sending leaf evals to the batcher.
+fn worker_loop<G: Game, E: StateEncoder<G>>(
+    request_tx: mpsc::Sender<EvalRequest<G>>,
+    games_remaining: &AtomicU32,
+    completed: &AtomicU32,
+    pb: &indicatif::ProgressBar,
+    config: &TrainConfig,
+    base_config: &Config,
+    effective_sims: u32,
+    fast_sims: u32,
+    new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
+    seed: u64,
+) -> Vec<GameResult> {
+    let mut rng = fastrand::Rng::with_seed(seed);
+    let (resp_tx, resp_rx) = mpsc::sync_channel::<(Evaluation, PendingEval<G>)>(1);
+    let mut results = Vec::new();
+    let mut actions_buf = Vec::new();
+
+    loop {
+        // Claim a game via atomic decrement
+        let claimed = games_remaining
+            .fetch_update(Relaxed, Relaxed, |n| if n > 0 { Some(n - 1) } else { None });
+        if claimed.is_err() {
+            break;
+        }
+
+        let mut search = Search::new(new_state(&mut rng));
+        let mut samples: Vec<Sample> = Vec::new();
+        let mut turn_count: u32 = 0;
+        let mut last_player: Option<Player> = None;
+
+        loop {
+            // Resolve chance nodes
+            if let Some(action) = search.state().sample_chance(&mut rng) {
+                search.apply_action(action);
+                continue;
+            }
+
+            // Terminal check
+            if let Status::Terminal(reward) = search.state().status() {
+                for s in &mut samples {
+                    s.z *= reward;
+                }
+                let winner = if reward > 0.0 {
+                    Some(Player::One)
+                } else if reward < 0.0 {
+                    Some(Player::Two)
+                } else {
+                    None
+                };
+                results.push(GameResult {
+                    samples: std::mem::take(&mut samples),
+                    winner,
+                    num_turns: turn_count,
+                });
+                let done = completed.fetch_add(1, Relaxed) + 1;
+                pb.set_position(done as u64);
+                break;
+            }
+
+            let current = match search.state().status() {
+                Status::Ongoing(p) => p,
+                Status::Terminal(_) => unreachable!(),
+            };
+
+            // Track turn count via player changes
+            if last_player != Some(current) {
+                turn_count += 1;
+                last_player = Some(current);
+            }
+
+            // Skip forced moves (single legal action)
+            actions_buf.clear();
+            search.state().legal_actions(&mut actions_buf);
+            if actions_buf.len() == 1 {
+                search.apply_action(actions_buf[0]);
+                continue;
+            }
+
+            // Playout cap randomization
+            let is_full_search = rng.f32() < config.playout_cap_full_prob;
+            let move_config = Config {
+                num_simulations: if is_full_search {
+                    effective_sims
+                } else {
+                    fast_sims
+                },
+                ..base_config.clone()
+            };
+
+            // Encode features before search
+            let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
+            E::encode(search.state(), &mut features_buf);
+
+            // MCTS search with eval requests sent to batcher
+            let mut step = search.run(&move_config, &mut rng);
+            let result = loop {
+                match step {
+                    Step::NeedsEval(pending) => {
+                        request_tx
+                            .send(EvalRequest {
+                                pending,
+                                response_tx: resp_tx.clone(),
+                            })
+                            .unwrap();
+                        let (eval, pending) = resp_rx.recv().unwrap();
+                        step = search.supply(eval, pending, &mut rng);
+                    }
+                    Step::Done(result) => break result,
+                }
+            };
+
+            // Create training sample
+            let q = result.value * current.sign();
+            let chosen = if turn_count <= config.explore_moves {
+                sample_from_policy(&result.policy, &mut rng)
+            } else {
+                result.selected_action
+            };
+
+            samples.push(Sample {
+                features: features_buf.into_boxed_slice(),
+                policy_target: result.policy.into_boxed_slice(),
+                z: current.sign(),
+                q,
+                full_search: is_full_search,
+            });
+
+            search.apply_action(chosen);
+        }
+    }
+
+    results
+}
+
+/// Main-thread batcher: collects eval requests and runs batched NN inference.
+/// Returns (total_batches, total_evals) for diagnostics.
+fn batcher_loop<G: Game, Ev: Evaluator<G>>(
+    request_rx: &mpsc::Receiver<EvalRequest<G>>,
+    evaluator: &Ev,
+    rng: &mut fastrand::Rng,
+    batch_limit: usize,
+) -> (u64, u64) {
+    let mut batch: Vec<EvalRequest<G>> = Vec::with_capacity(batch_limit);
+    let mut total_batches: u64 = 0;
+    let mut total_evals: u64 = 0;
+
+    loop {
+        // Block for the first request (Err = all workers dropped their senders)
+        let first = match request_rx.recv() {
+            Ok(req) => req,
+            Err(_) => return (total_batches, total_evals),
+        };
+        batch.push(first);
+
+        // Drain additional requests without blocking, up to batch_limit
+        while batch.len() < batch_limit {
+            match request_rx.try_recv() {
+                Ok(req) => batch.push(req),
+                Err(_) => break,
+            }
+        }
+
+        total_batches += 1;
+        total_evals += batch.len() as u64;
+
+        // Batched evaluation
+        let states: Vec<&G> = batch.iter().map(|r| &r.pending.state).collect();
+        let evals = evaluator.evaluate_batch(&states, rng);
+
+        // Send results back to workers
+        for (req, eval) in batch.drain(..).zip(evals) {
+            // Ignore send errors (worker may have panicked)
+            let _ = req.response_tx.send((eval, req.pending));
+        }
+    }
+}
+
+/// Run self-play games using worker threads with batched NN inference.
 pub(super) fn run_self_play_iteration<G, E, Ev>(
     evaluator: Ev,
     config: &TrainConfig,
@@ -192,10 +275,8 @@ pub(super) fn run_self_play_iteration<G, E, Ev>(
 where
     G: Game,
     E: StateEncoder<G>,
-    Ev: Evaluator<G> + Clone + Send,
+    Ev: Evaluator<G>,
 {
-    use rayon::prelude::*;
-
     let pb = indicatif::ProgressBar::new(config.games_per_iter as u64);
     pb.set_style(
         indicatif::ProgressStyle::with_template(
@@ -210,20 +291,67 @@ where
         effective_sims,
     ));
 
-    let seeds: Vec<u64> = (0..config.games_per_iter).map(|_| rng.u64(..)).collect();
-    let completed = std::sync::atomic::AtomicU32::new(0);
+    let base_config = Config {
+        num_simulations: effective_sims,
+        num_sampled_actions: config.gumbel_m,
+        c_visit: config.c_visit,
+        c_scale: config.c_scale,
+    };
+    let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
-    let results: Vec<GameResult> = seeds
-        .into_par_iter()
-        .map_with(evaluator, |ev, seed| {
-            let result = self_play_game::<G, Ev, E>(ev, config, effective_sims, seed, new_state);
-            let done = completed.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
-            pb.set_position(done as u64);
-            result
-        })
-        .collect();
+    let num_workers = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1)
+        .min(config.games_per_iter);
+    let games_remaining = AtomicU32::new(config.games_per_iter as u32);
+    let completed = AtomicU32::new(0);
+    let (request_tx, request_rx) = mpsc::channel();
+
+    let (game_results, total_batches, total_evals) = std::thread::scope(|scope| {
+        // Spawn worker threads
+        let games_ref = &games_remaining;
+        let completed_ref = &completed;
+        let pb_ref = &pb;
+        let base_config_ref = &base_config;
+        let handles: Vec<_> = (0..num_workers)
+            .map(|_| {
+                let tx = request_tx.clone();
+                let seed = rng.u64(..);
+                scope.spawn(move || {
+                    worker_loop::<G, E>(
+                        tx,
+                        games_ref,
+                        completed_ref,
+                        pb_ref,
+                        config,
+                        base_config_ref,
+                        effective_sims,
+                        fast_sims,
+                        new_state,
+                        seed,
+                    )
+                })
+            })
+            .collect();
+
+        // Drop our copy so batcher sees disconnect when all workers finish
+        drop(request_tx);
+
+        // Batcher runs on main thread
+        let (total_batches, total_evals) = batcher_loop(&request_rx, &evaluator, rng, num_workers);
+
+        // Join workers, collect results
+        let game_results: Vec<GameResult> = handles
+            .into_iter()
+            .flat_map(|h| h.join().unwrap())
+            .collect();
+
+        (game_results, total_batches, total_evals)
+    });
+
     pb.finish();
 
+    // Aggregate results
     let mut samples = Vec::new();
     let mut p1_wins = 0u32;
     let mut p2_wins = 0u32;
@@ -232,7 +360,7 @@ where
     let mut min_game_length: Option<u32> = None;
     let mut max_game_length = 0u32;
 
-    for game in results {
+    for game in game_results {
         total_turns += game.num_turns;
         min_game_length =
             Some(min_game_length.map_or(game.num_turns, |m: u32| m.min(game.num_turns)));
@@ -253,5 +381,8 @@ where
         total_turns,
         min_game_length,
         max_game_length,
+        num_workers,
+        total_batches,
+        total_evals,
     }
 }
