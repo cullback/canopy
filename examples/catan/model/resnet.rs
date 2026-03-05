@@ -15,9 +15,9 @@ struct ResBlock<B: Backend> {
 impl<B: Backend> ResBlock<B> {
     fn forward(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
         let residual = x.clone();
-        let h = relu(self.norm1.forward(self.linear1.forward(x)));
-        let h = self.norm2.forward(self.linear2.forward(h));
-        relu(h + residual)
+        let h = self.linear1.forward(relu(self.norm1.forward(x)));
+        let h = self.linear2.forward(relu(self.norm2.forward(h)));
+        h + residual
     }
 }
 
@@ -77,8 +77,8 @@ impl CatanResModelConfig {
             blocks: (0..6).map(|_| res_block(256, device)).collect(),
             policy_head1: LinearConfig::new(256, 256).init(device),
             policy_head2: LinearConfig::new(256, self.num_actions).init(device),
-            value_head1: LinearConfig::new(256, 64).init(device),
-            value_head2: LinearConfig::new(64, 1).init(device),
+            value_head1: LinearConfig::new(256, 128).init(device),
+            value_head2: LinearConfig::new(128, 1).init(device),
         }
     }
 }
