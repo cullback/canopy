@@ -33,5 +33,21 @@ pub trait Game: Clone + Send + Sync {
     /// An empty buffer means this is a decision node; non-empty means chance node.
     /// Outcomes are passed back to `apply_action` — the game knows it's in a chance
     /// state and interprets the `usize` accordingly.
+    ///
+    /// Used by MCTS to enumerate all chance branches. For sampling a single
+    /// outcome, use [`sample_chance`](Game::sample_chance) instead.
     fn chance_outcomes(&self, _buf: &mut Vec<(usize, f32)>) {}
+
+    /// Sample a single chance outcome. Returns `None` for decision/terminal nodes.
+    ///
+    /// The default delegates to [`chance_outcomes`](Game::chance_outcomes).
+    /// Stochastic games should override this to avoid the intermediate `Vec`.
+    fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
+        let mut buf = Vec::new();
+        self.chance_outcomes(&mut buf);
+        if buf.is_empty() {
+            return None;
+        }
+        Some(crate::utils::sample_weighted(&buf, rng))
+    }
 }

@@ -20,7 +20,6 @@ pub fn play_match<G: Game>(
     rng: &mut fastrand::Rng,
 ) -> (f32, Vec<usize>) {
     let mut state = game.clone();
-    let mut chance_buf = Vec::new();
     let mut actions = Vec::new();
 
     loop {
@@ -29,11 +28,7 @@ pub fn play_match<G: Game>(
             Status::Ongoing(p) => p,
         };
 
-        chance_buf.clear();
-        state.chance_outcomes(&mut chance_buf);
-
-        if !chance_buf.is_empty() {
-            let action = sample_chance(&chance_buf, rng);
+        if let Some(action) = state.sample_chance(rng) {
             actions.push(action);
             state.apply_action(action);
         } else {
@@ -124,16 +119,4 @@ pub fn tournament<G: Game>(
     );
 
     game_logs
-}
-
-fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
-    let total: f32 = outcomes.iter().map(|(_, p)| p).sum();
-    let mut r = rng.f32() * total;
-    for &(outcome, p) in outcomes {
-        r -= p;
-        if r <= 0.0 {
-            return outcome;
-        }
-    }
-    outcomes.last().unwrap().0
 }

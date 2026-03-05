@@ -130,6 +130,39 @@ impl Game for GameState {
             _ => {}
         }
     }
+
+    fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
+        match self.phase {
+            Phase::Roll => {
+                let probs: [(usize, f32); 11] = match &self.dice {
+                    Dice::Random => DICE_PROBS,
+                    Dice::Balanced(b) => {
+                        let bp = b.probabilities(self.current_player);
+                        bp.map(|(i, p)| (i as usize, p))
+                    }
+                };
+                Some(canopy2::utils::sample_weighted(&probs, rng))
+            }
+            Phase::StealResolve => {
+                let target = self.current_player.opponent();
+                let target_hand = &self.players[target].hand;
+                let total = target_hand.total();
+                if total == 0 {
+                    return None;
+                }
+                let pick = rng.u8(..total);
+                let mut cumulative = 0u8;
+                for (i, &r) in ALL_RESOURCES.iter().enumerate() {
+                    cumulative += target_hand[r];
+                    if pick < cumulative {
+                        return Some(i);
+                    }
+                }
+                Some(ALL_RESOURCES.len() - 1)
+            }
+            _ => None,
+        }
+    }
 }
 
 #[allow(non_contiguous_range_endpoints)]
@@ -632,17 +665,6 @@ mod tests {
     use canopy2::game::Game;
     use std::sync::Arc;
 
-    fn sample_chance_outcome(buf: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
-        let mut roll = rng.f32();
-        for &(outcome, prob) in buf {
-            roll -= prob;
-            if roll <= 0.0 {
-                return outcome;
-            }
-        }
-        buf.last().unwrap().0
-    }
-
     fn make_state_with_seed(seed: u64) -> GameState {
         GameState::from_seed(seed, Dice::default())
     }
@@ -666,12 +688,8 @@ mod tests {
     /// Fast-forward through non-Main phases (chance events + forced actions).
     fn fast_forward(state: &mut GameState, rng: &mut fastrand::Rng) {
         let mut actions = Vec::new();
-        let mut chance_buf = Vec::new();
         while !matches!(state.phase, Phase::Main | Phase::GameOver(_)) {
-            chance_buf.clear();
-            state.chance_outcomes(&mut chance_buf);
-            if !chance_buf.is_empty() {
-                let outcome = sample_chance_outcome(&chance_buf, rng);
+            if let Some(outcome) = state.sample_chance(rng) {
                 state.apply_action(outcome);
                 continue;
             }
@@ -843,16 +861,12 @@ mod tests {
 
         // Roll many times to ensure at least some resources are distributed
         let mut rng = fastrand::Rng::with_seed(123);
-        let mut chance_buf = Vec::new();
         let mut total_gained = 0u16;
         for _ in 0..50 {
             state.phase = Phase::Roll;
             let before =
                 state.players[Player::One].hand.total() + state.players[Player::Two].hand.total();
-            // Use chance_outcomes + apply_action
-            chance_buf.clear();
-            state.chance_outcomes(&mut chance_buf);
-            let outcome = sample_chance_outcome(&chance_buf, &mut rng);
+            let outcome = state.sample_chance(&mut rng).unwrap();
             state.apply_action(outcome);
             let after =
                 state.players[Player::One].hand.total() + state.players[Player::Two].hand.total();
@@ -861,21 +875,7 @@ mod tests {
                 total_gained += (after - before) as u16;
             }
             // Fast-forward past any discard/robber/steal/steal-resolve phases
-            let mut inner_actions = Vec::new();
-            while !matches!(state.phase, Phase::Main | Phase::GameOver(_)) {
-                chance_buf.clear();
-                state.chance_outcomes(&mut chance_buf);
-                if !chance_buf.is_empty() {
-                    let o = sample_chance_outcome(&chance_buf, &mut rng);
-                    state.apply_action(o);
-                    continue;
-                }
-                action::legal_actions(&state, &mut inner_actions);
-                if inner_actions.is_empty() {
-                    break;
-                }
-                apply(&mut state, inner_actions[0]);
-            }
+            fast_forward(&mut state, &mut rng);
             if matches!(state.phase, Phase::GameOver(_)) {
                 break;
             }
@@ -899,19 +899,12 @@ mod tests {
             let mut rng = fastrand::Rng::with_seed(seed);
             let mut s = new_game(seed, Dice::default());
             let mut actions = Vec::new();
-            let mut chance_buf = Vec::new();
             for _ in 0..10000 {
                 if matches!(s.phase, Phase::GameOver(_)) {
                     break;
                 }
                 // Resolve chance events first
-                loop {
-                    chance_buf.clear();
-                    s.chance_outcomes(&mut chance_buf);
-                    if chance_buf.is_empty() {
-                        break;
-                    }
-                    let outcome = sample_chance_outcome(&chance_buf, &mut rng);
+                while let Some(outcome) = s.sample_chance(&mut rng) {
                     s.apply_action(outcome);
                 }
                 if matches!(s.phase, Phase::GameOver(_)) {
@@ -941,19 +934,12 @@ mod tests {
             let mut s = new_game(seed, Dice::default());
             let mut actions = Vec::new();
             let mut action_log = Vec::new();
-            let mut chance_buf = Vec::new();
             for _ in 0..10000 {
                 if matches!(s.phase, Phase::GameOver(_)) {
                     break;
                 }
                 // Resolve chance events first
-                loop {
-                    chance_buf.clear();
-                    s.chance_outcomes(&mut chance_buf);
-                    if chance_buf.is_empty() {
-                        break;
-                    }
-                    let outcome = sample_chance_outcome(&chance_buf, &mut rng);
+                while let Some(outcome) = s.sample_chance(&mut rng) {
                     s.apply_action(outcome);
                 }
                 if matches!(s.phase, Phase::GameOver(_)) {

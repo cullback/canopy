@@ -6,7 +6,6 @@ struct Slot<G: Game> {
     state: G,
     search: Option<Search<G>>,
     pending_step: Option<Step<G>>,
-    chance_buf: Vec<(usize, f32)>,
     actions_since_search: Vec<usize>,
 }
 
@@ -31,7 +30,6 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
             state: game.clone(),
             search: None,
             pending_step: None,
-            chance_buf: Vec::new(),
             actions_since_search: Vec::new(),
         })
         .collect();
@@ -67,10 +65,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                 }
 
                 // Chance node — sample and apply
-                slot.chance_buf.clear();
-                slot.state.chance_outcomes(&mut slot.chance_buf);
-                if !slot.chance_buf.is_empty() {
-                    let action = sample_chance(&slot.chance_buf, rng);
+                if let Some(action) = slot.state.sample_chance(rng) {
                     slot.state.apply_action(action);
                     if slot.search.is_some() {
                         slot.actions_since_search.push(action);
@@ -147,18 +142,6 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
     }
 
     results
-}
-
-fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
-    let total: f32 = outcomes.iter().map(|(_, p)| p).sum();
-    let mut r = rng.f32() * total;
-    for &(outcome, p) in outcomes {
-        r -= p;
-        if r <= 0.0 {
-            return outcome;
-        }
-    }
-    outcomes.last().unwrap().0
 }
 
 #[cfg(test)]

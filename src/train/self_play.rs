@@ -125,7 +125,6 @@ where
 
     let mut state = new_state(&mut rng);
     let mut actions = Vec::new();
-    let mut chance_buf = Vec::new();
     let mut records = Vec::new();
     let mut features_buf = Vec::new();
     let mut turn_count: u32 = 0;
@@ -134,10 +133,7 @@ where
 
     loop {
         // Resolve chance events
-        chance_buf.clear();
-        state.chance_outcomes(&mut chance_buf);
-        if !chance_buf.is_empty() {
-            let action = sample_chance(&chance_buf, &mut rng);
+        if let Some(action) = state.sample_chance(&mut rng) {
             tree.track_action(action);
             state.apply_action(action);
             continue;
@@ -261,12 +257,8 @@ pub(super) fn play_game<G: Game>(
     mut select_action: impl FnMut(&G, Player, &mut fastrand::Rng) -> usize,
     rng: &mut fastrand::Rng,
 ) -> f32 {
-    let mut chance_buf = Vec::new();
     loop {
-        chance_buf.clear();
-        state.chance_outcomes(&mut chance_buf);
-        if !chance_buf.is_empty() {
-            let action = sample_chance(&chance_buf, rng);
+        if let Some(action) = state.sample_chance(rng) {
             state.apply_action(action);
             continue;
         }
@@ -278,18 +270,6 @@ pub(super) fn play_game<G: Game>(
             }
         }
     }
-}
-
-pub(super) fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
-    let total: f32 = outcomes.iter().map(|(_, p)| p).sum();
-    let mut r = rng.f32() * total;
-    for &(outcome, p) in outcomes {
-        r -= p;
-        if r <= 0.0 {
-            return outcome;
-        }
-    }
-    outcomes.last().unwrap().0
 }
 
 /// Run self-play games in parallel and aggregate results.

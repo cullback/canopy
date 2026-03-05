@@ -120,6 +120,13 @@ impl Game for PigGame {
             }
         }
     }
+
+    fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
+        match self.phase {
+            Phase::Rolling => Some(rng.usize(..6)),
+            _ => None,
+        }
+    }
 }
 
 fn main() {

@@ -36,49 +36,29 @@ impl<G: Game> Evaluator<G> for RolloutEvaluator {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation {
         assert!(self.num_rollouts > 0, "num_rollouts must be at least 1");
         let mut action_buf = Vec::with_capacity(G::NUM_ACTIONS);
-        let mut chance_buf = Vec::with_capacity(G::NUM_ACTIONS);
         let mut total = 0.0f32;
         for _ in 0..self.num_rollouts {
             let mut s = state.clone();
-            total += rollout(&mut s, &mut action_buf, &mut chance_buf, rng);
+            total += rollout(&mut s, &mut action_buf, rng);
         }
         Evaluation::uniform(G::NUM_ACTIONS, total / self.num_rollouts as f32)
     }
 }
 
-fn rollout<G: Game>(
-    state: &mut G,
-    action_buf: &mut Vec<usize>,
-    chance_buf: &mut Vec<(usize, f32)>,
-    rng: &mut fastrand::Rng,
-) -> f32 {
+fn rollout<G: Game>(state: &mut G, action_buf: &mut Vec<usize>, rng: &mut fastrand::Rng) -> f32 {
     loop {
         match state.status() {
             Status::Terminal(reward) => return reward,
             Status::Ongoing(_) => {
-                chance_buf.clear();
-                state.chance_outcomes(chance_buf);
-                let action = if !chance_buf.is_empty() {
-                    sample_weighted(chance_buf, rng)
+                if let Some(action) = state.sample_chance(rng) {
+                    state.apply_action(action);
                 } else {
                     action_buf.clear();
                     state.legal_actions(action_buf);
-                    action_buf[rng.usize(..action_buf.len())]
-                };
-                state.apply_action(action);
+                    let action = action_buf[rng.usize(..action_buf.len())];
+                    state.apply_action(action);
+                }
             }
         }
     }
-}
-
-fn sample_weighted(items: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {
-    let total: f32 = items.iter().map(|(_, p)| p).sum();
-    let mut r = rng.f32() * total;
-    for &(item, p) in items {
-        r -= p;
-        if r <= 0.0 {
-            return item;
-        }
-    }
-    items.last().unwrap().0
 }
