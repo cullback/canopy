@@ -5,7 +5,7 @@ mod metrics;
 mod self_play;
 
 use std::collections::VecDeque;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -22,8 +22,8 @@ pub use burn_backend::BurnTrainableModel;
 // ---------------------------------------------------------------------------
 
 pub struct Sample {
-    pub features: Vec<f32>,
-    pub policy_target: Vec<f32>,
+    pub features: Box<[f32]>,
+    pub policy_target: Box<[f32]>,
     /// Game outcome from current player's perspective: +1, -1, or 0
     pub z: f32,
     /// Root Q from current player's perspective, in [-1, 1]
@@ -43,9 +43,9 @@ pub struct TrainConfig {
     /// Minimum learning rate at end of cosine cycle
     pub lr_min: f64,
     pub replay_window: usize,
-    pub output_dir: String,
+    pub output_dir: PathBuf,
     #[serde(skip)]
-    pub resume: Option<String>,
+    pub resume: Option<PathBuf>,
     /// Iteration at which q fully replaces z as value target (0 = pure z always)
     pub q_blend_generations: usize,
     /// Benchmark games against random-rollout bot per iteration (0 = skip)
@@ -63,6 +63,10 @@ pub struct TrainConfig {
     pub playout_cap_full_prob: f32,
     /// Simulations for fast (non-full) search moves
     pub playout_cap_fast_sims: u32,
+    /// MCTS simulations for benchmark baseline opponent
+    pub bench_baseline_sims: u32,
+    /// Rollouts per evaluation for benchmark baseline opponent
+    pub bench_baseline_rollouts: u32,
 }
 
 /// Per-iteration config passed to the model's train_step method.
@@ -194,13 +198,7 @@ pub fn run_training<G, M>(
         let bench_start = Instant::now();
         let (bench_wins, bench_losses, bench_draws) = if config.bench_games > 0 {
             let eval = model.evaluator();
-            benchmark::run_benchmark::<G, M::Evaluator>(
-                &eval,
-                config.mcts_sims,
-                config.bench_games,
-                &mut rng,
-                &new_state,
-            )
+            benchmark::run_benchmark::<G, M::Evaluator>(&eval, &config, &mut rng, &new_state)
         } else {
             (0, 0, 0)
         };

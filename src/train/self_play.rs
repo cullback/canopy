@@ -7,8 +7,8 @@ use crate::player::Player;
 use super::{Sample, TrainConfig};
 
 struct GameRecord {
-    features: Vec<f32>,
-    policy_target: Vec<f32>,
+    features: Box<[f32]>,
+    policy_target: Box<[f32]>,
     player: Player,
     q: f32,
     full_search: bool,
@@ -30,7 +30,7 @@ pub(super) struct IterGameResults {
 }
 
 /// Drive an in-progress MCTS search state machine to completion.
-pub(super) fn drive_search<G: Game, E: Evaluator<G>>(
+fn drive_search<G: Game, E: Evaluator<G>>(
     search: &mut Search<G>,
     mut step: Step<G>,
     evaluator: &E,
@@ -56,6 +56,50 @@ pub(super) fn run_search<G: Game, E: Evaluator<G>>(
 ) -> SearchResult {
     let (mut search, step) = Search::start(state, config, rng);
     drive_search(&mut search, step, evaluator, rng)
+}
+
+/// Wraps MCTS tree reuse bookkeeping: persists the search tree across moves
+/// and tracks intermediate actions (chance outcomes, forced moves) so the
+/// tree can be advanced to the current state.
+struct ReusableSearch<G: Game> {
+    search: Option<Search<G>>,
+    pending_actions: Vec<usize>,
+}
+
+impl<G: Game> ReusableSearch<G> {
+    fn new() -> Self {
+        Self {
+            search: None,
+            pending_actions: Vec::new(),
+        }
+    }
+
+    fn track_action(&mut self, action: usize) {
+        self.pending_actions.push(action);
+    }
+
+    fn run<E: Evaluator<G>>(
+        &mut self,
+        state: &G,
+        evaluator: &E,
+        config: &Config,
+        rng: &mut fastrand::Rng,
+    ) -> SearchResult {
+        match self.search {
+            Some(ref mut s) => {
+                let step = s.step_to(state, &self.pending_actions, config, rng);
+                self.pending_actions.clear();
+                drive_search(s, step, evaluator, rng)
+            }
+            None => {
+                let (mut s, step) = Search::start(state, config, rng);
+                let result = drive_search(&mut s, step, evaluator, rng);
+                self.search = Some(s);
+                self.pending_actions.clear();
+                result
+            }
+        }
+    }
 }
 
 pub(super) fn self_play_game<G, Ev, E>(
@@ -86,10 +130,7 @@ where
     let mut features_buf = Vec::new();
     let mut turn_count: u32 = 0;
     let mut last_player: Option<Player> = None;
-
-    // Tree reuse: persist search across moves, track intermediate actions
-    let mut search: Option<Search<G>> = None;
-    let mut actions_since_search: Vec<usize> = Vec::new();
+    let mut tree = ReusableSearch::new();
 
     loop {
         // Resolve chance events
@@ -97,7 +138,7 @@ where
         state.chance_outcomes(&mut chance_buf);
         if !chance_buf.is_empty() {
             let action = sample_chance(&chance_buf, &mut rng);
-            actions_since_search.push(action);
+            tree.track_action(action);
             state.apply_action(action);
             continue;
         }
@@ -118,7 +159,7 @@ where
 
         // Skip forced moves (single legal action)
         if actions.len() == 1 {
-            actions_since_search.push(actions[0]);
+            tree.track_action(actions[0]);
             state.apply_action(actions[0]);
             continue;
         }
@@ -130,39 +171,11 @@ where
             ..base_config.clone()
         };
 
-        // Run MCTS, reusing tree from previous search
-        let result = match search {
-            Some(ref mut s) => {
-                let step = s.step_to(&state, &actions_since_search, &move_config, &mut rng);
-                actions_since_search.clear();
-                drive_search(s, step, evaluator, &mut rng)
-            }
-            None => {
-                let (mut s, step) = Search::start(&state, &move_config, &mut rng);
-                let result = drive_search(&mut s, step, evaluator, &mut rng);
-                search = Some(s);
-                actions_since_search.clear();
-                result
-            }
-        };
-
-        // Use improved policy directly as training target
-        let policy_target = result.policy.clone();
+        let result = tree.run(&state, evaluator, &move_config, &mut rng);
 
         // Root Q from current player's perspective.
         // result.value is in [-1,1] from P1's perspective.
         let q = result.value * current.sign();
-
-        // Encode state from current player's perspective
-        E::encode(&state, &mut features_buf);
-
-        records.push(GameRecord {
-            features: features_buf.clone(),
-            policy_target,
-            player: current,
-            q,
-            full_search: is_full,
-        });
 
         // Early-game: sample from improved policy for diversity.
         // After explore_moves: use SH survivor deterministically.
@@ -171,7 +184,18 @@ where
         } else {
             result.selected_action
         };
-        actions_since_search.push(chosen);
+
+        // Encode state from current player's perspective
+        E::encode(&state, &mut features_buf);
+
+        records.push(GameRecord {
+            features: features_buf.clone().into_boxed_slice(),
+            policy_target: result.policy.into_boxed_slice(),
+            player: current,
+            q,
+            full_search: is_full,
+        });
+        tree.track_action(chosen);
         state.apply_action(chosen);
     }
 
@@ -228,6 +252,32 @@ fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
         .max_by(|a, b| a.1.total_cmp(b.1))
         .unwrap()
         .0
+}
+
+/// Generic game-playing loop: resolve chance, check terminal, select action via closure.
+/// Returns the terminal reward from Player::One's perspective.
+pub(super) fn play_game<G: Game>(
+    state: &mut G,
+    mut select_action: impl FnMut(&G, Player, &mut fastrand::Rng) -> usize,
+    rng: &mut fastrand::Rng,
+) -> f32 {
+    let mut chance_buf = Vec::new();
+    loop {
+        chance_buf.clear();
+        state.chance_outcomes(&mut chance_buf);
+        if !chance_buf.is_empty() {
+            let action = sample_chance(&chance_buf, rng);
+            state.apply_action(action);
+            continue;
+        }
+        match state.status() {
+            Status::Terminal(reward) => return reward,
+            Status::Ongoing(player) => {
+                let action = select_action(state, player, rng);
+                state.apply_action(action);
+            }
+        }
+    }
 }
 
 pub(super) fn sample_chance(outcomes: &[(usize, f32)], rng: &mut fastrand::Rng) -> usize {

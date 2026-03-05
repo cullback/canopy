@@ -31,6 +31,16 @@ impl Player {
     }
 }
 
+impl From<usize> for Player {
+    fn from(value: usize) -> Self {
+        match value {
+            0 => Player::One,
+            1 => Player::Two,
+            _ => panic!("invalid player index: {value}"),
+        }
+    }
+}
+
 /// A two-element array indexed by [`Player`] instead of `usize`.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct PerPlayer<T>(pub [T; 2]);

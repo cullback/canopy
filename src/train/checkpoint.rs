@@ -14,8 +14,7 @@ pub(super) fn resume_if_requested<G: Game, M: TrainableModel<G>>(
     let mut rng = fastrand::Rng::new();
     let mut start_iteration = 0usize;
 
-    if let Some(ref path) = config.resume {
-        let checkpoint_path = std::path::Path::new(path);
+    if let Some(ref checkpoint_path) = config.resume {
         let stem = checkpoint_path
             .file_stem()
             .and_then(|s| s.to_str())
@@ -52,7 +51,7 @@ pub(super) fn resume_if_requested<G: Game, M: TrainableModel<G>>(
 /// Build or reuse the run directory.
 pub(super) fn setup_run_dir(config: &TrainConfig) -> PathBuf {
     if let Some(ref path) = config.resume {
-        std::path::Path::new(path).parent().unwrap().to_path_buf()
+        path.parent().unwrap().to_path_buf()
     } else {
         let ts = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
@@ -62,7 +61,7 @@ pub(super) fn setup_run_dir(config: &TrainConfig) -> PathBuf {
             "{ts}_mcts{}_g{}_lr{}",
             config.mcts_sims, config.games_per_iter, config.lr,
         );
-        let dir = PathBuf::from(&config.output_dir).join(&run_name);
+        let dir = config.output_dir.join(&run_name);
         std::fs::create_dir_all(&dir).expect("failed to create run directory");
         dir
     }

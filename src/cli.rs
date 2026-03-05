@@ -1,3 +1,5 @@
+use std::path::PathBuf;
+
 use clap::{Arg, ArgMatches, Command};
 
 use crate::mcts::Config;
@@ -139,6 +141,18 @@ pub fn train_command() -> Command {
                 .default_value("32")
                 .help("Simulations for fast (non-full) search moves"),
         )
+        .arg(
+            Arg::new("bench-baseline-sims")
+                .long("bench-baseline-sims")
+                .default_value("200")
+                .help("MCTS simulations for benchmark baseline opponent"),
+        )
+        .arg(
+            Arg::new("bench-baseline-rollouts")
+                .long("bench-baseline-rollouts")
+                .default_value("1")
+                .help("Rollouts per evaluation for benchmark baseline opponent"),
+        )
 }
 
 /// Parse all common training fields from clap [`ArgMatches`].
@@ -160,8 +174,8 @@ pub fn parse_train_config(matches: &ArgMatches) -> crate::train::TrainConfig {
             .map(|s| s.parse().unwrap())
             .unwrap_or(lr / 10.0),
         replay_window: parse("replay-window").parse().unwrap(),
-        output_dir: parse("output"),
-        resume: matches.get_one::<String>("resume").cloned(),
+        output_dir: parse("output").into(),
+        resume: matches.get_one::<String>("resume").map(PathBuf::from),
         q_blend_generations: parse("q-blend-gen").parse().unwrap(),
         bench_games: parse("bench-games").parse().unwrap(),
         gumbel_m: parse("gumbel-m").parse().unwrap(),
@@ -170,5 +184,7 @@ pub fn parse_train_config(matches: &ArgMatches) -> crate::train::TrainConfig {
         explore_moves: parse("explore-moves").parse().unwrap(),
         playout_cap_full_prob: parse("playout-cap-prob").parse().unwrap(),
         playout_cap_fast_sims: parse("playout-cap-fast-sims").parse().unwrap(),
+        bench_baseline_sims: parse("bench-baseline-sims").parse().unwrap(),
+        bench_baseline_rollouts: parse("bench-baseline-rollouts").parse().unwrap(),
     }
 }
