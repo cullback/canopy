@@ -70,24 +70,24 @@ fn project_streams<B: Backend>(
 
     // Tile stream (optional)
     if let Some(ref tiles) = *proj_tiles {
-        let tiles_f = tiles.weight.dims()[1];
+        let tiles_f = tiles.weight.dims()[0];
         parts.push(project_stream(input, offset, TILES_N, tiles_f, tiles));
         offset += TILES_N * tiles_f;
     }
 
     // Node stream (always present)
-    let nodes_f = proj_nodes.weight.dims()[1];
+    let nodes_f = proj_nodes.weight.dims()[0];
     parts.push(project_stream(input, offset, NODES_N, nodes_f, proj_nodes));
     offset += NODES_N * nodes_f;
 
     // Edge stream (always present)
-    let edges_f = proj_edges.weight.dims()[1];
+    let edges_f = proj_edges.weight.dims()[0];
     parts.push(project_stream(input, offset, EDGES_N, edges_f, proj_edges));
     offset += EDGES_N * edges_f;
 
     // Port stream (optional)
     if let Some(ref ports) = *proj_ports {
-        let ports_f = ports.weight.dims()[1];
+        let ports_f = ports.weight.dims()[0];
         parts.push(project_stream(input, offset, PORTS_N, ports_f, ports));
     }
 
