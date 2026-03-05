@@ -36,39 +36,97 @@ pub struct Sample {
 
 #[derive(Serialize)]
 pub struct TrainConfig {
+    // -- Infrastructure --
+    /// Total training iterations (self-play + train cycles).
     pub iterations: usize,
-    pub games_per_iter: usize,
-    pub mcts_sims: u32,
-    pub epochs: usize,
-    pub batch_size: usize,
-    pub lr: f64,
-    /// Minimum learning rate at end of cosine cycle
-    pub lr_min: f64,
-    pub replay_window: usize,
+    /// Directory where run folders and checkpoints are written.
     pub output_dir: PathBuf,
+    /// Resume training from this checkpoint path (e.g. `checkpoints/run/model_iter_10`).
     #[serde(skip)]
     pub resume: Option<PathBuf>,
-    /// Iteration at which q fully replaces z as value target (0 = pure z always)
+
+    // -- Training --
+    /// Training epochs over the replay buffer per iteration.
+    pub epochs: usize,
+    /// Mini-batch size for training.
+    pub batch_size: usize,
+    /// Peak learning rate (cosine-annealed from here to `lr_min`).
+    pub lr: f64,
+    /// Minimum learning rate at end of cosine cycle (default: `lr / 10`).
+    pub lr_min: f64,
+    /// Number of most-recent iterations kept in the replay buffer.
+    pub replay_window: usize,
+    /// Iteration at which Q fully replaces Z as value target (0 = pure Z always).
     pub q_blend_generations: usize,
-    /// Benchmark games against random-rollout bot per iteration (0 = skip)
-    pub bench_games: u32,
-    /// Gumbel-Top-k sampled actions at root
-    pub gumbel_m: u32,
-    /// σ scaling parameter
-    pub c_visit: f32,
-    /// σ scaling parameter
-    pub c_scale: f32,
-    /// Number of early-game turns where action is sampled from improved policy
-    /// (for exploration diversity). After this, use selected_action deterministically.
+
+    // -- Self-play --
+    /// Self-play games generated per iteration.
+    pub games_per_iter: usize,
+    /// Early-game turns where action is sampled from improved policy
+    /// (for exploration diversity). After this, the best action is used deterministically.
     pub explore_moves: u32,
-    /// Probability of full search per move (playout cap randomization)
+    /// Probability of full search per move (playout cap randomization).
     pub playout_cap_full_prob: f32,
-    /// Simulations for fast (non-full) search moves
+    /// Simulations for fast (non-full) search moves (playout cap randomization).
     pub playout_cap_fast_sims: u32,
-    /// MCTS simulations for benchmark baseline opponent
+
+    // -- MCTS --
+    /// MCTS simulations per move during self-play (full-search budget).
+    pub mcts_sims: u32,
+    /// Starting MCTS simulations for progressive ramp (ramps linearly to `mcts_sims`).
+    /// Set equal to `mcts_sims` for no ramp.
+    pub mcts_sims_start: u32,
+    /// Gumbel-Top-k sampled actions at root.
+    pub gumbel_m: u32,
+    /// Sigma scaling parameter for completed-Q transform.
+    pub c_visit: f32,
+    /// Sigma scaling parameter for completed-Q transform.
+    pub c_scale: f32,
+
+    // -- Benchmark --
+    /// Benchmark games against random-rollout bot per iteration (0 = skip).
+    pub bench_games: u32,
+    /// MCTS simulations for the benchmark baseline opponent.
     pub bench_baseline_sims: u32,
-    /// Rollouts per evaluation for benchmark baseline opponent
+    /// Rollouts per evaluation for the benchmark baseline opponent.
     pub bench_baseline_rollouts: u32,
+}
+
+impl Default for TrainConfig {
+    fn default() -> Self {
+        Self {
+            // Infrastructure
+            iterations: 1000,
+            output_dir: PathBuf::from("checkpoints"),
+            resume: None,
+
+            // Training
+            epochs: 3,
+            batch_size: 256,
+            lr: 0.001,
+            lr_min: 0.0001,
+            replay_window: 40,
+            q_blend_generations: 100,
+
+            // Self-play
+            games_per_iter: 500,
+            explore_moves: 30,
+            playout_cap_full_prob: 0.25,
+            playout_cap_fast_sims: 32,
+
+            // MCTS
+            mcts_sims: 800,
+            mcts_sims_start: 50,
+            gumbel_m: 16,
+            c_visit: 50.0,
+            c_scale: 1.0,
+
+            // Benchmark
+            bench_games: 10,
+            bench_baseline_sims: 200,
+            bench_baseline_rollouts: 1,
+        }
+    }
 }
 
 /// Per-iteration config passed to the model's train_step method.
@@ -123,6 +181,16 @@ fn cosine_lr(config: &TrainConfig, iteration: usize) -> f64 {
     config.lr_min + 0.5 * (config.lr - config.lr_min) * (1.0 + (std::f64::consts::PI * t).cos())
 }
 
+fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
+    let start = config.mcts_sims_start;
+    if start >= config.mcts_sims || config.iterations <= 1 {
+        return config.mcts_sims;
+    }
+    let t = iteration as f64 / (config.iterations - 1) as f64;
+    let sims = start as f64 + t * (config.mcts_sims - start) as f64;
+    (sims.round() as u32).max(1)
+}
+
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -150,13 +218,14 @@ pub fn run_training<G, M>(
     for iteration in start_iteration..config.iterations {
         let iter_start = Instant::now();
         let effective_lr = cosine_lr(&config, iteration);
+        let effective_sims = progressive_sims(&config, iteration);
         let evaluator = model.evaluator();
 
         // Self-play
         let sp = self_play::run_self_play_iteration::<G, M::Encoder, M::Evaluator>(
             evaluator,
             &config,
-            config.mcts_sims,
+            effective_sims,
             iteration,
             &mut rng,
             &new_state,
@@ -307,7 +376,7 @@ pub fn run_training<G, M>(
             samples_per_sec,
             total_elapsed_secs: total_elapsed.as_secs_f64(),
             bench_win_rate,
-            mcts_sims: config.mcts_sims,
+            mcts_sims: effective_sims,
             gumbel_m: config.gumbel_m,
             c_visit: config.c_visit,
             c_scale: config.c_scale,

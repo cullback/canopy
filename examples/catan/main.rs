@@ -132,12 +132,30 @@ fn main() {
 }
 
 #[cfg(feature = "nn")]
+fn train_config(model: &str) -> canopy2::train::TrainConfig {
+    use canopy2::train::TrainConfig;
+
+    match model {
+        "simple" => TrainConfig {
+            iterations: 2000,
+            epochs: 2,
+            batch_size: 128,
+            replay_window: 10,
+            games_per_iter: 100,
+            ..TrainConfig::default()
+        },
+        _ => TrainConfig::default(),
+    }
+}
+
+#[cfg(feature = "nn")]
 fn run_train(matches: &clap::ArgMatches) {
     use burn::backend::ndarray::NdArrayDevice;
     use canopy2::game::Game;
     use canopy2::train::BurnTrainableModel;
 
-    let config = cli::parse_train_config(matches);
+    let model_type = matches.get_one::<String>("model").unwrap().as_str();
+    let config = cli::parse_train_config(matches, train_config(model_type));
     let device = NdArrayDevice::Cpu;
 
     let dice = if matches.get_flag("balanced") {
@@ -148,7 +166,6 @@ fn run_train(matches: &clap::ArgMatches) {
 
     let new_state = move |rng: &mut fastrand::Rng| game::new_game(rng.u64(..), dice);
 
-    let model_type = matches.get_one::<String>("model").unwrap().as_str();
     match model_type {
         "simple" => {
             let model_config = model::CatanModelConfig::new(GameState::NUM_ACTIONS);
