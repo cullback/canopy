@@ -16,6 +16,8 @@ MCTS framework for two player games.
 
 ## Optimizations
 
+### MCTS
+
 > **DAG-based graph search instead of a tree**
 
 Replaces the tree with a directed acyclic graph, enabling transposition tables where different move sequences reaching the same board state share a single node. Used by KataGo since v1.12. Degrades gracefully to normal MCTS if no transpositions exist. Retrofit cost is extreme: backpropagation must handle multiple parents, node lifetime management changes completely, and every traversal routine needs rewriting.
@@ -36,9 +38,7 @@ Stores all nodes in a pre-allocated arena (no per-node heap allocation), using i
 
 Mixes the actual game outcome `z` with the MCTS root Q-value `q` as the training target: `target = α·z + (1-α)·q`, where α linearly falls from 1.0 to 0.0 over ~20 generations. Critical for Catan where dice variance makes pure `z` noisy. The key architectural requirement is storing `(state, π, z, q)` tuples in training samples from day one — if you only store `(state, π, z)`, adding `q` later means discarding all historical training data.
 
-> **Canonical board representation**
-
-For games with symmetry, the game model always maps to a single canonical state (e.g., always placing the first settlement in a canonical position, or normalizing player identity). Eliminates the need for data augmentation and makes transposition tables far more effective. Must be designed into the game model interface from the start — retrofitting changes state hashing, transposition keys, and invalidates all previously stored training data.
+### Training
 
 > **Progressive simulation**
 
@@ -55,6 +55,12 @@ Cosine or step-decay schedule for the learning rate during training. Pure traini
 > **Replay buffer strategy**
 
 Controls how training data is sampled and aged out — e.g., sampling each position ~8× before discarding, or prioritized replay. Pure training-config change, no architectural impact.
+
+### Other
+
+> **Canonical board representation**
+
+For games with symmetry, the game model always maps to a single canonical state (e.g., always placing the first settlement in a canonical position, or normalizing player identity). Eliminates the need for data augmentation and makes transposition tables far more effective. Must be designed into the game model interface from the start — retrofitting changes state hashing, transposition keys, and invalidates all previously stored training data.
 
 ## Compared to gumbel paper
 
@@ -83,13 +89,18 @@ Differences
 
 ## References
 
+- <https://suragnair.github.io/posts/alphazero.html>
 - <https://davidstarsilver.wordpress.com/wp-content/uploads/2025/04/gumbel-alphazero.pdf>
+- <https://medium.com/oracledevs/lessons-from-implementing-alphazero-7e36e9054191>
+- <https://freedium-mirror.cfd/https://medium.com/oracledevs/lessons-from-implementing-alphazero-7e36e9054191>
 - <https://brantondemoss.com/writing/kata/>
 - <https://gwern.net/doc/reinforcement-learning/model/alphago/2017-silver.pdf#page=5>
 - <https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md>
 - [Enhancements for Real-Time Monte-Carlo Tree Search in General Video Game Playing (2024)](https://arxiv.org/html/2407.03049v1)
   - progressive simulation
 
-  repos
+repos
 
-  - https://github.com/google-deepmind/mctx
+- <https://github.com/google-deepmind/mctx>
+- <https://github.com/gorisanson/quoridor-ai>
+- <https://github.com/Aenteas/MCTS>
