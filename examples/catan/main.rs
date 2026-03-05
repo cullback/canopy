@@ -191,6 +191,12 @@ fn train_command() -> Command {
                 .help("Starting simulation budget for progressive ramp (default: train-mcts)"),
         )
         .arg(
+            Arg::new("model")
+                .long("model")
+                .default_value("simple")
+                .help("Model architecture: simple (default) or resnet"),
+        )
+        .arg(
             Arg::new("balanced")
                 .long("balanced")
                 .action(clap::ArgAction::SetTrue)
@@ -226,7 +232,6 @@ fn main() {
 fn run_train(matches: &clap::ArgMatches) {
     use burn::backend::ndarray::NdArrayDevice;
     use canopy2::game::Game;
-    use canopy2::nn::StateEncoder;
     use canopy2::train::{BurnTrainableModel, TrainConfig};
 
     let parse = |name: &str| -> String { matches.get_one::<String>(name).unwrap().clone() };
@@ -265,14 +270,6 @@ fn run_train(matches: &clap::ArgMatches) {
 
     let device = NdArrayDevice::Cpu;
 
-    let model_config =
-        model::CatanModelConfig::new(encoder::CatanEncoder::FEATURE_SIZE, GameState::NUM_ACTIONS);
-
-    let mut trainable = BurnTrainableModel::<GameState, encoder::CatanEncoder, _>::new(
-        move |dev| model_config.init(dev),
-        &device,
-    );
-
     let dice = if matches.get_flag("balanced") {
         Dice::Balanced(game::dice::BalancedDice::new())
     } else {
@@ -281,11 +278,34 @@ fn run_train(matches: &clap::ArgMatches) {
 
     let new_state = move |rng: &mut fastrand::Rng| game::new_game(rng.u64(..), dice);
 
-    canopy2::train::run_training::<GameState, encoder::CatanEncoder, _>(
-        config,
-        &mut trainable,
-        new_state,
-    );
+    let model_type = matches.get_one::<String>("model").unwrap().as_str();
+    match model_type {
+        "simple" => {
+            let model_config = model::CatanModelConfig::new(GameState::NUM_ACTIONS);
+            let mut trainable = BurnTrainableModel::<GameState, encoder::CatanEncoder, _>::new(
+                move |dev| model_config.init(dev),
+                &device,
+            );
+            canopy2::train::run_training::<GameState, encoder::CatanEncoder, _>(
+                config,
+                &mut trainable,
+                new_state,
+            );
+        }
+        "resnet" => {
+            let model_config = model::CatanResModelConfig::new(GameState::NUM_ACTIONS);
+            let mut trainable = BurnTrainableModel::<GameState, encoder::CatanEncoder, _>::new(
+                move |dev| model_config.init(dev),
+                &device,
+            );
+            canopy2::train::run_training::<GameState, encoder::CatanEncoder, _>(
+                config,
+                &mut trainable,
+                new_state,
+            );
+        }
+        other => panic!("unknown model '{other}', expected 'simple' or 'resnet'"),
+    }
 }
 
 fn run_tournament(matches: &clap::ArgMatches) {
@@ -384,11 +404,10 @@ fn load_nn_eval(
     use burn::module::Module;
     use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
     use canopy2::game::Game;
-    use canopy2::nn::{NeuralEvaluator, StateEncoder};
+    use canopy2::nn::NeuralEvaluator;
 
     let device = NdArrayDevice::Cpu;
-    let model_config =
-        model::CatanModelConfig::new(encoder::CatanEncoder::FEATURE_SIZE, GameState::NUM_ACTIONS);
+    let model_config = model::CatanModelConfig::new(GameState::NUM_ACTIONS);
     let model: model::CatanModel<NdArray> = model_config.init(&device);
 
     let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
