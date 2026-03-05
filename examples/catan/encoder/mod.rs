@@ -76,19 +76,19 @@ pub(crate) const ORIGINAL_DECK: [f32; 5] = [14.0, 5.0, 2.0, 2.0, 2.0];
 /// Push phase one-hot (7 features).
 /// Chance nodes (Roll, StealResolve) are excluded — the agent never sees those states.
 pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
-    let phase_idx = match &state.phase {
-        Phase::PlaceSettlement => 0,
-        Phase::PlaceRoad => 1,
-        Phase::PreRoll => 2,
-        Phase::Discard { .. } => 3,
-        Phase::MoveRobber => 4,
-        Phase::Main => 5,
-        Phase::RoadBuilding { .. } => 6,
+    let (phase_idx, phase_value) = match &state.phase {
+        Phase::PlaceSettlement => (0, 1.0),
+        Phase::PlaceRoad => (1, 1.0),
+        Phase::PreRoll => (2, 1.0),
+        Phase::Discard { remaining, .. } => (3, (*remaining as f32 / 10.0).min(1.0)),
+        Phase::MoveRobber => (4, 1.0),
+        Phase::Main => (5, 1.0),
+        Phase::RoadBuilding { .. } => (6, 1.0),
         Phase::Roll | Phase::StealResolve => unreachable!(),
         Phase::GameOver(_) => unreachable!(),
     };
     for i in 0..7 {
-        out.push(f32::from(i == phase_idx));
+        out.push(if i == phase_idx { phase_value } else { 0.0 });
     }
 }
 
