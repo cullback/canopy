@@ -84,8 +84,10 @@ pub struct TrainConfig {
     pub c_scale: f32,
 
     // -- Benchmark --
-    /// Benchmark games against random-rollout bot per iteration (0 = skip).
+    /// Benchmark games against random-rollout bot (0 = skip).
     pub bench_games: u32,
+    /// Run benchmark every N iterations (1 = every iteration).
+    pub bench_interval: usize,
     /// MCTS simulations for the benchmark baseline opponent.
     pub bench_baseline_sims: u32,
     /// Rollouts per evaluation for the benchmark baseline opponent.
@@ -123,6 +125,7 @@ impl Default for TrainConfig {
 
             // Benchmark
             bench_games: 10,
+            bench_interval: 10,
             bench_baseline_sims: 200,
             bench_baseline_rollouts: 1,
         }
@@ -267,7 +270,10 @@ pub fn run_training<G, M>(
 
         // Benchmark
         let bench_start = Instant::now();
-        let (bench_wins, bench_losses, bench_draws) = if config.bench_games > 0 {
+        let run_bench = config.bench_games > 0
+            && config.bench_interval > 0
+            && iter_num % config.bench_interval == 0;
+        let (bench_wins, bench_losses, bench_draws) = if run_bench {
             let eval = model.evaluator();
             benchmark::run_benchmark::<G, M::Evaluator>(&eval, &config, &mut rng, &new_state)
         } else {
@@ -288,7 +294,7 @@ pub fn run_training<G, M>(
             0
         };
 
-        let bench_str = if config.bench_games > 0 {
+        let bench_str = if run_bench {
             format!(
                 " | bench: {}/{} ({:.0}%)",
                 bench_wins,
@@ -336,7 +342,7 @@ pub fn run_training<G, M>(
             0.0
         };
         let avg_value_target = (1.0 - alpha as f64) * stats.avg_z + alpha as f64 * stats.avg_q;
-        let bench_win_rate: f64 = if config.bench_games > 0 {
+        let bench_win_rate: f64 = if run_bench {
             bench_wins as f64 / config.bench_games as f64
         } else {
             f64::NAN

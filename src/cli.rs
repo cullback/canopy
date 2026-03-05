@@ -116,7 +116,13 @@ pub fn train_command() -> Command {
             Arg::new("bench-games")
                 .long("bench-games")
                 .default_value(d.bench_games.to_string())
-                .help("Benchmark games vs rollout bot per iteration (0 to skip)"),
+                .help("Benchmark games vs rollout bot (0 to skip)"),
+        )
+        .arg(
+            Arg::new("bench-interval")
+                .long("bench-interval")
+                .default_value(d.bench_interval.to_string())
+                .help("Run benchmark every N iterations"),
         )
         .arg(
             Arg::new("gumbel-m")
@@ -225,6 +231,9 @@ pub fn parse_train_config(
     }
     if set("bench-games") {
         config.bench_games = val("bench-games").parse().unwrap();
+    }
+    if set("bench-interval") {
+        config.bench_interval = val("bench-interval").parse().unwrap();
     }
     if set("gumbel-m") {
         config.gumbel_m = val("gumbel-m").parse().unwrap();

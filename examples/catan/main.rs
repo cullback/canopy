@@ -137,11 +137,12 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
 
     match model {
         "simple" => TrainConfig {
-            iterations: 2000,
+            iterations: 1000,
             epochs: 2,
             batch_size: 128,
             replay_window: 10,
             games_per_iter: 100,
+            bench_baseline_sims: 50,
             ..TrainConfig::default()
         },
         _ => TrainConfig::default(),
