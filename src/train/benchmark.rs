@@ -1,10 +1,10 @@
 use crate::eval::Evaluator;
 use crate::game::Game;
-use crate::mcts::Config;
+use crate::mcts::{Config, Search};
 use crate::player::Player;
 
 use super::TrainConfig;
-use super::self_play::{play_game, run_search};
+use super::self_play::play_game;
 
 /// Play benchmark games: NN evaluator vs RolloutEvaluator, alternating seats.
 /// Returns (nn_wins, nn_losses, draws).
@@ -48,12 +48,14 @@ pub(super) fn run_benchmark<G: Game, Ev: Evaluator<G>>(
         let reward = play_game(
             &mut state,
             |state, current, rng| {
-                let result = if current == nn_player {
-                    run_search(state, evaluator, &nn_config, rng)
+                let (config, eval): (&Config, &dyn Evaluator<G>) = if current == nn_player {
+                    (&nn_config, evaluator)
                 } else {
-                    run_search(state, &baseline_eval, &baseline_config, rng)
+                    (&baseline_config, &baseline_eval)
                 };
-                result.selected_action
+                Search::new(state.clone())
+                    .run_to_completion(config, eval, rng)
+                    .selected_action
             },
             rng,
         );

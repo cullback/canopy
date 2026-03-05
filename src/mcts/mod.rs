@@ -1,6 +1,6 @@
 mod tree;
 
-use crate::eval::Evaluation;
+use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
 use crate::player::Player;
 
@@ -68,21 +68,22 @@ pub enum Step<G: Game> {
 ///
 /// The search tree persists across moves so that subtrees explored in earlier
 /// searches can be reused (the tree is compacted, not rebuilt, on each
-/// `step_to`).  The three public methods form a simple protocol:
+/// [`run`](Self::run)).  The public methods form a simple protocol:
 ///
-/// 1. [`start`](Self::start) — construct the search and begin the first search.
-/// 2. [`supply`](Self::supply) — feed an evaluation back; may yield another
+/// 1. [`new`](Self::new) — construct with a root game state.
+/// 2. [`apply_action`](Self::apply_action) — mirror actions as they happen.
+/// 3. [`run`](Self::run) — begin/continue a search, returning a `Step`.
+/// 4. [`supply`](Self::supply) — feed an evaluation back; may yield another
 ///    `NeedsEval` or a final `Done`.
-/// 3. [`step_to`](Self::step_to) — after playing one or more actions, advance
-///    the tree and begin the next search with a (possibly updated) config.
+/// 5. [`run_to_completion`](Self::run_to_completion) — convenience wrapper
+///    around `run` + `supply` loop.
 ///
 /// The caller never touches the tree directly; all interaction goes through
 /// `Step` / `PendingEval`.
 pub struct Search<G: Game> {
     tree: Tree,
-    /// `None` when the root is terminal (we return `Done` immediately) or when
-    /// `step_to` walks through an action the tree hasn't expanded yet (we fall
-    /// back to `start` with a fresh tree).
+    /// `None` initially or after `apply_action` walks through an unexpanded
+    /// child.  The next `run` will discard the old tree and start fresh.
     root: Option<NodeId>,
     root_state: G,
     bufs: Bufs,
@@ -158,52 +159,117 @@ enum SimResult<G: Game> {
 // ── Public API ────────────────────────────────────────────────────────
 
 impl<G: Game> Search<G> {
-    /// Create a new search tree and begin searching from `root_state`.
+    /// Create a new search with the given root game state.
     ///
-    /// Returns `(Self, Step)` rather than `&mut self -> Step` (like
-    /// [`step_to`](Self::step_to)) because the `Search` doesn't exist yet —
-    /// the shape asymmetry between the two entry points is inherent, not an
-    /// oversight.
-    ///
-    /// If `root_state` is terminal, returns `Step::Done` immediately with a
-    /// zero policy and the terminal reward.  Otherwise returns `NeedsEval`
-    /// for the root (or, for a chance root that needs no eval, may run
-    /// simulations and return `NeedsEval` for the first leaf it reaches).
-    pub fn start(root_state: &G, config: &Config, rng: &mut fastrand::Rng) -> (Self, Step<G>) {
-        let mut search = Self {
+    /// The tree starts empty (`root: None`); the first call to [`run`](Self::run)
+    /// will expand from scratch.
+    pub fn new(root_state: G) -> Self {
+        Self {
             tree: Tree::default(),
             root: None,
-            root_state: root_state.clone(),
+            root_state,
             bufs: Bufs::default(),
-            config: config.clone(),
+            config: Config::default(),
             gumbel: None,
-            vanilla_budget_remaining: config.num_simulations,
-        };
+            vanilla_budget_remaining: 0,
+        }
+    }
 
-        // Terminal root — immediate result
-        if let Status::Terminal(reward) = root_state.status() {
-            let step = Step::Done(SearchResult {
+    /// Read access to the internal game state.
+    pub fn state(&self) -> &G {
+        &self.root_state
+    }
+
+    /// Apply an action to the internal game state and walk the tree pointer.
+    ///
+    /// If the tree has an expanded child for `action`, the root pointer follows
+    /// it (O(1)).  Otherwise the root pointer becomes `None` and the next
+    /// [`run`](Self::run) will discard the old tree and start fresh.
+    pub fn apply_action(&mut self, action: usize) {
+        self.root_state.apply_action(action);
+        if let Some(root) = self.root {
+            self.root = self.tree.child_for_action(root, action);
+        }
+    }
+
+    /// Begin (or continue) an MCTS search from the current state.
+    ///
+    /// If the tree root survived prior [`apply_action`](Self::apply_action)
+    /// calls, the tree is compacted and Gumbel state reinitialized.  If the
+    /// root was lost (unexpanded child), the old tree is discarded and a fresh
+    /// search starts from scratch.
+    ///
+    /// Returns `Step::Done` immediately for terminal states, or
+    /// `Step::NeedsEval` when a leaf needs evaluation.
+    pub fn run(&mut self, config: &Config, rng: &mut fastrand::Rng) -> Step<G> {
+        self.config = config.clone();
+        self.gumbel = None;
+        self.vanilla_budget_remaining = config.num_simulations;
+
+        // Terminal root requires no tree logic — immediate result
+        if let Status::Terminal(reward) = self.root_state.status() {
+            return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
                 value: reward,
                 selected_action: 0,
             });
-            return (search, step);
         }
 
-        // Try to expand root
-        match search.tree.try_expand(root_state, &mut search.bufs) {
-            ExpandResult::Leaf(_) => unreachable!("empty non-terminal tree"),
-            ExpandResult::Chance(id) => {
-                search.root = Some(id);
-                let step = search.run_simulations(rng);
-                (search, step)
-            }
-            ExpandResult::NeedsEval(player) => {
-                let step = Step::NeedsEval(PendingEval {
-                    state: root_state.clone(),
+        if let Some(old_root) = self.root {
+            // Reusing tree: compact the graph
+            let new_root = self.tree.compact(old_root);
+            self.root = Some(new_root);
+
+            let root_value = self.tree.utility(new_root);
+            let root_player = match *self.tree.kind(new_root) {
+                NodeKind::Decision(p) => p,
+                _ => return self.run_vanilla_sims(rng),
+            };
+
+            self.gumbel = Some(init_gumbel(
+                &self.tree,
+                new_root,
+                root_value,
+                root_player,
+                &self.config,
+                rng,
+            ));
+
+            self.run_simulations(rng)
+        } else {
+            // Start fresh: clear nodes but preserve allocations
+            self.tree.clear();
+
+            match self.tree.try_expand(&self.root_state, &mut self.bufs) {
+                ExpandResult::Leaf(_) => unreachable!("empty non-terminal tree"),
+                ExpandResult::Chance(id) => {
+                    self.root = Some(id);
+                    self.run_simulations(rng)
+                }
+                ExpandResult::NeedsEval(player) => Step::NeedsEval(PendingEval {
+                    state: self.root_state.clone(),
                     context: Phase::ExpandingRoot { player },
-                });
-                (search, step)
+                }),
+            }
+        }
+    }
+
+    /// Run the search to completion, driving the `NeedsEval`/`supply` loop
+    /// internally using the provided evaluator.
+    pub fn run_to_completion<E: Evaluator<G> + ?Sized>(
+        &mut self,
+        config: &Config,
+        evaluator: &E,
+        rng: &mut fastrand::Rng,
+    ) -> SearchResult {
+        let mut step = self.run(config, rng);
+        loop {
+            match step {
+                Step::NeedsEval(pending) => {
+                    let eval = evaluator.evaluate(&pending.state, rng);
+                    step = self.supply(eval, pending, rng);
+                }
+                Step::Done(result) => return result,
             }
         }
     }
@@ -220,7 +286,7 @@ impl<G: Game> Search<G> {
     /// Config is *not* accepted here because the search is mid-flight;
     /// changing simulation budget or Gumbel parameters between leaf
     /// expansions would invalidate Sequential Halving bookkeeping.  Config
-    /// changes take effect at the next [`step_to`](Self::step_to).
+    /// changes take effect at the next [`run`](Self::run).
     pub fn supply(
         &mut self,
         eval: Evaluation,
@@ -265,81 +331,6 @@ impl<G: Game> Search<G> {
                 }
             }
         };
-        self.run_simulations(rng)
-    }
-
-    /// Advance the tree through `actions` played since the last search,
-    /// update config, and begin a new search from `root_state`.
-    ///
-    /// `actions` should contain every action applied to the game state since
-    /// the previous `start` or `step_to` — both player decisions and chance
-    /// outcomes — so the tree can follow the corresponding edges and reuse
-    /// the subtree.  The slice is walked left-to-right; if any action leads
-    /// to an unexpanded or missing child the remaining actions are skipped,
-    /// the old tree is discarded, and a fresh tree is built from scratch
-    /// (equivalent to calling `start`).
-    ///
-    /// `config` is stored for the duration of this search, so callers can
-    /// adjust simulation budget or Gumbel parameters between moves (e.g.
-    /// fewer sims late in a game when the position is decided).
-    pub fn step_to(
-        &mut self,
-        root_state: &G,
-        actions: &[usize],
-        config: &Config,
-        rng: &mut fastrand::Rng,
-    ) -> Step<G> {
-        // Advance tree through played actions
-        for &action in actions {
-            if let Some(root) = self.root {
-                self.root = self.tree.child_for_action(root, action);
-            }
-        }
-        self.gumbel = None;
-
-        // If any action in the slice wasn't found in the tree (e.g. an
-        // unexpanded chance outcome), root is None and we silently discard
-        // the old tree and start fresh.
-        let Some(old_root) = self.root else {
-            let (new_search, step) = Search::start(root_state, config, rng);
-            *self = new_search;
-            return step;
-        };
-
-        // Compact the graph and remap transposition table
-        let new_root = self.tree.compact(old_root);
-        self.root = Some(new_root);
-        self.root_state = root_state.clone();
-        self.config = config.clone();
-        self.vanilla_budget_remaining = config.num_simulations;
-
-        // Terminal root — immediate result
-        if let Status::Terminal(reward) = root_state.status() {
-            return Step::Done(SearchResult {
-                policy: vec![0.0; G::NUM_ACTIONS],
-                value: reward,
-                selected_action: 0,
-            });
-        }
-
-        // Re-initialize Gumbel state with fresh samples for the reused root
-        let root_value = self.tree.utility(new_root);
-        let root_player = match *self.tree.kind(new_root) {
-            NodeKind::Decision(p) => p,
-            _ => {
-                // Chance/terminal root — no Gumbel needed
-                return self.run_vanilla_sims(rng);
-            }
-        };
-        self.gumbel = Some(init_gumbel(
-            &self.tree,
-            new_root,
-            root_value,
-            root_player,
-            &self.config,
-            rng,
-        ));
-
         self.run_simulations(rng)
     }
 
@@ -546,6 +537,9 @@ fn simulate_one<G: Game>(
 ///
 /// `q_bounds` is the global (q_min, q_max) from the tree, used for
 /// consistent Q normalization across all nodes (per the paper).
+///
+/// Returns 0 if the node has no edges (defensive; decision nodes should
+/// always have legal actions, but a corrupted game state could violate this).
 fn gumbel_interior_select(
     tree: &Tree,
     node_id: NodeId,
@@ -580,8 +574,8 @@ fn gumbel_interior_select(
             (i, score)
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
-        .unwrap()
-        .0
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
 
 // ── Gumbel helpers ────────────────────────────────────────────────────
@@ -966,7 +960,6 @@ mod tests {
 
     #[test]
     fn mcts_finds_winning_action() {
-        let game = TrivialGame::new();
         let evaluator = RolloutEvaluator { num_rollouts: 1 };
         let config = Config {
             num_simulations: 500,
@@ -974,16 +967,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
-        let result = loop {
-            step = match step {
-                Step::NeedsEval(pending) => {
-                    let output = evaluator.evaluate(&pending.state, &mut rng);
-                    sm.supply(output, pending, &mut rng)
-                }
-                Step::Done(r) => break r,
-            };
-        };
+        let mut search = Search::new(TrivialGame::new());
+        let result = search.run_to_completion(&config, &evaluator, &mut rng);
 
         assert_eq!(
             result.selected_action, 0,
@@ -1057,23 +1042,13 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let mut game = TwoStepGame::new();
-        let (mut search, mut step) = Search::start(&game, &config, &mut rng);
-        let result = loop {
-            step = match step {
-                Step::NeedsEval(pending) => {
-                    let output = evaluator.evaluate(&pending.state, &mut rng);
-                    search.supply(output, pending, &mut rng)
-                }
-                Step::Done(r) => break r,
-            };
-        };
+        let mut search = Search::new(TwoStepGame::new());
+        let result = search.run_to_completion(&config, &evaluator, &mut rng);
 
         let action = result.selected_action;
-        game.apply_action(action);
-
         let node_count_before = search.tree.node_count();
-        step = search.step_to(&game, &[action], &config, &mut rng);
+        search.apply_action(action);
+        let mut step = search.run(&config, &mut rng);
         let node_count_after_compact = search.tree.node_count();
         assert!(
             node_count_after_compact < node_count_before,
@@ -1099,15 +1074,14 @@ mod tests {
 
     #[test]
     fn state_machine_terminal_root() {
-        let game = TrivialGame {
-            done: true,
-            chose_win: true,
-        };
         let config = Config::default();
         let mut rng = fastrand::Rng::new();
 
-        let (_sm, step) = Search::start(&game, &config, &mut rng);
-        match step {
+        let mut search = Search::new(TrivialGame {
+            done: true,
+            chose_win: true,
+        });
+        match search.run(&config, &mut rng) {
             Step::Done(result) => {
                 assert_eq!(result.value, 1.0);
                 assert!(result.policy.iter().all(|&p| p == 0.0));
@@ -1118,7 +1092,6 @@ mod tests {
 
     #[test]
     fn improved_policy_sums_to_one() {
-        let game = TrivialGame::new();
         let evaluator = RolloutEvaluator { num_rollouts: 1 };
         let config = Config {
             num_simulations: 100,
@@ -1126,16 +1099,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
-        let result = loop {
-            step = match step {
-                Step::NeedsEval(pending) => {
-                    let output = evaluator.evaluate(&pending.state, &mut rng);
-                    sm.supply(output, pending, &mut rng)
-                }
-                Step::Done(r) => break r,
-            };
-        };
+        let mut search = Search::new(TrivialGame::new());
+        let result = search.run_to_completion(&config, &evaluator, &mut rng);
 
         let total: f32 = result.policy.iter().sum();
         assert!(
@@ -1156,16 +1121,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let (mut sm, mut step) = Search::start(&game, &config, &mut rng);
-        let result = loop {
-            step = match step {
-                Step::NeedsEval(pending) => {
-                    let output = evaluator.evaluate(&pending.state, &mut rng);
-                    sm.supply(output, pending, &mut rng)
-                }
-                Step::Done(r) => break r,
-            };
-        };
+        let mut search = Search::new(game);
+        let result = search.run_to_completion(&config, &evaluator, &mut rng);
 
         // Should complete successfully and pick the winning action
         assert_eq!(result.selected_action, 0);

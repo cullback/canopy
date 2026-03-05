@@ -339,6 +339,16 @@ impl Tree {
         NodeId(0)
     }
 
+    // ── Clear ─────────────────────────────────────────────────────
+
+    /// Remove all nodes and edges but keep the underlying `Vec` capacities
+    /// so the next search can reuse the allocations.
+    pub fn clear(&mut self) {
+        self.nodes.clear();
+        self.edges.clear();
+        self.table.clear();
+    }
+
     // ── Navigation ───────────────────────────────────────────────
 
     /// Find the child reached by `action` from `node`, if any.

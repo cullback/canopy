@@ -3,10 +3,8 @@ use crate::game::{Game, Status};
 use crate::mcts::{Config, PendingEval, Search, Step};
 
 struct Slot<G: Game> {
-    state: G,
-    search: Option<Search<G>>,
+    search: Search<G>,
     pending_step: Option<Step<G>>,
-    actions_since_search: Vec<usize>,
 }
 
 /// Run `num_games` self-play games with batched evaluation.
@@ -27,10 +25,8 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
     let active = batch_size.min(num_games) as usize;
     let mut slots: Vec<Slot<G>> = (0..active)
         .map(|_| Slot {
-            state: game.clone(),
-            search: None,
+            search: Search::new(game.clone()),
             pending_step: None,
-            actions_since_search: Vec::new(),
         })
         .collect();
     let mut games_started = active as u32;
@@ -45,17 +41,14 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
         for slot in slots.iter_mut() {
             loop {
                 // Terminal check
-                if let Status::Terminal(reward) = slot.state.status() {
+                if let Status::Terminal(reward) = slot.search.state().status() {
                     results.push(reward);
                     // Recycle slot if games remain
                     if games_started < num_games {
-                        slot.state = game.clone();
-                        slot.search = None;
+                        slot.search = Search::new(game.clone());
                         slot.pending_step = None;
-                        slot.actions_since_search.clear();
                         games_started += 1;
                     } else {
-                        slot.search = None;
                         slot.pending_step = None;
                         break;
                     }
@@ -65,25 +58,14 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                 }
 
                 // Chance node — sample and apply
-                if let Some(action) = slot.state.sample_chance(rng) {
-                    slot.state.apply_action(action);
-                    if slot.search.is_some() {
-                        slot.actions_since_search.push(action);
-                    }
+                if let Some(action) = slot.search.state().sample_chance(rng) {
+                    slot.search.apply_action(action);
                     continue;
                 }
 
-                // Decision node — resume existing search or start fresh
-                if let Some(search) = &mut slot.search {
-                    let step = search.step_to(&slot.state, &slot.actions_since_search, config, rng);
-                    slot.actions_since_search.clear();
-                    slot.pending_step = Some(step);
-                } else {
-                    let (search, step) = Search::start(&slot.state, config, rng);
-                    slot.search = Some(search);
-                    slot.pending_step = Some(step);
-                }
-
+                // Decision node — run search
+                let step = slot.search.run(config, rng);
+                slot.pending_step = Some(step);
                 break;
             }
         }
@@ -106,9 +88,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                 if let Some(Step::Done(_)) = &slot.pending_step
                     && let Some(Step::Done(result)) = slot.pending_step.take()
                 {
-                    let action = result.selected_action;
-                    slot.state.apply_action(action);
-                    slot.actions_since_search.push(action);
+                    slot.search.apply_action(result.selected_action);
                 }
             }
             continue;
@@ -125,13 +105,10 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
         for (idx, output) in batch_indices.iter().zip(outputs) {
             let pending = pending_iter.next().unwrap();
             let slot = &mut slots[*idx];
-            let search = slot.search.as_mut().unwrap();
-            let step = search.supply(output, pending, rng);
+            let step = slot.search.supply(output, pending, rng);
             match step {
                 Step::Done(result) => {
-                    let action = result.selected_action;
-                    slot.state.apply_action(action);
-                    slot.actions_since_search.push(action);
+                    slot.search.apply_action(result.selected_action);
                     slot.pending_step = None;
                 }
                 needs_eval @ Step::NeedsEval(_) => {

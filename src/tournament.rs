@@ -3,7 +3,7 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
-use crate::mcts::{Config, Search, Step};
+use crate::mcts::{Config, Search};
 use crate::player::{PerPlayer, Player};
 
 /// Play a single match between two MCTS bots.
@@ -35,17 +35,7 @@ pub fn play_match<G: Game>(
             let seat = if swap { player.opponent() } else { player };
             let eval = evaluators.0[seat as usize];
             let config = &configs[seat];
-            let (mut search, mut step) = Search::start(&state, config, rng);
-            let result = loop {
-                step = match step {
-                    Step::NeedsEval(pending) => {
-                        let output = eval.evaluate(&pending.state, rng);
-                        search.supply(output, pending, rng)
-                    }
-                    Step::Done(r) => break r,
-                };
-            };
-
+            let result = Search::new(state.clone()).run_to_completion(config, eval, rng);
             let action = result.selected_action;
 
             actions.push(action);

@@ -1,6 +1,6 @@
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
-use crate::mcts::{Config, Search, SearchResult, Step};
+use crate::mcts::{Config, Search};
 use crate::nn::StateEncoder;
 use crate::player::Player;
 
@@ -24,35 +24,6 @@ pub(super) struct IterGameResults {
     pub max_game_length: u32,
 }
 
-/// Drive an in-progress MCTS search state machine to completion.
-fn drive_search<G: Game, E: Evaluator<G>>(
-    search: &mut Search<G>,
-    mut step: Step<G>,
-    evaluator: &E,
-    rng: &mut fastrand::Rng,
-) -> SearchResult {
-    loop {
-        match step {
-            Step::NeedsEval(pending) => {
-                let output = evaluator.evaluate(&pending.state, rng);
-                step = search.supply(output, pending, rng);
-            }
-            Step::Done(result) => return result,
-        }
-    }
-}
-
-/// Create a fresh search and drive it to completion.
-pub(super) fn run_search<G: Game, E: Evaluator<G>>(
-    state: &G,
-    evaluator: &E,
-    config: &Config,
-    rng: &mut fastrand::Rng,
-) -> SearchResult {
-    let (mut search, step) = Search::start(state, config, rng);
-    drive_search(&mut search, step, evaluator, rng)
-}
-
 pub(super) fn self_play_game<G, Ev, E>(
     evaluator: &Ev,
     config: &TrainConfig,
@@ -74,24 +45,21 @@ where
     };
     let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
-    let mut state = new_state(&mut rng);
+    let mut search = Search::new(new_state(&mut rng));
     let mut actions = Vec::new();
     let mut samples = Vec::new();
     let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
     let mut turn_count: u32 = 0;
     let mut last_player: Option<Player> = None;
-    let mut search: Option<Search<G>> = None;
-    let mut pending_actions = Vec::new();
 
     loop {
         // Resolve chance events
-        if let Some(action) = state.sample_chance(&mut rng) {
-            pending_actions.push(action);
-            state.apply_action(action);
+        if let Some(action) = search.state().sample_chance(&mut rng) {
+            search.apply_action(action);
             continue;
         }
 
-        let current = match state.status() {
+        let current = match search.state().status() {
             Status::Terminal(_) => break,
             Status::Ongoing(p) => p,
         };
@@ -103,12 +71,11 @@ where
         }
 
         actions.clear();
-        state.legal_actions(&mut actions);
+        search.state().legal_actions(&mut actions);
 
         // Skip forced moves (single legal action)
         if actions.len() == 1 {
-            pending_actions.push(actions[0]);
-            state.apply_action(actions[0]);
+            search.apply_action(actions[0]);
             continue;
         }
 
@@ -119,20 +86,11 @@ where
             ..base_config.clone()
         };
 
-        let result = match search {
-            Some(ref mut s) => {
-                let step = s.step_to(&state, &pending_actions, &move_config, &mut rng);
-                pending_actions.clear();
-                drive_search(s, step, evaluator, &mut rng)
-            }
-            None => {
-                let (mut s, step) = Search::start(&state, &move_config, &mut rng);
-                let r = drive_search(&mut s, step, evaluator, &mut rng);
-                search = Some(s);
-                pending_actions.clear();
-                r
-            }
-        };
+        // Encode state from current player's perspective
+        features_buf.clear();
+        E::encode(search.state(), &mut features_buf);
+
+        let result = search.run_to_completion(&move_config, evaluator, &mut rng);
 
         // Root Q from current player's perspective.
         // result.value is in [-1,1] from P1's perspective.
@@ -146,10 +104,6 @@ where
             result.selected_action
         };
 
-        // Encode state from current player's perspective
-        features_buf.clear();
-        E::encode(&state, &mut features_buf);
-
         // z stores the player's sign as a placeholder; multiplied by the
         // terminal reward once the game ends.
         samples.push(Sample {
@@ -159,14 +113,13 @@ where
             q,
             full_search: is_full,
         });
-        pending_actions.push(chosen);
-        state.apply_action(chosen);
+        search.apply_action(chosen);
     }
 
     // Assign value targets from game outcome.
     // z currently holds the player's sign; multiply by terminal reward
     // to get the value target from each player's perspective.
-    let terminal_value = match state.status() {
+    let terminal_value = match search.state().status() {
         Status::Terminal(reward) => reward,
         _ => 0.0,
     };
