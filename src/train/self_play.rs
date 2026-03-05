@@ -48,7 +48,6 @@ where
     let mut search = Search::new(new_state(&mut rng));
     let mut actions = Vec::new();
     let mut samples = Vec::new();
-    let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
     let mut turn_count: u32 = 0;
     let mut last_player: Option<Player> = None;
 
@@ -87,7 +86,7 @@ where
         };
 
         // Encode state from current player's perspective
-        features_buf.clear();
+        let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
         E::encode(search.state(), &mut features_buf);
 
         let result = search.run_to_completion(&move_config, evaluator, &mut rng);
@@ -107,7 +106,7 @@ where
         // z stores the player's sign as a placeholder; multiplied by the
         // terminal reward once the game ends.
         samples.push(Sample {
-            features: features_buf.clone().into_boxed_slice(),
+            features: features_buf.into_boxed_slice(),
             policy_target: result.policy.into_boxed_slice(),
             z: current.sign(),
             q,

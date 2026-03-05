@@ -88,133 +88,13 @@ fn compute_batch_losses<B: Backend>(
     let policy_loss = per_sample_ce.mul(mask_tensor).sum().div_scalar(denom);
 
     let value_diff = value_pred.sub(value_tensor);
-    let value_loss = value_diff.clone().mul(value_diff).mean();
+    let value_loss = value_diff.powf_scalar(2.0).mean();
 
     let pl = policy_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
     let vl = value_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
 
     let loss = policy_loss.add(value_loss).reshape([1]);
     (loss, pl, vl)
-}
-
-#[allow(clippy::too_many_arguments)]
-fn train_epoch<M, O>(
-    mut model: M,
-    samples: &[&Sample],
-    lr: f64,
-    batch_size: usize,
-    alpha: f32,
-    feature_size: usize,
-    num_actions: usize,
-    optimizer: &mut O,
-    device: &NdArrayDevice,
-) -> (M, f32, f32, usize)
-where
-    M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend>,
-    O: Optimizer<M, TrainBackend>,
-{
-    let mut indices: Vec<usize> = (0..samples.len()).collect();
-    fastrand::shuffle(&mut indices);
-
-    let mut total_policy_loss = 0.0f32;
-    let mut total_value_loss = 0.0f32;
-    let mut num_batches = 0usize;
-
-    for batch_start in (0..indices.len()).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(indices.len());
-        let batch_indices = &indices[batch_start..batch_end];
-        if batch_indices.is_empty() {
-            continue;
-        }
-
-        let batch_samples: Vec<&Sample> = batch_indices.iter().map(|&i| samples[i]).collect();
-        let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
-            prepare_batch::<TrainBackend>(&batch_samples, alpha, feature_size, num_actions, device);
-
-        let (policy_logits, value_pred) = model.forward(features_tensor);
-        let (loss, pl, vl) = compute_batch_losses(
-            policy_logits,
-            value_pred,
-            policy_tensor,
-            value_tensor,
-            mask_tensor,
-            num_full,
-        );
-
-        total_policy_loss += pl;
-        total_value_loss += vl;
-        num_batches += 1;
-
-        let grads = loss.backward();
-        let grads = GradientsParams::from_grads(grads, &model);
-        model = optimizer.step(lr, model, grads);
-    }
-
-    let avg_policy = if num_batches > 0 {
-        total_policy_loss / num_batches as f32
-    } else {
-        0.0
-    };
-    let avg_value = if num_batches > 0 {
-        total_value_loss / num_batches as f32
-    } else {
-        0.0
-    };
-    (model, avg_policy, avg_value, num_batches)
-}
-
-fn validate<M>(
-    model: &M,
-    samples: &[&Sample],
-    batch_size: usize,
-    alpha: f32,
-    feature_size: usize,
-    num_actions: usize,
-    device: &NdArrayDevice,
-) -> (f32, f32)
-where
-    M: PolicyValueNet<InferBackend>,
-{
-    let mut total_policy_loss = 0.0f32;
-    let mut total_value_loss = 0.0f32;
-    let mut num_batches = 0usize;
-
-    for batch_start in (0..samples.len()).step_by(batch_size) {
-        let batch_end = (batch_start + batch_size).min(samples.len());
-        let batch = &samples[batch_start..batch_end];
-        if batch.is_empty() {
-            continue;
-        }
-
-        let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
-            prepare_batch::<InferBackend>(batch, alpha, feature_size, num_actions, device);
-
-        let (policy_logits, value_pred) = model.forward(features_tensor);
-        let (_loss, pl, vl) = compute_batch_losses(
-            policy_logits,
-            value_pred,
-            policy_tensor,
-            value_tensor,
-            mask_tensor,
-            num_full,
-        );
-
-        total_policy_loss += pl;
-        total_value_loss += vl;
-        num_batches += 1;
-    }
-
-    let avg_policy = if num_batches > 0 {
-        total_policy_loss / num_batches as f32
-    } else {
-        0.0
-    };
-    let avg_value = if num_batches > 0 {
-        total_value_loss / num_batches as f32
-    } else {
-        0.0
-    };
-    (avg_policy, avg_value)
 }
 
 pub struct BurnTrainableModel<G, E, M>
@@ -248,6 +128,126 @@ where
     }
 }
 
+impl<G, E, M> BurnTrainableModel<G, E, M>
+where
+    G: Game,
+    E: StateEncoder<G>,
+    M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend>,
+    M::InnerModule: PolicyValueNet<InferBackend>,
+{
+    fn train_epoch(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> (f32, f32, usize) {
+        let mut model = std::mem::replace(&mut self.model, (self.model_init)(&self.device));
+
+        let mut indices: Vec<usize> = (0..samples.len()).collect();
+        fastrand::shuffle(&mut indices);
+
+        let mut total_policy_loss = 0.0f32;
+        let mut total_value_loss = 0.0f32;
+        let mut num_batches = 0usize;
+
+        for batch_start in (0..indices.len()).step_by(cfg.batch_size) {
+            let batch_end = (batch_start + cfg.batch_size).min(indices.len());
+            let batch_indices = &indices[batch_start..batch_end];
+            if batch_indices.is_empty() {
+                continue;
+            }
+
+            let batch_samples: Vec<&Sample> = batch_indices.iter().map(|&i| samples[i]).collect();
+            let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
+                prepare_batch::<TrainBackend>(
+                    &batch_samples,
+                    cfg.alpha,
+                    E::FEATURE_SIZE,
+                    G::NUM_ACTIONS,
+                    &self.device,
+                );
+
+            let (policy_logits, value_pred) = model.forward(features_tensor);
+            let (loss, pl, vl) = compute_batch_losses(
+                policy_logits,
+                value_pred,
+                policy_tensor,
+                value_tensor,
+                mask_tensor,
+                num_full,
+            );
+
+            total_policy_loss += pl;
+            total_value_loss += vl;
+            num_batches += 1;
+
+            let grads = loss.backward();
+            let grads = GradientsParams::from_grads(grads, &model);
+            model = self.optimizer.step(cfg.lr, model, grads);
+        }
+
+        self.model = model;
+
+        let avg_policy = if num_batches > 0 {
+            total_policy_loss / num_batches as f32
+        } else {
+            0.0
+        };
+        let avg_value = if num_batches > 0 {
+            total_value_loss / num_batches as f32
+        } else {
+            0.0
+        };
+        (avg_policy, avg_value, num_batches)
+    }
+
+    fn validate(&self, samples: &[&Sample], cfg: &TrainStepConfig) -> (f32, f32) {
+        let model = self.model.valid();
+
+        let mut total_policy_loss = 0.0f32;
+        let mut total_value_loss = 0.0f32;
+        let mut num_batches = 0usize;
+
+        for batch_start in (0..samples.len()).step_by(cfg.batch_size) {
+            let batch_end = (batch_start + cfg.batch_size).min(samples.len());
+            let batch = &samples[batch_start..batch_end];
+            if batch.is_empty() {
+                continue;
+            }
+
+            let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
+                prepare_batch::<InferBackend>(
+                    batch,
+                    cfg.alpha,
+                    E::FEATURE_SIZE,
+                    G::NUM_ACTIONS,
+                    &self.device,
+                );
+
+            let (policy_logits, value_pred) = model.forward(features_tensor);
+            let (_loss, pl, vl) = compute_batch_losses(
+                policy_logits,
+                value_pred,
+                policy_tensor,
+                value_tensor,
+                mask_tensor,
+                num_full,
+            );
+
+            total_policy_loss += pl;
+            total_value_loss += vl;
+            num_batches += 1;
+        }
+
+        let avg_policy = if num_batches > 0 {
+            total_policy_loss / num_batches as f32
+        } else {
+            0.0
+        };
+        let avg_value = if num_batches > 0 {
+            total_value_loss / num_batches as f32
+        } else {
+            0.0
+        };
+        (avg_policy, avg_value)
+    }
+}
+
 impl<G, E, M> TrainableModel<G> for BurnTrainableModel<G, E, M>
 where
     G: Game,
@@ -276,29 +276,10 @@ where
         let mut total_gradient_steps = 0usize;
 
         for epoch in 0..cfg.epochs {
-            let (new_model, ploss, vloss, steps) = train_epoch(
-                std::mem::replace(&mut self.model, (self.model_init)(&self.device)),
-                train_samples,
-                cfg.lr,
-                cfg.batch_size,
-                cfg.alpha,
-                E::FEATURE_SIZE,
-                G::NUM_ACTIONS,
-                &mut self.optimizer,
-                &self.device,
-            );
-            self.model = new_model;
+            let (ploss, vloss, steps) = self.train_epoch(train_samples, cfg);
             total_gradient_steps += steps;
 
-            let (val_ploss, val_vloss) = validate(
-                &self.model.valid(),
-                val_samples,
-                cfg.batch_size,
-                cfg.alpha,
-                E::FEATURE_SIZE,
-                G::NUM_ACTIONS,
-                &self.device,
-            );
+            let (val_ploss, val_vloss) = self.validate(val_samples, cfg);
 
             final_train_ploss = ploss;
             final_train_vloss = vloss;
