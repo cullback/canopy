@@ -59,6 +59,16 @@ pub struct PendingEval<G: Game> {
     context: Phase,
 }
 
+impl<G: Game> PendingEval<G> {
+    /// Borrow the simulation path (empty for root expansion).
+    fn path(&self) -> &[(NodeId, usize)] {
+        match &self.context {
+            Phase::Simulating { path, .. } => path,
+            Phase::ExpandingRoot { .. } => &[],
+        }
+    }
+}
+
 /// One step of the MCTS state machine.
 pub enum Step<G: Game> {
     /// Search needs evaluation(s) for one or more leaf states.
@@ -248,7 +258,7 @@ impl<G: Game> Search<G> {
                     state: self.root_state.clone(),
                     context: Phase::ExpandingRoot {
                         player,
-                        actions: self.bufs.actions.clone(),
+                        actions: self.bufs.take_actions(),
                     },
                 }]),
             }
@@ -307,6 +317,7 @@ impl<G: Game> Search<G> {
                         &self.config,
                         rng,
                     ));
+                    self.bufs.reclaim_actions(actions);
                 }
                 Phase::Simulating {
                     path,
@@ -330,6 +341,8 @@ impl<G: Game> Search<G> {
                         self.tree.set_child(parent, edge_idx, child);
                     }
                     self.tree.recompute_q(&path);
+                    self.bufs.reclaim_path(path);
+                    self.bufs.reclaim_actions(actions);
                 }
             }
         }
@@ -438,8 +451,8 @@ impl<G: Game> Search<G> {
                     // simulation's virtual loss (q_min/q_max never contract,
                     // so feeding in artificially low values widens the range
                     // permanently).
-                    advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
-                    self.tree.apply_virtual_loss(&self.bufs.path);
+                    advance_round_robin(gs, &self.tree, pending.path(), root, &self.config);
+                    self.tree.apply_virtual_loss(pending.path());
                     batch.push(pending);
                     if batch.len() as u32 >= self.config.leaf_batch_size {
                         return Step::NeedsEval(batch);
@@ -467,7 +480,7 @@ impl<G: Game> Search<G> {
                     self.vanilla_budget_remaining -= 1;
                 }
                 SimResult::NeedsEval(pending) => {
-                    self.tree.apply_virtual_loss(&self.bufs.path);
+                    self.tree.apply_virtual_loss(pending.path());
                     self.vanilla_budget_remaining -= 1;
                     batch.push(pending);
                     if batch.len() as u32 >= self.config.leaf_batch_size {
@@ -522,10 +535,10 @@ fn simulate<G: Game>(
                 return SimResult::NeedsEval(PendingEval {
                     state,
                     context: Phase::Simulating {
-                        path: bufs.path.clone(),
+                        path: bufs.take_path(),
                         player,
                         state_key,
-                        actions: bufs.actions.clone(),
+                        actions: bufs.take_actions(),
                     },
                 });
             }

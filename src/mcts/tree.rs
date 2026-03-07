@@ -93,6 +93,37 @@ pub(super) struct Bufs {
     pub actions: Vec<usize>,
     pub chances: Vec<(usize, f32)>,
     pub path: Vec<(NodeId, usize)>,
+    /// Recycled path Vecs to avoid per-leaf allocation.
+    spare_paths: Vec<Vec<(NodeId, usize)>>,
+    /// Recycled actions Vecs to avoid per-leaf allocation.
+    spare_actions: Vec<Vec<usize>>,
+}
+
+impl Bufs {
+    /// Move path out, swapping in a spare (or empty Vec) so the next
+    /// `simulate` call reuses an existing allocation.
+    pub fn take_path(&mut self) -> Vec<(NodeId, usize)> {
+        let spare = self.spare_paths.pop().unwrap_or_default();
+        std::mem::replace(&mut self.path, spare)
+    }
+
+    /// Move actions out, swapping in a spare.
+    pub fn take_actions(&mut self) -> Vec<usize> {
+        let spare = self.spare_actions.pop().unwrap_or_default();
+        std::mem::replace(&mut self.actions, spare)
+    }
+
+    /// Return a used path Vec to the pool.
+    pub fn reclaim_path(&mut self, mut v: Vec<(NodeId, usize)>) {
+        v.clear();
+        self.spare_paths.push(v);
+    }
+
+    /// Return a used actions Vec to the pool.
+    pub fn reclaim_actions(&mut self, mut v: Vec<usize>) {
+        v.clear();
+        self.spare_actions.push(v);
+    }
 }
 
 // ── Expand result ────────────────────────────────────────────────────
