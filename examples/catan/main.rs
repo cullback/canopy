@@ -168,6 +168,7 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
             games_per_iter: 150,
             mcts_sims: 800,
             mcts_sims_start: 400,
+            leaf_batch_size: 32,
             bench_games: 20,
             bench_interval: 20,
             bench_baseline_sims: 800,

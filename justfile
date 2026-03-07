@@ -36,5 +36,5 @@ run example *args:
     cargo run --release --example {{ example }} -- {{ args }}
 
 # Sync project to a remote host (e.g., just sync 1.2.3.4)
-sync host user="ubuntu":
-    rsync -avz --delete --filter=':- .gitignore' -e ssh . {{ user }}@{{ host }}:~/canopy2/
+sync host user="root" port="22":
+    rsync -avz --delete --filter=':- .gitignore' -e 'ssh -p {{ port }}' . {{ user }}@{{ host }}:~/canopy2/
