@@ -513,7 +513,6 @@ fn simulate<G: Game>(
     bufs.path.clear();
     let mut current = root;
     let mut state = root_state.clone();
-    let mut at_root = true;
 
     loop {
         let edges = tree.edges(current);
@@ -522,8 +521,7 @@ fn simulate<G: Game>(
             NodeKind::Terminal => break,
             NodeKind::Chance => tree.sample_chance_edge(current, rng),
             NodeKind::Decision(player) => {
-                if at_root {
-                    at_root = false;
+                if bufs.path.is_empty() {
                     forced_root_edge.unwrap_or_else(|| select_decision(tree, current, player))
                 } else {
                     select_decision(tree, current, player)
