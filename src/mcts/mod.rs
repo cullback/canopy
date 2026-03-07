@@ -110,6 +110,9 @@ pub struct Search<G: Game> {
     /// Simulation budget for chance roots (no Gumbel).  Ignored when
     /// `gumbel` is `Some`, since that state tracks its own budget.
     vanilla_budget_remaining: u32,
+    /// Q bounds for vanilla (non-Gumbel) simulations, used to normalize Q
+    /// in interior selection.  Reset each `run`, widened after each sim.
+    vanilla_q_bounds: (f32, f32),
 }
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -191,6 +194,7 @@ impl<G: Game> Search<G> {
             config: Config::default(),
             gumbel: None,
             vanilla_budget_remaining: 0,
+            vanilla_q_bounds: (0.0, 0.0),
         }
     }
 
@@ -224,8 +228,11 @@ impl<G: Game> Search<G> {
         self.config = config.clone();
         self.gumbel = None;
         self.vanilla_budget_remaining = config.num_simulations;
+        self.vanilla_q_bounds = (0.0, 0.0);
 
-        // Terminal root requires no tree logic — immediate result
+        // Terminal root requires no tree logic — immediate result.
+        // selected_action is meaningless here (no legal actions); callers
+        // should check game status before using it.
         if let Status::Terminal(reward) = self.root_state.status() {
             return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
@@ -466,6 +473,7 @@ impl<G: Game> Search<G> {
     fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
         let root = self.root();
         let config = &self.config;
+        let mut q_bounds = self.vanilla_q_bounds;
         let mut batch: Vec<PendingEval<G>> = Vec::new();
         while self.vanilla_budget_remaining > 0 {
             match simulate(
@@ -475,21 +483,26 @@ impl<G: Game> Search<G> {
                 rng,
                 &mut self.bufs,
                 None,
-                |tree, node, player| gumbel_interior_select(tree, node, player, config, (0.0, 0.0)),
+                |tree, node, player| gumbel_interior_select(tree, node, player, config, q_bounds),
             ) {
                 SimResult::Complete => {
+                    widen_q_bounds(&self.tree, &self.bufs.path, &mut q_bounds);
                     self.vanilla_budget_remaining -= 1;
                 }
                 SimResult::NeedsEval(pending) => {
+                    // Widen bounds before virtual loss (same rationale as Gumbel path)
+                    widen_q_bounds(&self.tree, pending.path(), &mut q_bounds);
                     self.tree.apply_virtual_loss(pending.path());
                     self.vanilla_budget_remaining -= 1;
                     batch.push(pending);
                     if batch.len() as u32 >= self.config.leaf_batch_size {
+                        self.vanilla_q_bounds = q_bounds;
                         return Step::NeedsEval(batch);
                     }
                 }
             }
         }
+        self.vanilla_q_bounds = q_bounds;
         if !batch.is_empty() {
             return Step::NeedsEval(batch);
         }
@@ -514,8 +527,6 @@ fn simulate<G: Game>(
     let mut forced = forced_root_edge;
 
     loop {
-        let edges = tree.edges(current);
-
         let edge_idx = match *tree.kind(current) {
             NodeKind::Terminal => break,
             NodeKind::Chance => tree.sample_chance_edge(current, rng),
@@ -524,6 +535,7 @@ fn simulate<G: Game>(
                 .unwrap_or_else(|| select_decision(tree, current, player)),
         };
 
+        let edges = tree.edges(current);
         bufs.path.push((current, edge_idx));
         let action = edges[edge_idx].action;
         let child_opt = edges[edge_idx].child;
@@ -878,16 +890,25 @@ fn advance_round_robin(
 /// For in-flight leaves, this is called *before* `apply_virtual_loss` to
 /// avoid permanently widening bounds with artificially pessimistic Q.
 fn update_q_bounds(gs: &mut GumbelState, tree: &Tree, path: &[(NodeId, usize)]) {
+    let mut bounds = (gs.q_min, gs.q_max);
+    widen_q_bounds(tree, path, &mut bounds);
+    gs.q_min = bounds.0;
+    gs.q_max = bounds.1;
+}
+
+/// Widen `(q_min, q_max)` from nodes along a backprop path.
+/// Same logic as `update_q_bounds` but operates on a bare tuple instead of
+/// `GumbelState`, for use in vanilla (non-Gumbel) simulations.
+fn widen_q_bounds(tree: &Tree, path: &[(NodeId, usize)], bounds: &mut (f32, f32)) {
     for &(nid, eidx) in path {
         let node_q = tree.q(nid);
-        gs.q_min = gs.q_min.min(node_q);
-        gs.q_max = gs.q_max.max(node_q);
+        bounds.0 = bounds.0.min(node_q);
+        bounds.1 = bounds.1.max(node_q);
 
-        // Also check the child
         if let Some(child_id) = tree.edges(nid)[eidx].child {
             let child_q = tree.q(child_id);
-            gs.q_min = gs.q_min.min(child_q);
-            gs.q_max = gs.q_max.max(child_q);
+            bounds.0 = bounds.0.min(child_q);
+            bounds.1 = bounds.1.max(child_q);
         }
     }
 }
