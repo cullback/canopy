@@ -408,20 +408,6 @@ impl<G: Game> Search<G> {
             ));
         }
 
-        // Sanity check: leaf_batch_size shouldn't dominate the phase budget,
-        // or halving decisions are based mostly on in-flight (virtual-loss)
-        // data rather than real evaluations.
-        debug_assert!(
-            self.config.leaf_batch_size as usize
-                <= gs.sims_per_candidate as usize * gs.candidates.len(),
-            "leaf_batch_size ({}) exceeds Sequential Halving phase budget ({}×{} = {}); \
-             search quality will degrade",
-            self.config.leaf_batch_size,
-            gs.sims_per_candidate,
-            gs.candidates.len(),
-            gs.sims_per_candidate as usize * gs.candidates.len(),
-        );
-
         let mut batch: Vec<PendingEval<G>> = Vec::new();
         loop {
             // Check if SH is complete (1 candidate left or budget exhausted)

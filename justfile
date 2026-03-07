@@ -33,7 +33,7 @@ build:
 
 # Run an example (e.g., just run pig)
 run example *args:
-    cargo run --example {{ example }} -- {{ args }}
+    cargo run --release --example {{ example }} -- {{ args }}
 
 # Sync project to a remote host (e.g., just sync 1.2.3.4)
 sync host user="ubuntu":
