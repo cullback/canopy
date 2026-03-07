@@ -160,7 +160,12 @@ where
     M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend>,
     M::InnerModule: PolicyValueNet<InferBackend>,
 {
-    fn train_epoch(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> (f32, f32, usize) {
+    fn train_epoch(
+        &mut self,
+        samples: &[&Sample],
+        cfg: &TrainStepConfig,
+        pb: &indicatif::ProgressBar,
+    ) -> (f32, f32, usize) {
         let mut model = std::mem::replace(&mut self.model, (self.model_init)(&self.device));
 
         let mut indices: Vec<usize> = (0..samples.len()).collect();
@@ -204,6 +209,7 @@ where
             let grads = loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             model = self.optimizer.step(cfg.lr, model, grads);
+            pb.inc(1);
         }
 
         self.model = model;
@@ -294,6 +300,18 @@ where
             .min(samples.len().saturating_sub(1));
         let (train_samples, val_samples) = samples.split_at(val_split);
 
+        let batches_per_epoch = (train_samples.len() + cfg.batch_size - 1) / cfg.batch_size;
+        let total_batches = batches_per_epoch * cfg.epochs;
+
+        let pb = indicatif::ProgressBar::new(total_batches as u64);
+        pb.set_style(
+            indicatif::ProgressStyle::with_template(
+                "{bar:40.cyan/dim} {pos}/{len}  {msg}  [{elapsed_precise} elapsed, ETA {eta_precise}]",
+            )
+            .unwrap(),
+        );
+        pb.set_message("training");
+
         let mut final_train_ploss = 0.0f32;
         let mut final_train_vloss = 0.0f32;
         let mut final_val_ploss = 0.0f32;
@@ -301,7 +319,7 @@ where
         let mut total_gradient_steps = 0usize;
 
         for epoch in 0..cfg.epochs {
-            let (ploss, vloss, steps) = self.train_epoch(train_samples, cfg);
+            let (ploss, vloss, steps) = self.train_epoch(train_samples, cfg, &pb);
             total_gradient_steps += steps;
 
             let (val_ploss, val_vloss) = self.validate(val_samples, cfg);
@@ -311,16 +329,18 @@ where
             final_val_ploss = val_ploss;
             final_val_vloss = val_vloss;
 
-            eprintln!(
-                "  epoch {}/{}: train(p={:.4} v={:.4}) val(p={:.4} v={:.4})",
+            pb.set_message(format!(
+                "epoch {}/{} p={:.4} v={:.4} val_p={:.4} val_v={:.4}",
                 epoch + 1,
                 cfg.epochs,
                 ploss,
                 vloss,
                 val_ploss,
                 val_vloss
-            );
+            ));
         }
+
+        pb.finish();
 
         TrainMetrics {
             train_policy_loss: final_train_ploss,
