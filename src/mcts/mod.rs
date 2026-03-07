@@ -160,6 +160,7 @@ impl GumbelState {
     /// Which candidate in the round-robin is currently being simulated.
     fn candidate_idx(&self) -> usize {
         debug_assert!(self.sims_per_candidate > 0);
+        debug_assert!(!self.candidates.is_empty());
         (self.sims_this_phase / self.sims_per_candidate) as usize % self.candidates.len()
     }
 
