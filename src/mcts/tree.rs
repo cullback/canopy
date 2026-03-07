@@ -146,14 +146,18 @@ pub(super) struct Tree {
 impl Tree {
     // ── Node/edge access ─────────────────────────────────────────
 
+    fn edge_range(&self, id: NodeId) -> std::ops::Range<usize> {
+        let e = &self.nodes[id.0 as usize];
+        e.edge_start as usize..(e.edge_start + e.edge_count) as usize
+    }
+
     pub fn edges(&self, id: NodeId) -> &[Edge] {
-        let entry = &self.nodes[id.0 as usize];
-        &self.edges[entry.edge_start as usize..(entry.edge_start + entry.edge_count) as usize]
+        &self.edges[self.edge_range(id)]
     }
 
     pub fn edges_mut(&mut self, id: NodeId) -> &mut [Edge] {
-        let entry = &self.nodes[id.0 as usize];
-        &mut self.edges[entry.edge_start as usize..(entry.edge_start + entry.edge_count) as usize]
+        let r = self.edge_range(id);
+        &mut self.edges[r]
     }
 
     /// Maximum visit count across all edges of a node (0 if no edges).
