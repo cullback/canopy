@@ -99,7 +99,8 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
     seed: u64,
 ) -> Vec<GameResult> {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let (resp_tx, resp_rx) = mpsc::sync_channel::<(Evaluation, PendingEval<G>)>(1);
+    let (resp_tx, resp_rx) =
+        mpsc::sync_channel::<(Evaluation, PendingEval<G>)>(base_config.leaf_batch_size as usize);
     let mut results = Vec::new();
     let mut actions_buf = Vec::new();
 
@@ -183,15 +184,18 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
             let mut step = search.run(&move_config, &mut rng);
             let result = loop {
                 match step {
-                    Step::NeedsEval(pending) => {
-                        request_tx
-                            .send(EvalRequest {
-                                pending,
-                                response_tx: resp_tx.clone(),
-                            })
-                            .unwrap();
-                        let (eval, pending) = resp_rx.recv().unwrap();
-                        step = search.supply(eval, pending, &mut rng);
+                    Step::NeedsEval(pendings) => {
+                        let count = pendings.len();
+                        for pending in pendings {
+                            request_tx
+                                .send(EvalRequest {
+                                    pending,
+                                    response_tx: resp_tx.clone(),
+                                })
+                                .unwrap();
+                        }
+                        let evals: Vec<_> = (0..count).map(|_| resp_rx.recv().unwrap()).collect();
+                        step = search.supply(evals, &mut rng);
                     }
                     Step::Done(result) => break result,
                 }
@@ -296,6 +300,7 @@ where
         num_sampled_actions: config.gumbel_m,
         c_visit: config.c_visit,
         c_scale: config.c_scale,
+        leaf_batch_size: config.leaf_batch_size,
     };
     let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
@@ -338,7 +343,8 @@ where
         drop(request_tx);
 
         // Batcher runs on main thread
-        let (total_batches, total_evals) = batcher_loop(&request_rx, &evaluator, rng, num_workers);
+        let batch_limit = num_workers * base_config_ref.leaf_batch_size as usize;
+        let (total_batches, total_evals) = batcher_loop(&request_rx, &evaluator, rng, batch_limit);
 
         // Join workers, collect results
         let game_results: Vec<GameResult> = handles

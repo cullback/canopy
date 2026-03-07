@@ -70,15 +70,17 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
             }
         }
 
-        // Phase B — Collect NeedsEval batch
+        // Phase B — Collect NeedsEval batch (flatten all pendings from all slots)
         batch_indices.clear();
         batch_pendings.clear();
         for (i, slot) in slots.iter_mut().enumerate() {
-            if let Some(Step::NeedsEval(_)) = &slot.pending_step
-                && let Some(Step::NeedsEval(pending)) = slot.pending_step.take()
+            if matches!(&slot.pending_step, Some(Step::NeedsEval(_)))
+                && let Some(Step::NeedsEval(pendings)) = slot.pending_step.take()
             {
-                batch_indices.push(i);
-                batch_pendings.push(pending);
+                for pending in pendings {
+                    batch_indices.push(i);
+                    batch_pendings.push(pending);
+                }
             }
         }
 
@@ -98,12 +100,24 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
         let states: Vec<&G> = batch_pendings.iter().map(|p| &p.state).collect();
         let outputs = evaluator.evaluate_batch(&states, rng);
 
-        // Phase D — Supply results back
+        // Phase D — Supply results back, grouped by slot
+        // batch_indices is sorted (slots iterated in order), so consecutive
+        // entries with the same slot index belong to the same search.
+        let mut eval_iter = outputs.into_iter();
         let mut pending_iter = batch_pendings.drain(..);
-        for (idx, output) in batch_indices.iter().zip(outputs) {
-            let pending = pending_iter.next().unwrap();
-            let slot = &mut slots[*idx];
-            let step = slot.search.supply(output, pending, rng);
+        let mut pos = 0;
+        while pos < batch_indices.len() {
+            let slot_idx = batch_indices[pos];
+            // Count how many pendings belong to this slot
+            let mut count = 1;
+            while pos + count < batch_indices.len() && batch_indices[pos + count] == slot_idx {
+                count += 1;
+            }
+            let evals: Vec<_> = (0..count)
+                .map(|_| (eval_iter.next().unwrap(), pending_iter.next().unwrap()))
+                .collect();
+            let slot = &mut slots[slot_idx];
+            let step = slot.search.supply(evals, rng);
             match step {
                 Step::Done(result) => {
                     slot.search.apply_action(result.selected_action);
@@ -113,6 +127,7 @@ pub fn batched_self_play<G: Game, E: Evaluator<G> + ?Sized>(
                     slot.pending_step = Some(needs_eval);
                 }
             }
+            pos += count;
         }
     }
 

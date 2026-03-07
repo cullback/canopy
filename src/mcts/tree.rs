@@ -20,6 +20,8 @@ pub(super) struct Edge {
     /// Raw policy logit (for Gumbel/improved-policy selection).
     pub logit: f32,
     pub visits: u32,
+    /// In-flight simulations treated as losses (leaf parallelism).
+    pub virtual_losses: u32,
 }
 
 impl Edge {
@@ -30,6 +32,7 @@ impl Edge {
             prior,
             logit,
             visits: 0,
+            virtual_losses: 0,
         }
     }
 
@@ -40,6 +43,7 @@ impl Edge {
             prior,
             logit: 0.0,
             visits: 0,
+            virtual_losses: 0,
         }
     }
 }
@@ -203,12 +207,12 @@ impl Tree {
     pub fn complete_expand(
         &mut self,
         eval: &Evaluation,
-        bufs: &mut Bufs,
+        actions: &[usize],
         player: Player,
         state_key: Option<u64>,
     ) -> NodeId {
-        let priors = crate::utils::softmax_masked(&eval.policy_logits, &bufs.actions);
-        let edges = bufs.actions.drain(..).zip(priors).map(|(action, prior)| {
+        let priors = crate::utils::softmax_masked(&eval.policy_logits, actions);
+        let edges = actions.iter().copied().zip(priors).map(|(action, prior)| {
             let logit = eval.policy_logits[action];
             Edge::new_decision(action, prior, logit)
         });
@@ -217,7 +221,7 @@ impl Tree {
 
     // ── Backprop ─────────────────────────────────────────────────
 
-    /// Walk the simulation path in reverse, updating edge visits and node Q values.
+    /// Walk the simulation path, incrementing edge visits and recomputing Q.
     ///
     /// Backprop walks only the current traversal path. Transposed nodes (reachable
     /// via multiple paths) receive Q updates from whichever path visits them —
@@ -227,17 +231,36 @@ impl Tree {
     /// detection, and O(tree) worst-case cost per simulation. Standard practice
     /// (AlphaZero, KataGo) is path-only backprop even with deduplication.
     pub fn backprop(&mut self, path: &[(NodeId, usize)]) {
-        for &(nid, eidx) in path.iter().rev() {
+        for &(nid, eidx) in path {
             self.edges_mut(nid)[eidx].visits += 1;
+        }
+        self.recompute_q(path);
+    }
 
-            let (sum_edge_visits, weighted_child_q) = {
+    /// Recompute Q values along a path (leaf-to-root), accounting for virtual losses.
+    ///
+    /// For each node on the path, re-derives Q from its edges' visits and children.
+    /// Virtual-loss visits contribute a pessimistic value (`-player.sign()` for
+    /// decision nodes) instead of the child's Q, discouraging re-selection of
+    /// in-flight edges. When `virtual_losses == 0` everywhere, this degenerates
+    /// to the standard formula.
+    pub fn recompute_q(&mut self, path: &[(NodeId, usize)]) {
+        for &(nid, _) in path.iter().rev() {
+            let vloss_value = match self[nid].kind {
+                NodeKind::Decision(p) => -p.sign(),
+                _ => 0.0,
+            };
+
+            let (sum_edge_visits, wq) = {
                 let edges = self.edges(nid);
                 let sum = edges.iter().map(|e| e.visits).sum::<u32>();
                 let mut wq = 0.0f32;
                 for edge in edges {
+                    let real_visits = edge.visits - edge.virtual_losses;
                     if let Some(child_id) = edge.child {
-                        wq += edge.visits as f32 * self[child_id].q;
+                        wq += real_visits as f32 * self[child_id].q;
                     }
+                    wq += edge.virtual_losses as f32 * vloss_value;
                 }
                 (sum, wq)
             };
@@ -247,16 +270,40 @@ impl Tree {
                 NodeKind::Chance => {
                     node.total_visits = sum_edge_visits;
                     node.q = if sum_edge_visits > 0 {
-                        weighted_child_q / sum_edge_visits as f32
+                        wq / sum_edge_visits as f32
                     } else {
                         0.0
                     };
                 }
                 _ => {
                     node.total_visits = 1 + sum_edge_visits;
-                    node.q = (node.utility + weighted_child_q) / node.total_visits as f32;
+                    node.q = (node.utility + wq) / node.total_visits as f32;
                 }
             }
+        }
+    }
+
+    /// Mark edges along `path` as having an in-flight simulation (virtual loss).
+    ///
+    /// Increments both `visits` and `virtual_losses` on each edge, then
+    /// recomputes Q. The extra visits with pessimistic Q discourage other
+    /// simulations from selecting the same path.
+    pub fn apply_virtual_loss(&mut self, path: &[(NodeId, usize)]) {
+        for &(nid, eidx) in path {
+            let edge = &mut self.edges_mut(nid)[eidx];
+            edge.visits += 1;
+            edge.virtual_losses += 1;
+        }
+        self.recompute_q(path);
+    }
+
+    /// Remove virtual loss from edges along `path` (visits stay — they become "real").
+    ///
+    /// Called in [`Search::supply`] before expanding the child node.
+    /// Does **not** recompute Q — the caller should do so after setting the child.
+    pub fn remove_virtual_loss(&mut self, path: &[(NodeId, usize)]) {
+        for &(nid, eidx) in path {
+            self.edges_mut(nid)[eidx].virtual_losses -= 1;
         }
     }
 

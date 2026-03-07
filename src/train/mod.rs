@@ -82,6 +82,8 @@ pub struct TrainConfig {
     pub c_visit: f32,
     /// Sigma scaling parameter for completed-Q transform.
     pub c_scale: f32,
+    /// Leaves to collect per MCTS batch before requesting evaluation.
+    pub leaf_batch_size: u32,
 
     // -- Benchmark --
     /// Benchmark games against random-rollout bot (0 = skip).
@@ -122,6 +124,7 @@ impl Default for TrainConfig {
             gumbel_m: 16,
             c_visit: 50.0,
             c_scale: 1.0,
+            leaf_batch_size: 8,
 
             // Benchmark
             bench_games: 10,

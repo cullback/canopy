@@ -35,6 +35,7 @@ fn parse_one(matches: &ArgMatches, prefix: &str) -> Config {
         num_sampled_actions: get("gumbel-m").parse().unwrap(),
         c_visit: get("c-visit").parse().unwrap(),
         c_scale: get("c-scale").parse().unwrap(),
+        ..Default::default()
     }
 }
 
@@ -141,6 +142,12 @@ pub fn train_command() -> Command {
                 .default_value(d.c_scale.to_string()),
         )
         .arg(
+            Arg::new("leaf-batch-size")
+                .long("leaf-batch-size")
+                .default_value(d.leaf_batch_size.to_string())
+                .help("Leaves to collect per MCTS batch before requesting evaluation"),
+        )
+        .arg(
             Arg::new("explore-moves")
                 .long("explore-moves")
                 .default_value(d.explore_moves.to_string())
@@ -243,6 +250,9 @@ pub fn parse_train_config(
     }
     if set("c-scale") {
         config.c_scale = val("c-scale").parse().unwrap();
+    }
+    if set("leaf-batch-size") {
+        config.leaf_batch_size = val("leaf-batch-size").parse().unwrap();
     }
     if set("explore-moves") {
         config.explore_moves = val("explore-moves").parse().unwrap();
