@@ -131,9 +131,9 @@ enum Phase {
 struct GumbelState {
     /// The player at the root node (needed for Q sign-flipping).
     root_player: Player,
-    /// Gumbel(0) sample per root edge.
-    gumbels: Vec<f32>,
-    /// Raw logits per root edge.
+    /// Pre-summed g(a) + logit(a) per root edge (for candidate scoring).
+    gumbel_scores: Vec<f32>,
+    /// Raw logits per root edge (needed for improved policy in extract_gumbel_result).
     root_logits: Vec<f32>,
     /// Edge indices alive in sequential halving.
     candidates: Vec<usize>,
@@ -724,18 +724,20 @@ fn init_gumbel(
     let num_edges = edges.len();
 
     let root_logits: Vec<f32> = edges.iter().map(|e| e.logit).collect();
-    let gumbels: Vec<f32> = (0..num_edges).map(|_| sample_gumbel(rng)).collect();
+    let gumbel_scores: Vec<f32> = root_logits
+        .iter()
+        .map(|&l| sample_gumbel(rng) + l)
+        .collect();
 
     // Gumbel-Top-k: score = g + logit, take top m
     let m = (config.num_sampled_actions as usize)
         .min(num_edges)
         .min(config.num_simulations as usize);
 
-    let mut scored: Vec<(usize, f32)> = gumbels
+    let mut scored: Vec<(usize, f32)> = gumbel_scores
         .iter()
-        .zip(root_logits.iter())
         .enumerate()
-        .map(|(i, (&g, &l))| (i, g + l))
+        .map(|(i, &s)| (i, s))
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let candidates: Vec<usize> = scored.iter().take(m).map(|&(i, _)| i).collect();
@@ -761,7 +763,7 @@ fn init_gumbel(
 
     GumbelState {
         root_player,
-        gumbels,
+        gumbel_scores,
         root_logits,
         candidates,
         phase: 0,
@@ -788,7 +790,7 @@ fn score_candidate(
     let cq = completed_q(tree, &edges[edge_idx], vmix_val);
     let q_norm = normalize_q_for_player(cq, gs.q_min, gs.q_max, gs.root_player);
     let s = sigma(q_norm, max_visits, config.c_visit, config.c_scale);
-    gs.gumbels[edge_idx] + gs.root_logits[edge_idx] + s
+    gs.gumbel_scores[edge_idx] + s
 }
 
 /// Halve candidates at end of a Sequential Halving phase.
