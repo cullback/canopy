@@ -830,12 +830,24 @@ fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Co
 /// Advance Sequential Halving round-robin after a simulation is committed.
 ///
 /// Called at queue time for both synchronously completed simulations and
-/// in-flight leaves (before eval returns).  Budget is "spent" when the
-/// simulation is committed, not when the evaluation arrives — the
-/// alternative would serialize leaf collection or require deferred
-/// bookkeeping.  The round-robin distributes in-flight sims roughly
-/// evenly across candidates, so virtual-loss bias during halving is
-/// approximately symmetric and relative candidate ranking is preserved.
+/// in-flight leaves (before eval returns).  Budget and phase transitions
+/// proceed as if the simulation completed, even though the eval hasn't
+/// returned yet.  This is a deliberate tradeoff:
+///
+/// **Why not defer to `supply`?**  The batch collection loop needs the
+/// round-robin counter to decide which candidate edge to force next.
+/// Deferring would mean we can't advance the round-robin during
+/// collection — we'd have to serialize leaf collection or invent
+/// deferred bookkeeping to reconcile counters after evals arrive.
+///
+/// **Why halving at queue time is acceptable:**  Round-robin distributes
+/// in-flight sims roughly evenly across candidates, so virtual-loss bias
+/// is approximately symmetric and relative candidate ranking is preserved.
+/// Q bounds are updated *before* virtual loss is applied (see call site),
+/// preventing permanent widening from pessimistic values.  The
+/// `debug_assert` in `run_simulations` guards against `leaf_batch_size`
+/// dominating the phase budget, which would make most halving data
+/// virtual-loss-polluted.
 fn advance_round_robin(
     gs: &mut GumbelState,
     tree: &Tree,
