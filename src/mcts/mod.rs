@@ -435,21 +435,14 @@ impl<G: Game> Search<G> {
             let forced_edge = gs.candidates[gs.candidate_idx()];
             let q_bounds = (gs.q_min, gs.q_max);
             let config = &self.config;
-            let mut first = true;
             match simulate(
                 &mut self.tree,
                 root,
                 &self.root_state,
                 rng,
                 &mut self.bufs,
-                |tree, node, player| {
-                    if first {
-                        first = false;
-                        forced_edge
-                    } else {
-                        gumbel_interior_select(tree, node, player, config, q_bounds)
-                    }
-                },
+                Some(forced_edge),
+                |tree, node, player| gumbel_interior_select(tree, node, player, config, q_bounds),
             ) {
                 SimResult::Complete => {
                     advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
@@ -483,6 +476,7 @@ impl<G: Game> Search<G> {
                 &self.root_state,
                 rng,
                 &mut self.bufs,
+                None,
                 |tree, node, player| gumbel_interior_select(tree, node, player, config, (0.0, 0.0)),
             ) {
                 SimResult::Complete => {
@@ -513,11 +507,13 @@ fn simulate<G: Game>(
     root_state: &G,
     rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
-    mut select_decision: impl FnMut(&Tree, NodeId, Player) -> usize,
+    forced_root_edge: Option<usize>,
+    select_decision: impl Fn(&Tree, NodeId, Player) -> usize,
 ) -> SimResult<G> {
     bufs.path.clear();
     let mut current = root;
     let mut state = root_state.clone();
+    let mut at_root = true;
 
     loop {
         let edges = tree.edges(current);
@@ -525,7 +521,14 @@ fn simulate<G: Game>(
         let edge_idx = match *tree.kind(current) {
             NodeKind::Terminal => break,
             NodeKind::Chance => tree.sample_chance_edge(current, rng),
-            NodeKind::Decision(player) => select_decision(tree, current, player),
+            NodeKind::Decision(player) => {
+                if at_root {
+                    at_root = false;
+                    forced_root_edge.unwrap_or_else(|| select_decision(tree, current, player))
+                } else {
+                    select_decision(tree, current, player)
+                }
+            }
         };
 
         bufs.path.push((current, edge_idx));
