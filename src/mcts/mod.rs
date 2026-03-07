@@ -706,9 +706,7 @@ fn softmax(logits: &[f32]) -> Vec<f32> {
     let max = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
     let mut probs: Vec<f32> = logits.iter().map(|&l| (l - max).exp()).collect();
     let sum: f32 = probs.iter().sum();
-    if sum > 0.0 {
-        probs.iter_mut().for_each(|p| *p /= sum);
-    }
+    probs.iter_mut().for_each(|p| *p /= sum);
     probs
 }
 
