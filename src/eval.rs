@@ -23,7 +23,7 @@ impl Evaluation {
 }
 
 /// Evaluates a game state, producing policy logits and a value estimate.
-pub trait Evaluator<G: Game> {
+pub trait Evaluator<G: Game>: Send {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation;
 
     /// Evaluate multiple states in a single batch.
@@ -36,6 +36,7 @@ pub trait Evaluator<G: Game> {
 }
 
 /// Default evaluator: random rollouts with uniform policy logits.
+#[derive(Clone)]
 pub struct RolloutEvaluator {
     pub num_rollouts: u32,
 }

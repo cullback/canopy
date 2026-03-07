@@ -6,6 +6,7 @@ mod self_play;
 
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
@@ -34,7 +35,7 @@ pub struct Sample {
     pub full_search: bool,
 }
 
-#[derive(Serialize)]
+#[derive(Clone, Serialize)]
 pub struct TrainConfig {
     // -- Infrastructure --
     /// Total training iterations (self-play + train cycles).
@@ -62,6 +63,11 @@ pub struct TrainConfig {
     // -- Self-play --
     /// Self-play games generated per iteration.
     pub games_per_iter: usize,
+    /// Maximum async game tasks running concurrently during self-play.
+    pub concurrent_games: usize,
+    /// Maximum evaluations per GPU forward pass. Also determines the
+    /// eval request queue capacity (2x this value).
+    pub max_batch_size: usize,
     /// Early-game turns where action is sampled from improved policy
     /// (for exploration diversity). After this, the best action is used deterministically.
     pub explore_moves: u32,
@@ -114,6 +120,8 @@ impl Default for TrainConfig {
 
             // Self-play
             games_per_iter: 500,
+            concurrent_games: 64,
+            max_batch_size: 256,
             explore_moves: 30,
             playout_cap_full_prob: 0.25,
             playout_cap_fast_sims: 32,
@@ -165,8 +173,8 @@ pub struct CheckpointMeta {
 // ---------------------------------------------------------------------------
 
 pub trait TrainableModel<G: Game>: Send {
-    type Encoder: StateEncoder<G>;
-    type Evaluator: Evaluator<G>;
+    type Encoder: StateEncoder<G> + 'static;
+    type Evaluator: Evaluator<G> + 'static;
 
     fn evaluator(&self) -> Self::Evaluator;
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics;
@@ -204,11 +212,12 @@ fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
 pub fn run_training<G, M>(
     config: TrainConfig,
     model: &mut M,
-    new_state: impl Fn(&mut fastrand::Rng) -> G + Sync,
+    new_state: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
 ) where
-    G: Game,
+    G: Game + 'static,
     M: TrainableModel<G>,
 {
+    let new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync> = Arc::new(new_state);
     let (mut rng, start_iteration) = checkpoint::resume_if_requested(&config, model);
     let run_dir = checkpoint::setup_run_dir(&config);
     eprintln!("run directory: {}", run_dir.display());
@@ -236,7 +245,7 @@ pub fn run_training<G, M>(
         let self_play_elapsed = iter_start.elapsed();
         let games_done = sp.p1_wins + sp.p2_wins + sp.draws;
         let samples_this_iter = sp.samples.len();
-        let num_workers = sp.num_workers;
+        let num_tasks = sp.num_tasks;
         let avg_batch_size = sp.avg_batch_size();
 
         // Stats
@@ -275,7 +284,7 @@ pub fn run_training<G, M>(
             && iter_num % config.bench_interval == 0;
         let (bench_wins, bench_losses, bench_draws) = if run_bench {
             let eval = model.evaluator();
-            benchmark::run_benchmark::<G, M::Evaluator>(&eval, &config, &mut rng, &new_state)
+            benchmark::run_benchmark::<G, M::Evaluator>(eval, &config, &mut rng, &new_state)
         } else {
             (0, 0, 0)
         };
@@ -305,7 +314,7 @@ pub fn run_training<G, M>(
             String::new()
         };
         eprintln!(
-            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | workers={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
+            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | tasks={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             games_done,
@@ -316,7 +325,7 @@ pub fn run_training<G, M>(
             samples.len(),
             stats.avg_entropy,
             bench_str,
-            num_workers,
+            num_tasks,
             avg_batch_size,
             HumanDuration(self_play_elapsed),
             HumanDuration(train_elapsed),

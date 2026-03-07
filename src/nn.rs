@@ -69,7 +69,7 @@ where
     G: Game,
     B: Backend,
     E: StateEncoder<G>,
-    M: PolicyValueNet<B>,
+    M: PolicyValueNet<B> + Send,
 {
     fn evaluate(&self, state: &G, _rng: &mut fastrand::Rng) -> Evaluation {
         let current = match state.status() {

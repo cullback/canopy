@@ -276,7 +276,7 @@ where
 impl<G, E, M> TrainableModel<G> for BurnTrainableModel<G, E, M>
 where
     G: Game,
-    E: StateEncoder<G> + Send,
+    E: StateEncoder<G> + Send + 'static,
     M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend> + Send + 'static,
     M::InnerModule: PolicyValueNet<InferBackend> + Send,
 {

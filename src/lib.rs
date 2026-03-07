@@ -6,7 +6,6 @@ pub mod game_log;
 pub mod mcts;
 #[cfg(feature = "nn")]
 pub mod nn;
-pub mod orchestrator;
 pub mod player;
 pub mod tournament;
 #[cfg(feature = "nn")]

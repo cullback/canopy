@@ -1,5 +1,7 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
-use std::sync::mpsc;
+
+use tokio::sync::mpsc;
 
 use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
@@ -9,7 +11,7 @@ use crate::player::Player;
 
 use super::{Sample, TrainConfig};
 
-/// Shared atomic counters updated by the batcher, read by workers for live stats.
+/// Shared atomic counters updated by the batcher, read by tasks for live stats.
 pub(super) struct BatcherStats {
     pub batches: AtomicU64,
     pub evals: AtomicU64,
@@ -46,7 +48,7 @@ pub(super) struct IterGameResults {
     pub total_turns: u32,
     pub min_game_length: Option<u32>,
     pub max_game_length: u32,
-    pub num_workers: usize,
+    pub num_tasks: usize,
     pub total_batches: u64,
     pub total_evals: u64,
 }
@@ -61,11 +63,14 @@ impl IterGameResults {
     }
 }
 
-/// A leaf-node evaluation request sent from a worker thread to the batcher.
+/// A leaf-node evaluation request sent from an async game task to the batcher.
 pub(super) struct EvalRequest<G: Game> {
     pub pending: PendingEval<G>,
-    pub response_tx: mpsc::SyncSender<(Evaluation, PendingEval<G>)>,
+    pub response_tx: tokio::sync::oneshot::Sender<(Evaluation, PendingEval<G>)>,
 }
+
+/// Sender half of the bounded eval request channel.
+pub(super) type EvalSender<G> = mpsc::Sender<EvalRequest<G>>;
 
 fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
     let mut roll = rng.f32();
@@ -84,23 +89,22 @@ fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
         .0
 }
 
-/// Worker thread: plays sequential games, sending leaf evals to the batcher.
-fn worker_loop<G: Game, E: StateEncoder<G>>(
+/// Async task: plays sequential games, sending leaf evals to the batcher.
+#[allow(clippy::too_many_arguments)]
+async fn game_task<G: Game, E: StateEncoder<G>>(
     request_tx: mpsc::Sender<EvalRequest<G>>,
-    games_remaining: &AtomicU32,
-    completed: &AtomicU32,
-    pb: &indicatif::ProgressBar,
-    batcher_stats: &BatcherStats,
-    config: &TrainConfig,
-    base_config: &Config,
+    games_remaining: Arc<AtomicU32>,
+    completed: Arc<AtomicU32>,
+    pb: Arc<indicatif::ProgressBar>,
+    batcher_stats: Arc<BatcherStats>,
+    config: Arc<TrainConfig>,
+    base_config: Config,
     effective_sims: u32,
     fast_sims: u32,
-    new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
+    new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
     seed: u64,
 ) -> Vec<GameResult> {
     let mut rng = fastrand::Rng::with_seed(seed);
-    let (resp_tx, resp_rx) =
-        mpsc::sync_channel::<(Evaluation, PendingEval<G>)>(base_config.leaf_batch_size as usize);
     let mut results = Vec::new();
     let mut actions_buf = Vec::new();
 
@@ -196,16 +200,22 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
             let result = loop {
                 match step {
                     Step::NeedsEval(pendings) => {
-                        let count = pendings.len();
+                        let mut receivers = Vec::with_capacity(pendings.len());
                         for pending in pendings {
+                            let (tx, rx) = tokio::sync::oneshot::channel();
                             request_tx
                                 .send(EvalRequest {
                                     pending,
-                                    response_tx: resp_tx.clone(),
+                                    response_tx: tx,
                                 })
+                                .await
                                 .unwrap();
+                            receivers.push(rx);
                         }
-                        let evals: Vec<_> = (0..count).map(|_| resp_rx.recv().unwrap()).collect();
+                        let mut evals = Vec::with_capacity(receivers.len());
+                        for rx in receivers {
+                            evals.push(rx.await.unwrap());
+                        }
                         step = search.supply(evals, &mut rng);
                     }
                     Step::Done(result) => break result,
@@ -235,26 +245,26 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
     results
 }
 
-/// Main-thread batcher: collects eval requests and runs batched NN inference.
+/// Batcher thread: collects eval requests and runs batched NN inference.
 pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
-    request_rx: &mpsc::Receiver<EvalRequest<G>>,
+    request_rx: &mut mpsc::Receiver<EvalRequest<G>>,
     evaluator: &Ev,
     rng: &mut fastrand::Rng,
-    batch_limit: usize,
+    max_batch_size: usize,
     stats: &BatcherStats,
 ) {
-    let mut batch: Vec<EvalRequest<G>> = Vec::with_capacity(batch_limit);
+    let mut batch: Vec<EvalRequest<G>> = Vec::with_capacity(max_batch_size);
 
     loop {
-        // Block for the first request (Err = all workers dropped their senders)
-        let first = match request_rx.recv() {
-            Ok(req) => req,
-            Err(_) => return,
+        // Block for the first request (None = all senders dropped)
+        let first = match request_rx.blocking_recv() {
+            Some(req) => req,
+            None => return,
         };
         batch.push(first);
 
-        // Drain additional requests without blocking, up to batch_limit
-        while batch.len() < batch_limit {
+        // Drain additional requests without blocking, up to max_batch_size
+        while batch.len() < max_batch_size {
             match request_rx.try_recv() {
                 Ok(req) => batch.push(req),
                 Err(_) => break,
@@ -268,27 +278,27 @@ pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
         let states: Vec<&G> = batch.iter().map(|r| &r.pending.state).collect();
         let evals = evaluator.evaluate_batch(&states, rng);
 
-        // Send results back to workers
+        // Send results back to tasks
         for (req, eval) in batch.drain(..).zip(evals) {
-            // Ignore send errors (worker may have panicked)
+            // Ignore send errors (task may have been cancelled)
             let _ = req.response_tx.send((eval, req.pending));
         }
     }
 }
 
-/// Run self-play games using worker threads with batched NN inference.
+/// Run self-play games using async tasks with batched NN inference.
 pub(super) fn run_self_play_iteration<G, E, Ev>(
     evaluator: Ev,
     config: &TrainConfig,
     effective_sims: u32,
     iteration: usize,
     rng: &mut fastrand::Rng,
-    new_state: &(impl Fn(&mut fastrand::Rng) -> G + Sync),
+    new_state: &Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
 ) -> IterGameResults
 where
-    G: Game,
-    E: StateEncoder<G>,
-    Ev: Evaluator<G>,
+    G: Game + 'static,
+    E: StateEncoder<G> + 'static,
+    Ev: Evaluator<G> + 'static,
 {
     let pb = indicatif::ProgressBar::new(config.games_per_iter as u64);
     pb.set_style(
@@ -313,59 +323,70 @@ where
     };
     let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
-    let num_workers = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1)
-        .min(config.games_per_iter);
-    let games_remaining = AtomicU32::new(config.games_per_iter as u32);
-    let completed = AtomicU32::new(0);
-    let batcher_stats = BatcherStats::new();
-    let (request_tx, request_rx) = mpsc::channel();
+    let concurrent_games = config.concurrent_games;
+    let max_batch_size = config.max_batch_size;
+    let games_remaining = Arc::new(AtomicU32::new(config.games_per_iter as u32));
+    let completed = Arc::new(AtomicU32::new(0));
+    let batcher_stats = Arc::new(BatcherStats::new());
+    let config = Arc::new(config.clone());
+    let pb = Arc::new(pb);
 
-    let game_results = std::thread::scope(|scope| {
-        // Spawn worker threads
-        let games_ref = &games_remaining;
-        let completed_ref = &completed;
-        let stats_ref = &batcher_stats;
-        let pb_ref = &pb;
-        let base_config_ref = &base_config;
-        let handles: Vec<_> = (0..num_workers)
-            .map(|_| {
-                let tx = request_tx.clone();
-                let seed = rng.u64(..);
-                scope.spawn(move || {
-                    worker_loop::<G, E>(
-                        tx,
-                        games_ref,
-                        completed_ref,
-                        pb_ref,
-                        stats_ref,
-                        config,
-                        base_config_ref,
-                        effective_sims,
-                        fast_sims,
-                        new_state,
-                        seed,
-                    )
-                })
-            })
-            .collect();
+    let (request_tx, mut request_rx) = mpsc::channel(2 * max_batch_size);
 
-        // Drop our copy so batcher sees disconnect when all workers finish
+    // Seed batcher rng before spawning
+    let batcher_seed = rng.u64(..);
+
+    // Batcher on a plain std::thread (owns evaluator)
+    let batcher_stats_ref = batcher_stats.clone();
+    let batcher_handle = std::thread::spawn(move || {
+        let mut batcher_rng = fastrand::Rng::with_seed(batcher_seed);
+        batcher_loop(
+            &mut request_rx,
+            &evaluator,
+            &mut batcher_rng,
+            max_batch_size,
+            &batcher_stats_ref,
+        );
+    });
+
+    // Tokio runtime for async game tasks
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    let game_results: Vec<GameResult> = rt.block_on(async {
+        let mut join_set = tokio::task::JoinSet::new();
+
+        for _ in 0..concurrent_games {
+            let seed = rng.u64(..);
+            join_set.spawn(game_task::<G, E>(
+                request_tx.clone(),
+                games_remaining.clone(),
+                completed.clone(),
+                pb.clone(),
+                batcher_stats.clone(),
+                config.clone(),
+                base_config.clone(),
+                effective_sims,
+                fast_sims,
+                new_state.clone(),
+                seed,
+            ));
+        }
+
+        // Drop our sender so batcher sees disconnect when all tasks finish
         drop(request_tx);
 
-        // Batcher runs on main thread
-        let batch_limit = num_workers * base_config_ref.leaf_batch_size as usize;
-        batcher_loop(&request_rx, &evaluator, rng, batch_limit, stats_ref);
-
-        // Join workers, collect results
-        let game_results: Vec<GameResult> = handles
-            .into_iter()
-            .flat_map(|h| h.join().unwrap())
-            .collect();
-
-        game_results
+        let mut all_results = Vec::new();
+        while let Some(result) = join_set.join_next().await {
+            all_results.extend(result.unwrap());
+        }
+        all_results
     });
+
+    // Batcher thread exits once all senders are dropped
+    batcher_handle.join().unwrap();
 
     pb.finish();
 
@@ -399,7 +420,7 @@ where
         total_turns,
         min_game_length,
         max_game_length,
-        num_workers,
+        num_tasks: concurrent_games,
         total_batches: batcher_stats.batches.load(Relaxed),
         total_evals: batcher_stats.evals.load(Relaxed),
     }
