@@ -175,6 +175,11 @@ impl Tree {
         id
     }
 
+    /// Look up a state key in the transposition table.
+    pub fn lookup(&self, key: u64) -> Option<NodeId> {
+        self.table.get(&key).copied()
+    }
+
     // ── Expand ───────────────────────────────────────────────────
 
     pub fn try_expand<G: Game>(&mut self, state: &G, bufs: &mut Bufs) -> ExpandResult {

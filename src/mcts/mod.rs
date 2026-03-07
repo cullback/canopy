@@ -316,15 +316,17 @@ impl<G: Game> Search<G> {
                 } => {
                     self.tree.remove_virtual_loss(&path);
                     let &(parent, edge_idx) = path.last().unwrap();
-                    // Two simulations in the same batch can reach the same
-                    // unexpanded edge (despite virtual loss discouraging it).
-                    // The first creates the child; the second skips expansion
-                    // but its virtual loss is still correctly unwound above.
-                    // The wasted evaluation is rare and unavoidable.
                     if self.tree.edges(parent)[edge_idx].child.is_none() {
-                        let child = self
-                            .tree
-                            .complete_expand(&eval, &actions, player, state_key);
+                        // Check transposition table: another leaf in this batch
+                        // may have already expanded the same state via a different
+                        // path. Reuse the existing node to avoid duplicates and
+                        // prevent overwriting the table entry.
+                        let child = match state_key.and_then(|k| self.tree.lookup(k)) {
+                            Some(existing) => existing,
+                            None => self
+                                .tree
+                                .complete_expand(&eval, &actions, player, state_key),
+                        };
                         self.tree.set_child(parent, edge_idx, child);
                     }
                     self.tree.recompute_q(&path);
