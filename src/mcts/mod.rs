@@ -370,15 +370,10 @@ impl<G: Game> Search<G> {
         // Single legal action fast path
         if gs.candidates.len() <= 1 {
             let edges = self.tree.edges(root);
-            let action = if edges.is_empty() {
-                0
-            } else {
-                edges[gs.candidates.first().copied().unwrap_or(0)].action
-            };
+            debug_assert!(!edges.is_empty(), "decision root should have edges");
+            let action = edges[gs.candidates[0]].action;
             let mut policy = vec![0.0f32; G::NUM_ACTIONS];
-            if !edges.is_empty() {
-                policy[action] = 1.0;
-            }
+            policy[action] = 1.0;
             return Step::Done(SearchResult {
                 policy,
                 value: self.tree.q(root),
@@ -595,7 +590,7 @@ fn gumbel_interior_select(
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
-        .unwrap_or(0)
+        .expect("decision node should have edges")
 }
 
 // ── Gumbel helpers ────────────────────────────────────────────────────
@@ -920,7 +915,7 @@ fn extract_gumbel_result<G: Game>(
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(idx, _)| idx)
-        .unwrap_or(0);
+        .expect("candidates should not be empty");
     let selected_action = edges[selected_edge].action;
 
     // Improved policy (training target): softmax(logit + σ(completedQ)) over ALL edges.
