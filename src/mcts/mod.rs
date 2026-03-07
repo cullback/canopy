@@ -143,12 +143,9 @@ struct GumbelState {
     total_phases: u32,
     /// Sims allocated per candidate this phase.
     sims_per_candidate: u32,
-    /// Sims completed for current candidate in round-robin.
-    sims_done_for_current: u32,
-    /// Which candidate in round-robin we're currently simulating.
-    candidate_idx: usize,
-    /// How many candidates have completed their allocation this phase.
-    candidates_simmed: u32,
+    /// Sims completed this phase (monotonic counter; candidate_idx and
+    /// phase-complete are derived from this).
+    sims_this_phase: u32,
     /// Min Q across tree (P1 perspective) for normalization.
     q_min: f32,
     /// Max Q across tree (P1 perspective) for normalization.
@@ -157,6 +154,18 @@ struct GumbelState {
     /// Decremented each simulation; when exhausted the search finishes
     /// even if Sequential Halving hasn't reduced to one candidate.
     budget_remaining: u32,
+}
+
+impl GumbelState {
+    /// Which candidate in the round-robin is currently being simulated.
+    fn candidate_idx(&self) -> usize {
+        (self.sims_this_phase / self.sims_per_candidate) as usize % self.candidates.len()
+    }
+
+    /// Whether all candidates have received their allocation this phase.
+    fn phase_complete(&self) -> bool {
+        self.sims_this_phase >= self.sims_per_candidate * self.candidates.len() as u32
+    }
 }
 
 enum SimResult<G: Game> {
@@ -423,7 +432,7 @@ impl<G: Game> Search<G> {
                 ));
             }
 
-            let forced_edge = gs.candidates[gs.candidate_idx];
+            let forced_edge = gs.candidates[gs.candidate_idx()];
             let q_bounds = (gs.q_min, gs.q_max);
             let config = &self.config;
             let mut first = true;
@@ -758,9 +767,7 @@ fn init_gumbel(
         phase: 0,
         total_phases,
         sims_per_candidate,
-        sims_done_for_current: 0,
-        candidate_idx: 0,
-        candidates_simmed: 0,
+        sims_this_phase: 0,
         q_min: root_value,
         q_max: root_value,
         budget_remaining: budget,
@@ -807,12 +814,8 @@ fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Co
     let keep = scored.len().div_ceil(2);
     gs.candidates = scored.into_iter().take(keep).map(|(idx, _)| idx).collect();
 
-    // Reset round-robin for the new phase — candidate_idx = 0 is intentional
-    // since candidates has been re-sorted by score and the old indices are gone.
     gs.phase += 1;
-    gs.candidates_simmed = 0;
-    gs.candidate_idx = 0;
-    gs.sims_done_for_current = 0;
+    gs.sims_this_phase = 0;
 
     // Recompute sims_per_candidate for remaining budget and candidates
     let remaining_phases = gs.total_phases.saturating_sub(gs.phase);
@@ -842,15 +845,9 @@ fn advance_round_robin(
 ) {
     update_q_bounds(gs, tree, path);
     gs.budget_remaining = gs.budget_remaining.saturating_sub(1);
-    gs.sims_done_for_current += 1;
+    gs.sims_this_phase += 1;
 
-    if gs.sims_done_for_current >= gs.sims_per_candidate {
-        gs.sims_done_for_current = 0;
-        gs.candidates_simmed += 1;
-        gs.candidate_idx = (gs.candidate_idx + 1) % gs.candidates.len();
-    }
-
-    if gs.candidates_simmed >= gs.candidates.len() as u32 {
+    if gs.phase_complete() {
         halve_candidates(gs, tree, root, config);
     }
 }
