@@ -774,39 +774,42 @@ fn init_gumbel(
     }
 }
 
-/// Score a candidate edge: g(a) + logit(a) + σ(completedQ(a)).
-/// `vmix_val` and `max_visits` are precomputed from the root's edges.
-fn score_candidate(
-    edge_idx: usize,
-    gs: &GumbelState,
-    edges: &[tree::Edge],
-    tree: &Tree,
+/// Precomputed root state for candidate scoring.
+struct RootContext<'a> {
+    tree: &'a Tree,
+    edges: &'a [tree::Edge],
     vmix_val: f32,
     max_visits: u32,
-    config: &Config,
-) -> f32 {
-    let cq = completed_q(tree, &edges[edge_idx], vmix_val);
+}
+
+impl<'a> RootContext<'a> {
+    fn new(tree: &'a Tree, root: NodeId) -> Self {
+        Self {
+            edges: tree.edges(root),
+            vmix_val: v_mix(tree, root),
+            max_visits: tree.max_edge_visits(root),
+            tree,
+        }
+    }
+}
+
+/// Score a candidate edge: g(a) + logit(a) + σ(completedQ(a)).
+fn score_candidate(edge_idx: usize, gs: &GumbelState, ctx: &RootContext, config: &Config) -> f32 {
+    let cq = completed_q(ctx.tree, &ctx.edges[edge_idx], ctx.vmix_val);
     let q_norm = normalize_q_for_player(cq, gs.q_min, gs.q_max, gs.root_player);
-    let s = sigma(q_norm, max_visits, config.c_visit, config.c_scale);
+    let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
     gs.gumbel_scores[edge_idx] + s
 }
 
 /// Halve candidates at end of a Sequential Halving phase.
 fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Config) {
-    let edges = tree.edges(root);
-    let vmix_val = v_mix(tree, root);
-    let max_visits = tree.max_edge_visits(root);
+    let ctx = RootContext::new(tree, root);
 
     // Score all candidates
     let mut scored: Vec<(usize, f32)> = gs
         .candidates
         .iter()
-        .map(|&idx| {
-            (
-                idx,
-                score_candidate(idx, gs, edges, tree, vmix_val, max_visits, config),
-            )
-        })
+        .map(|&idx| (idx, score_candidate(idx, gs, &ctx, config)))
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
@@ -909,40 +912,33 @@ fn extract_gumbel_result<G: Game>(
     gs: &GumbelState,
     config: &Config,
 ) -> SearchResult {
-    let edges = tree.edges(root);
-    let vmix_val = v_mix(tree, root);
-    let max_visits = tree.max_edge_visits(root);
+    let ctx = RootContext::new(tree, root);
 
     // selected_action: argmax over final candidates of g + logit + σ(completedQ)
     let selected_edge = gs
         .candidates
         .iter()
-        .map(|&idx| {
-            (
-                idx,
-                score_candidate(idx, gs, edges, tree, vmix_val, max_visits, config),
-            )
-        })
+        .map(|&idx| (idx, score_candidate(idx, gs, &ctx, config)))
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(idx, _)| idx)
         .expect("candidates should not be empty");
-    let selected_action = edges[selected_edge].action;
+    let selected_action = ctx.edges[selected_edge].action;
 
     // Improved policy (training target): softmax(logit + σ(completedQ)) over ALL edges.
     // Unvisited edges use v_mix as their completedQ estimate (see completed_q).
     // This is the paper's approach but can be noisy when few edges are visited,
     // since v_mix interpolates the value network prior with a sparse Q average.
-    let mut improved_logits = Vec::with_capacity(edges.len());
-    for (i, edge) in edges.iter().enumerate() {
-        let cq = completed_q(tree, edge, vmix_val);
+    let mut improved_logits = Vec::with_capacity(ctx.edges.len());
+    for (i, edge) in ctx.edges.iter().enumerate() {
+        let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
         let q_norm = normalize_q_for_player(cq, gs.q_min, gs.q_max, gs.root_player);
-        let s = sigma(q_norm, max_visits, config.c_visit, config.c_scale);
+        let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
         improved_logits.push(gs.root_logits[i] + s);
     }
     let improved_probs = softmax(&improved_logits);
 
     let mut policy = vec![0.0f32; G::NUM_ACTIONS];
-    for (edge, &prob) in edges.iter().zip(&improved_probs) {
+    for (edge, &prob) in ctx.edges.iter().zip(&improved_probs) {
         policy[edge.action] = prob;
     }
 
