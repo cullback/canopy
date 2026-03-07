@@ -1,4 +1,4 @@
-use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 use std::sync::mpsc;
 
 use crate::eval::{Evaluation, Evaluator};
@@ -8,6 +8,27 @@ use crate::nn::StateEncoder;
 use crate::player::Player;
 
 use super::{Sample, TrainConfig};
+
+/// Shared atomic counters updated by the batcher, read by workers for live stats.
+pub(super) struct BatcherStats {
+    pub batches: AtomicU64,
+    pub evals: AtomicU64,
+}
+
+impl BatcherStats {
+    pub fn new() -> Self {
+        Self {
+            batches: AtomicU64::new(0),
+            evals: AtomicU64::new(0),
+        }
+    }
+
+    pub fn avg_batch_size(&self) -> f64 {
+        let b = self.batches.load(Relaxed);
+        let e = self.evals.load(Relaxed);
+        if b == 0 { 0.0 } else { e as f64 / b as f64 }
+    }
+}
 
 /// Result of a single self-play game.
 pub(super) struct GameResult {
@@ -69,6 +90,7 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
     games_remaining: &AtomicU32,
     completed: &AtomicU32,
     pb: &indicatif::ProgressBar,
+    batcher_stats: &BatcherStats,
     config: &TrainConfig,
     base_config: &Config,
     effective_sims: u32,
@@ -121,6 +143,17 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
                 });
                 let done = completed.fetch_add(1, Relaxed) + 1;
                 pb.set_position(done as u64);
+                let avg_batch = batcher_stats.avg_batch_size();
+                let elapsed = pb.elapsed().as_secs_f64();
+                let evals = batcher_stats.evals.load(Relaxed);
+                let evals_per_sec = if elapsed > 0.0 {
+                    evals as f64 / elapsed
+                } else {
+                    0.0
+                };
+                pb.set_message(format!(
+                    "avg_batch={avg_batch:.1}, evals/s={evals_per_sec:.0}"
+                ));
                 break;
             }
 
@@ -203,22 +236,20 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
 }
 
 /// Main-thread batcher: collects eval requests and runs batched NN inference.
-/// Returns (total_batches, total_evals) for diagnostics.
 pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
     request_rx: &mpsc::Receiver<EvalRequest<G>>,
     evaluator: &Ev,
     rng: &mut fastrand::Rng,
     batch_limit: usize,
-) -> (u64, u64) {
+    stats: &BatcherStats,
+) {
     let mut batch: Vec<EvalRequest<G>> = Vec::with_capacity(batch_limit);
-    let mut total_batches: u64 = 0;
-    let mut total_evals: u64 = 0;
 
     loop {
         // Block for the first request (Err = all workers dropped their senders)
         let first = match request_rx.recv() {
             Ok(req) => req,
-            Err(_) => return (total_batches, total_evals),
+            Err(_) => return,
         };
         batch.push(first);
 
@@ -230,8 +261,8 @@ pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
             }
         }
 
-        total_batches += 1;
-        total_evals += batch.len() as u64;
+        stats.evals.fetch_add(batch.len() as u64, Relaxed);
+        stats.batches.fetch_add(1, Relaxed);
 
         // Batched evaluation
         let states: Vec<&G> = batch.iter().map(|r| &r.pending.state).collect();
@@ -288,12 +319,14 @@ where
         .min(config.games_per_iter);
     let games_remaining = AtomicU32::new(config.games_per_iter as u32);
     let completed = AtomicU32::new(0);
+    let batcher_stats = BatcherStats::new();
     let (request_tx, request_rx) = mpsc::channel();
 
-    let (game_results, total_batches, total_evals) = std::thread::scope(|scope| {
+    let game_results = std::thread::scope(|scope| {
         // Spawn worker threads
         let games_ref = &games_remaining;
         let completed_ref = &completed;
+        let stats_ref = &batcher_stats;
         let pb_ref = &pb;
         let base_config_ref = &base_config;
         let handles: Vec<_> = (0..num_workers)
@@ -306,6 +339,7 @@ where
                         games_ref,
                         completed_ref,
                         pb_ref,
+                        stats_ref,
                         config,
                         base_config_ref,
                         effective_sims,
@@ -322,7 +356,7 @@ where
 
         // Batcher runs on main thread
         let batch_limit = num_workers * base_config_ref.leaf_batch_size as usize;
-        let (total_batches, total_evals) = batcher_loop(&request_rx, &evaluator, rng, batch_limit);
+        batcher_loop(&request_rx, &evaluator, rng, batch_limit, stats_ref);
 
         // Join workers, collect results
         let game_results: Vec<GameResult> = handles
@@ -330,7 +364,7 @@ where
             .flat_map(|h| h.join().unwrap())
             .collect();
 
-        (game_results, total_batches, total_evals)
+        game_results
     });
 
     pb.finish();
@@ -366,7 +400,7 @@ where
         min_game_length,
         max_game_length,
         num_workers,
-        total_batches,
-        total_evals,
+        total_batches: batcher_stats.batches.load(Relaxed),
+        total_evals: batcher_stats.evals.load(Relaxed),
     }
 }

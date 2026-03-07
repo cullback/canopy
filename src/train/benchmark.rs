@@ -7,7 +7,7 @@ use crate::mcts::{Config, PendingEval, Search, Step};
 use crate::player::Player;
 
 use super::TrainConfig;
-use super::self_play::{EvalRequest, batcher_loop};
+use super::self_play::{BatcherStats, EvalRequest, batcher_loop};
 
 /// Play benchmark games: NN evaluator vs RolloutEvaluator, alternating seats.
 /// Returns (nn_wins, nn_losses, draws).
@@ -89,7 +89,8 @@ pub(super) fn run_benchmark<G: Game, Ev: Evaluator<G>>(
 
         // Batcher runs on main thread
         let batch_limit = num_workers * nn_config_ref.leaf_batch_size as usize;
-        batcher_loop(&request_rx, evaluator, rng, batch_limit);
+        let stats = BatcherStats::new();
+        batcher_loop(&request_rx, evaluator, rng, batch_limit, &stats);
 
         // Join workers
         for h in handles {
