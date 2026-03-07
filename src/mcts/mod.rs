@@ -390,18 +390,14 @@ impl<G: Game> Search<G> {
             .as_mut()
             .expect("run_simulations called without gumbel state");
 
-        // Single legal action fast path
+        // Single candidate remaining — no more simulations needed.
         if gs.candidates.len() <= 1 {
-            let edges = self.tree.edges(root);
-            debug_assert!(!edges.is_empty(), "decision root should have edges");
-            let action = edges[gs.candidates[0]].action;
-            let mut policy = vec![0.0f32; G::NUM_ACTIONS];
-            policy[action] = 1.0;
-            return Step::Done(SearchResult {
-                policy,
-                value: self.tree.q(root),
-                selected_action: action,
-            });
+            return Step::Done(extract_gumbel_result::<G>(
+                &self.tree,
+                root,
+                gs,
+                &self.config,
+            ));
         }
 
         // Sanity check: leaf_batch_size shouldn't dominate the phase budget,
