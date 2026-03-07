@@ -316,7 +316,11 @@ impl<G: Game> Search<G> {
                 } => {
                     self.tree.remove_virtual_loss(&path);
                     let &(parent, edge_idx) = path.last().unwrap();
-                    // Skip if edge already has a child (duplicate leaf in batch)
+                    // Two simulations in the same batch can reach the same
+                    // unexpanded edge (despite virtual loss discouraging it).
+                    // The first creates the child; the second skips expansion
+                    // but its virtual loss is still correctly unwound above.
+                    // The wasted evaluation is rare and unavoidable.
                     if self.tree.edges(parent)[edge_idx].child.is_none() {
                         let child = self
                             .tree
@@ -380,6 +384,20 @@ impl<G: Game> Search<G> {
             });
         }
 
+        // Sanity check: leaf_batch_size shouldn't dominate the phase budget,
+        // or halving decisions are based mostly on in-flight (virtual-loss)
+        // data rather than real evaluations.
+        debug_assert!(
+            self.config.leaf_batch_size as usize
+                <= gs.sims_per_candidate as usize * gs.candidates.len(),
+            "leaf_batch_size ({}) exceeds Sequential Halving phase budget ({}×{} = {}); \
+             search quality will degrade",
+            self.config.leaf_batch_size,
+            gs.sims_per_candidate,
+            gs.candidates.len(),
+            gs.sims_per_candidate as usize * gs.candidates.len(),
+        );
+
         let mut batch: Vec<PendingEval<G>> = Vec::new();
         loop {
             // Check if SH is complete (1 candidate left or budget exhausted)
@@ -418,8 +436,13 @@ impl<G: Game> Search<G> {
                     advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
                 }
                 SimResult::NeedsEval(pending) => {
-                    self.tree.apply_virtual_loss(&self.bufs.path);
+                    // Advance round-robin before applying virtual loss so that
+                    // update_q_bounds reads Q values not yet polluted by this
+                    // simulation's virtual loss (q_min/q_max never contract,
+                    // so feeding in artificially low values widens the range
+                    // permanently).
                     advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
+                    self.tree.apply_virtual_loss(&self.bufs.path);
                     batch.push(pending);
                     if batch.len() as u32 >= self.config.leaf_batch_size {
                         return Step::NeedsEval(batch);
@@ -791,8 +814,15 @@ fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Co
     }
 }
 
-/// Advance Sequential Halving round-robin after a completed simulation.
-/// Called from both `run_simulations` (sync completion) and `supply` (async completion).
+/// Advance Sequential Halving round-robin after a simulation is committed.
+///
+/// Called at queue time for both synchronously completed simulations and
+/// in-flight leaves (before eval returns).  Budget is "spent" when the
+/// simulation is committed, not when the evaluation arrives — the
+/// alternative would serialize leaf collection or require deferred
+/// bookkeeping.  The round-robin distributes in-flight sims roughly
+/// evenly across candidates, so virtual-loss bias during halving is
+/// approximately symmetric and relative candidate ranking is preserved.
 fn advance_round_robin(
     gs: &mut GumbelState,
     tree: &Tree,
@@ -817,12 +847,16 @@ fn advance_round_robin(
 
 /// Update q_min/q_max from nodes touched in the backprop path.
 ///
-/// Only walks the path (O(depth)), not the full tree (O(nodes)).  This
-/// means bounds are underestimates of the true range early in search,
-/// which compresses σ and makes selection more policy-driven.  As more
-/// of the tree is visited the bounds widen and Q gets more influence —
-/// a reasonable warmup: trust the policy when search data is sparse,
-/// trust Q as it becomes reliable.
+/// Bounds only ever widen (never contract), and only walk the path
+/// (O(depth)), not the full tree (O(nodes)).  This means bounds are
+/// underestimates of the true range early in search, which compresses σ
+/// and makes selection more policy-driven.  As more of the tree is
+/// visited the bounds widen and Q gets more influence — a reasonable
+/// warmup: trust the policy when search data is sparse, trust Q as it
+/// becomes reliable.
+///
+/// For in-flight leaves, this is called *before* `apply_virtual_loss` to
+/// avoid permanently widening bounds with artificially pessimistic Q.
 fn update_q_bounds(gs: &mut GumbelState, tree: &Tree, path: &[(NodeId, usize)]) {
     for &(nid, eidx) in path {
         let node_q = tree.q(nid);
@@ -887,7 +921,10 @@ fn extract_gumbel_result<G: Game>(
         .unwrap_or(0);
     let selected_action = edges[selected_edge].action;
 
-    // improved policy (training target): softmax(logit + σ(completedQ)) over ALL edges
+    // Improved policy (training target): softmax(logit + σ(completedQ)) over ALL edges.
+    // Unvisited edges use v_mix as their completedQ estimate (see completed_q).
+    // This is the paper's approach but can be noisy when few edges are visited,
+    // since v_mix interpolates the value network prior with a sparse Q average.
     let mut improved_logits = Vec::with_capacity(edges.len());
     for (i, edge) in edges.iter().enumerate() {
         let cq = completed_q(tree, edge, vmix_val);
