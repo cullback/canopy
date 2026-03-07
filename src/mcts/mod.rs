@@ -120,10 +120,10 @@ enum Phase {
         actions: Vec<usize>,
     },
     Simulating {
-        path: Vec<(NodeId, usize)>,
         player: Player,
-        state_key: Option<u64>,
         actions: Vec<usize>,
+        path: Vec<(NodeId, usize)>,
+        state_key: Option<u64>,
     },
 }
 
@@ -329,10 +329,10 @@ impl<G: Game> Search<G> {
                     self.bufs.reclaim_actions(actions);
                 }
                 Phase::Simulating {
-                    path,
                     player,
-                    state_key,
                     actions,
+                    path,
+                    state_key,
                 } => {
                     self.tree.remove_virtual_loss(&path);
                     let &(parent, edge_idx) = path.last().unwrap();
@@ -544,10 +544,10 @@ fn simulate<G: Game>(
                 return SimResult::NeedsEval(PendingEval {
                     state,
                     context: Phase::Simulating {
-                        path: bufs.take_path(),
                         player,
-                        state_key,
                         actions: bufs.take_actions(),
+                        path: bufs.take_path(),
+                        state_key,
                     },
                 });
             }
