@@ -79,7 +79,7 @@ fn app() -> Command {
             .arg(
                 Arg::new("encoder")
                     .long("encoder")
-                    .default_value("basic")
+                    .default_value("rich")
                     .help("Encoder used for nn evaluator: basic or rich"),
             );
     }
@@ -103,13 +103,13 @@ fn train_command() -> Command {
         .arg(
             Arg::new("model")
                 .long("model")
-                .default_value("simple")
-                .help("Model architecture: simple (default) or resnet"),
+                .default_value("resnet")
+                .help("Model architecture: simple or resnet"),
         )
         .arg(
             Arg::new("encoder")
                 .long("encoder")
-                .default_value("basic")
+                .default_value("rich")
                 .help("Encoder: basic (480 features) or rich (1490 features)"),
         )
         .arg(
