@@ -583,8 +583,7 @@ fn simulate<G: Game>(
 /// `q_bounds` is the global (q_min, q_max) from the tree, used for
 /// consistent Q normalization across all nodes (per the paper).
 ///
-/// Returns 0 if the node has no edges (defensive; decision nodes should
-/// always have legal actions, but a corrupted game state could violate this).
+/// Panics if the node has no edges (decision nodes must have legal actions).
 fn gumbel_interior_select(
     tree: &Tree,
     node_id: NodeId,
