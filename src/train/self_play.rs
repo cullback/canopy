@@ -41,9 +41,9 @@ impl IterGameResults {
 }
 
 /// A leaf-node evaluation request sent from a worker thread to the batcher.
-struct EvalRequest<G: Game> {
-    pending: PendingEval<G>,
-    response_tx: mpsc::SyncSender<(Evaluation, PendingEval<G>)>,
+pub(super) struct EvalRequest<G: Game> {
+    pub pending: PendingEval<G>,
+    pub response_tx: mpsc::SyncSender<(Evaluation, PendingEval<G>)>,
 }
 
 fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
@@ -61,28 +61,6 @@ fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
         .max_by(|a, b| a.1.total_cmp(b.1))
         .unwrap()
         .0
-}
-
-/// Generic game-playing loop: resolve chance, check terminal, select action via closure.
-/// Returns the terminal reward from Player::One's perspective.
-pub(super) fn play_game<G: Game>(
-    state: &mut G,
-    mut select_action: impl FnMut(&G, Player, &mut fastrand::Rng) -> usize,
-    rng: &mut fastrand::Rng,
-) -> f32 {
-    loop {
-        if let Some(action) = state.sample_chance(rng) {
-            state.apply_action(action);
-            continue;
-        }
-        match state.status() {
-            Status::Terminal(reward) => return reward,
-            Status::Ongoing(player) => {
-                let action = select_action(state, player, rng);
-                state.apply_action(action);
-            }
-        }
-    }
 }
 
 /// Worker thread: plays sequential games, sending leaf evals to the batcher.
@@ -226,7 +204,7 @@ fn worker_loop<G: Game, E: StateEncoder<G>>(
 
 /// Main-thread batcher: collects eval requests and runs batched NN inference.
 /// Returns (total_batches, total_evals) for diagnostics.
-fn batcher_loop<G: Game, Ev: Evaluator<G>>(
+pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
     request_rx: &mpsc::Receiver<EvalRequest<G>>,
     evaluator: &Ev,
     rng: &mut fastrand::Rng,
