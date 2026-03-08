@@ -272,7 +272,7 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
 /// Game-independent — only touches raw floats and the provided inference function.
 pub(super) fn batcher_loop(
     request_rx: &mut mpsc::Receiver<InferRequest>,
-    infer_fn: impl Fn(&[f32], usize) -> (Vec<f32>, Vec<f32>),
+    infer_fn: impl Fn(Vec<f32>, usize) -> (Vec<f32>, Vec<f32>),
     num_actions: usize,
     max_batch_size: usize,
     stats: &BatcherStats,
@@ -280,7 +280,6 @@ pub(super) fn batcher_loop(
     use std::time::Instant;
 
     let mut batch: Vec<InferRequest> = Vec::with_capacity(max_batch_size);
-    let mut flat_features: Vec<f32> = Vec::new();
 
     let mut total_wait_us = 0u64;
     let mut total_infer_us = 0u64;
@@ -318,8 +317,7 @@ pub(super) fn batcher_loop(
 
         // Collect flat features from pre-encoded requests
         let t_overhead = Instant::now();
-        flat_features.clear();
-        flat_features.reserve(bs * feature_size);
+        let mut flat_features = Vec::with_capacity(bs * feature_size);
         for req in &batch {
             flat_features.extend_from_slice(&req.features);
         }
@@ -327,7 +325,7 @@ pub(super) fn batcher_loop(
 
         // Batched inference (GPU forward pass only — no encoding)
         let t_infer = Instant::now();
-        let (flat_logits, flat_values) = infer_fn(&flat_features, bs);
+        let (flat_logits, flat_values) = infer_fn(flat_features, bs);
         total_infer_us += t_infer.elapsed().as_micros() as u64;
 
         // Send results back to tasks

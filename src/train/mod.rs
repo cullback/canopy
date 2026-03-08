@@ -132,7 +132,7 @@ impl Default for TrainConfig {
             gumbel_m: 16,
             c_visit: 50.0,
             c_scale: 1.0,
-            leaf_batch_size: 8,
+            leaf_batch_size: 16,
 
             // Benchmark
             bench_games: 10,

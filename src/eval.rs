@@ -40,7 +40,7 @@ pub trait Evaluator<G: Game>: Send {
     /// `(flat_policy_logits, flat_values)`. Only supported by neural evaluators.
     fn infer_features(
         &self,
-        _features: &[f32],
+        _features: Vec<f32>,
         _batch_size: usize,
         _feature_size: usize,
     ) -> (Vec<f32>, Vec<f32>) {

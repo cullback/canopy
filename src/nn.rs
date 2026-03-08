@@ -144,7 +144,7 @@ where
             features.extend_from_slice(&buf);
         }
 
-        let (all_logits, all_values) = self.infer_features(&features, n, E::FEATURE_SIZE);
+        let (all_logits, all_values) = self.infer_features(features, n, E::FEATURE_SIZE);
 
         // Split outputs per state and apply sign correction
         for (j, &i) in nn_indices.iter().enumerate() {
@@ -162,12 +162,12 @@ where
 
     fn infer_features(
         &self,
-        features: &[f32],
+        features: Vec<f32>,
         batch_size: usize,
         feature_size: usize,
     ) -> (Vec<f32>, Vec<f32>) {
         let input = Tensor::<B, 2>::from_data(
-            TensorData::new(features.to_vec(), [batch_size, feature_size]),
+            TensorData::new(features, [batch_size, feature_size]),
             &self.device,
         );
 
