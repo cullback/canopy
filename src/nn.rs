@@ -134,7 +134,7 @@ where
             return results.into_iter().map(|r| r.unwrap()).collect();
         }
 
-        // Encode all ongoing states into a single [N, FEATURE_SIZE] tensor
+        // Encode ongoing states and run inference
         let n = nn_indices.len();
         let mut features = Vec::with_capacity(n * E::FEATURE_SIZE);
         let mut buf = Vec::with_capacity(E::FEATURE_SIZE);
@@ -144,21 +144,7 @@ where
             features.extend_from_slice(&buf);
         }
 
-        let input = Tensor::<B, 2>::from_data(
-            TensorData::new(features, [n, E::FEATURE_SIZE]),
-            &self.device,
-        );
-
-        let (policy_tensor, value_tensor) = self.model.forward(input);
-
-        let all_logits: Vec<f32> = policy_tensor
-            .into_data()
-            .to_vec()
-            .expect("policy tensor to_vec");
-        let all_values: Vec<f32> = value_tensor
-            .into_data()
-            .to_vec()
-            .expect("value tensor to_vec");
+        let (all_logits, all_values) = self.infer_features(&features, n, E::FEATURE_SIZE);
 
         // Split outputs per state and apply sign correction
         for (j, &i) in nn_indices.iter().enumerate() {
@@ -172,5 +158,30 @@ where
         }
 
         results.into_iter().map(|r| r.unwrap()).collect()
+    }
+
+    fn infer_features(
+        &self,
+        features: &[f32],
+        batch_size: usize,
+        feature_size: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        let input = Tensor::<B, 2>::from_data(
+            TensorData::new(features.to_vec(), [batch_size, feature_size]),
+            &self.device,
+        );
+
+        let (policy_tensor, value_tensor) = self.model.forward(input);
+
+        let logits: Vec<f32> = policy_tensor
+            .into_data()
+            .to_vec()
+            .expect("policy tensor to_vec");
+        let values: Vec<f32> = value_tensor
+            .into_data()
+            .to_vec()
+            .expect("value tensor to_vec");
+
+        (logits, values)
     }
 }

@@ -5,7 +5,7 @@ use tokio::sync::mpsc;
 
 use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
-use crate::mcts::{Config, PendingEval, Search, Step};
+use crate::mcts::{Config, Search, Step};
 use crate::nn::StateEncoder;
 use crate::player::Player;
 
@@ -63,14 +63,21 @@ impl IterGameResults {
     }
 }
 
-/// A leaf-node evaluation request sent from an async game task to the batcher.
-pub(super) struct EvalRequest<G: Game> {
-    pub pending: PendingEval<G>,
-    pub response_tx: tokio::sync::oneshot::Sender<(Evaluation, PendingEval<G>)>,
+/// A pre-encoded inference request sent from an async game task to the batcher.
+/// Game-independent: carries raw features, not game states.
+pub(super) struct InferRequest {
+    pub features: Vec<f32>,
+    pub response_tx: tokio::sync::oneshot::Sender<InferResponse>,
 }
 
-/// Sender half of the bounded eval request channel.
-pub(super) type EvalSender<G> = mpsc::Sender<EvalRequest<G>>;
+/// Raw inference result returned from the batcher to a game task.
+pub(super) struct InferResponse {
+    pub policy_logits: Vec<f32>,
+    pub value: f32,
+}
+
+/// Sender half of the bounded inference request channel.
+pub(super) type InferSender = mpsc::Sender<InferRequest>;
 
 fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
     let mut roll = rng.f32();
@@ -90,9 +97,10 @@ fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
 }
 
 /// Async task: plays sequential games, sending leaf evals to the batcher.
+/// Encodes features locally before sending — batcher only does GPU work.
 #[allow(clippy::too_many_arguments)]
 async fn game_task<G: Game, E: StateEncoder<G>>(
-    request_tx: mpsc::Sender<EvalRequest<G>>,
+    request_tx: InferSender,
     games_remaining: Arc<AtomicU32>,
     completed: Arc<AtomicU32>,
     pb: Arc<indicatif::ProgressBar>,
@@ -107,6 +115,7 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
     let mut rng = fastrand::Rng::with_seed(seed);
     let mut results = Vec::new();
     let mut actions_buf = Vec::new();
+    let mut encode_buf = Vec::with_capacity(E::FEATURE_SIZE);
 
     loop {
         // Claim a game via atomic decrement
@@ -201,20 +210,34 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
                 match step {
                     Step::NeedsEval(pendings) => {
                         let mut receivers = Vec::with_capacity(pendings.len());
+                        let mut pending_store = Vec::with_capacity(pendings.len());
                         for pending in pendings {
+                            // Pre-encode features in the task
+                            let sign = match pending.state.status() {
+                                Status::Ongoing(p) => p.sign(),
+                                Status::Terminal(_) => 1.0,
+                            };
+                            encode_buf.clear();
+                            E::encode(&pending.state, &mut encode_buf);
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             request_tx
-                                .send(EvalRequest {
-                                    pending,
+                                .send(InferRequest {
+                                    features: encode_buf.clone(),
                                     response_tx: tx,
                                 })
                                 .await
                                 .unwrap();
-                            receivers.push(rx);
+                            receivers.push((rx, sign));
+                            pending_store.push(pending);
                         }
                         let mut evals = Vec::with_capacity(receivers.len());
-                        for rx in receivers {
-                            evals.push(rx.await.unwrap());
+                        for ((rx, sign), pending) in receivers.into_iter().zip(pending_store) {
+                            let resp = rx.await.unwrap();
+                            let eval = Evaluation {
+                                policy_logits: resp.policy_logits,
+                                value: resp.value * sign,
+                            };
+                            evals.push((eval, pending));
                         }
                         step = search.supply(evals, &mut rng);
                     }
@@ -245,22 +268,37 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
     results
 }
 
-/// Batcher thread: collects eval requests and runs batched NN inference.
-pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
-    request_rx: &mut mpsc::Receiver<EvalRequest<G>>,
-    evaluator: &Ev,
-    rng: &mut fastrand::Rng,
+/// Batcher thread: collects pre-encoded feature vectors and runs batched NN inference.
+/// Game-independent — only touches raw floats and the provided inference function.
+pub(super) fn batcher_loop(
+    request_rx: &mut mpsc::Receiver<InferRequest>,
+    infer_fn: impl Fn(&[f32], usize) -> (Vec<f32>, Vec<f32>),
+    num_actions: usize,
     max_batch_size: usize,
     stats: &BatcherStats,
 ) {
-    let mut batch: Vec<EvalRequest<G>> = Vec::with_capacity(max_batch_size);
+    use std::time::Instant;
+
+    let mut batch: Vec<InferRequest> = Vec::with_capacity(max_batch_size);
+    let mut flat_features: Vec<f32> = Vec::new();
+
+    let mut total_wait_us = 0u64;
+    let mut total_infer_us = 0u64;
+    let mut total_overhead_us = 0u64;
+    let mut num_cycles = 0u64;
+    let mut batch_size_sum = 0u64;
+    let mut max_batch_seen = 0usize;
 
     loop {
         // Block for the first request (None = all senders dropped)
+        let t_wait = Instant::now();
         let first = match request_rx.blocking_recv() {
             Some(req) => req,
-            None => return,
+            None => break,
         };
+        total_wait_us += t_wait.elapsed().as_micros() as u64;
+
+        let feature_size = first.features.len();
         batch.push(first);
 
         // Drain additional requests without blocking, up to max_batch_size
@@ -271,18 +309,54 @@ pub(super) fn batcher_loop<G: Game, Ev: Evaluator<G>>(
             }
         }
 
-        stats.evals.fetch_add(batch.len() as u64, Relaxed);
+        let bs = batch.len();
+        batch_size_sum += bs as u64;
+        max_batch_seen = max_batch_seen.max(bs);
+
+        stats.evals.fetch_add(bs as u64, Relaxed);
         stats.batches.fetch_add(1, Relaxed);
 
-        // Batched evaluation
-        let states: Vec<&G> = batch.iter().map(|r| &r.pending.state).collect();
-        let evals = evaluator.evaluate_batch(&states, rng);
+        // Collect flat features from pre-encoded requests
+        let t_overhead = Instant::now();
+        flat_features.clear();
+        flat_features.reserve(bs * feature_size);
+        for req in &batch {
+            flat_features.extend_from_slice(&req.features);
+        }
+        total_overhead_us += t_overhead.elapsed().as_micros() as u64;
+
+        // Batched inference (GPU forward pass only — no encoding)
+        let t_infer = Instant::now();
+        let (flat_logits, flat_values) = infer_fn(&flat_features, bs);
+        total_infer_us += t_infer.elapsed().as_micros() as u64;
 
         // Send results back to tasks
-        for (req, eval) in batch.drain(..).zip(evals) {
-            // Ignore send errors (task may have been cancelled)
-            let _ = req.response_tx.send((eval, req.pending));
+        let t_send = Instant::now();
+        for (i, req) in batch.drain(..).enumerate() {
+            let logits_start = i * num_actions;
+            let policy_logits = flat_logits[logits_start..logits_start + num_actions].to_vec();
+            let value = flat_values[i];
+            let _ = req.response_tx.send(InferResponse {
+                policy_logits,
+                value,
+            });
         }
+        total_overhead_us += t_send.elapsed().as_micros() as u64;
+
+        num_cycles += 1;
+    }
+
+    if num_cycles > 0 {
+        let avg_batch = batch_size_sum as f64 / num_cycles as f64;
+        let total_us = total_wait_us + total_infer_us + total_overhead_us;
+        let wait_pct = total_wait_us as f64 / total_us as f64 * 100.0;
+        let infer_pct = total_infer_us as f64 / total_us as f64 * 100.0;
+        let overhead_pct = total_overhead_us as f64 / total_us as f64 * 100.0;
+        let total_ms = total_us as f64 / 1000.0;
+        eprintln!(
+            "batcher: {num_cycles} cycles, avg_batch={avg_batch:.1}, max_batch={max_batch_seen}, \
+             total={total_ms:.0}ms | wait={wait_pct:.1}% infer={infer_pct:.1}% overhead={overhead_pct:.1}%"
+        );
     }
 }
 
@@ -325,6 +399,8 @@ where
 
     let concurrent_games = config.concurrent_games;
     let max_batch_size = config.max_batch_size;
+    let num_actions = G::NUM_ACTIONS;
+    let feature_size = E::FEATURE_SIZE;
     let games_remaining = Arc::new(AtomicU32::new(config.games_per_iter as u32));
     let completed = Arc::new(AtomicU32::new(0));
     let batcher_stats = Arc::new(BatcherStats::new());
@@ -333,17 +409,13 @@ where
 
     let (request_tx, mut request_rx) = mpsc::channel(2 * max_batch_size);
 
-    // Seed batcher rng before spawning
-    let batcher_seed = rng.u64(..);
-
-    // Batcher on a plain std::thread (owns evaluator)
+    // Batcher on a plain std::thread — receives pre-encoded features, runs GPU inference
     let batcher_stats_ref = batcher_stats.clone();
     let batcher_handle = std::thread::spawn(move || {
-        let mut batcher_rng = fastrand::Rng::with_seed(batcher_seed);
         batcher_loop(
             &mut request_rx,
-            &evaluator,
-            &mut batcher_rng,
+            |features, batch_size| evaluator.infer_features(features, batch_size, feature_size),
+            num_actions,
             max_batch_size,
             &batcher_stats_ref,
         );

@@ -120,8 +120,8 @@ impl Default for TrainConfig {
 
             // Self-play
             games_per_iter: 500,
-            concurrent_games: 64,
-            max_batch_size: 256,
+            concurrent_games: 256,
+            max_batch_size: 1024,
             explore_moves: 30,
             playout_cap_full_prob: 0.25,
             playout_cap_fast_sims: 32,
@@ -284,7 +284,9 @@ pub fn run_training<G, M>(
             && iter_num % config.bench_interval == 0;
         let (bench_wins, bench_losses, bench_draws) = if run_bench {
             let eval = model.evaluator();
-            benchmark::run_benchmark::<G, M::Evaluator>(eval, &config, &mut rng, &new_state)
+            benchmark::run_benchmark::<G, M::Encoder, M::Evaluator>(
+                eval, &config, &mut rng, &new_state,
+            )
         } else {
             (0, 0, 0)
         };

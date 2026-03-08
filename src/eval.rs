@@ -33,6 +33,19 @@ pub trait Evaluator<G: Game>: Send {
     fn evaluate_batch(&self, states: &[&G], rng: &mut fastrand::Rng) -> Vec<Evaluation> {
         states.iter().map(|s| self.evaluate(s, rng)).collect()
     }
+
+    /// Run raw inference on pre-encoded features.
+    ///
+    /// Takes flat features `[batch_size * feature_size]` and returns
+    /// `(flat_policy_logits, flat_values)`. Only supported by neural evaluators.
+    fn infer_features(
+        &self,
+        _features: &[f32],
+        _batch_size: usize,
+        _feature_size: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        unimplemented!("infer_features not supported for this evaluator")
+    }
 }
 
 /// Default evaluator: random rollouts with uniform policy logits.

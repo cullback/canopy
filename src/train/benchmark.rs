@@ -1,18 +1,19 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use crate::eval::{Evaluator, RolloutEvaluator};
+use crate::eval::{Evaluation, Evaluator, RolloutEvaluator};
 use crate::game::{Game, Status};
 use crate::mcts::{Config, Search, Step};
+use crate::nn::StateEncoder;
 use crate::player::Player;
 
 use super::TrainConfig;
-use super::self_play::{BatcherStats, EvalRequest, EvalSender, batcher_loop};
+use super::self_play::{BatcherStats, InferRequest, InferSender, batcher_loop};
 
 /// Async bench game task: plays games alternating NN (batched) and baseline (local) turns.
 #[allow(clippy::too_many_arguments)]
-async fn bench_game_task<G: Game>(
-    request_tx: EvalSender<G>,
+async fn bench_game_task<G: Game, E: StateEncoder<G>>(
+    request_tx: InferSender,
     game_counter: Arc<AtomicU32>,
     bench_games: u32,
     nn_config: Config,
@@ -37,7 +38,7 @@ async fn bench_game_task<G: Game>(
         let nn_player = Player::from(i as usize % 2);
         let mut state = new_state(&mut rng);
 
-        let reward = play_bench_game(
+        let reward = play_bench_game::<G, E>(
             &mut state,
             nn_player,
             &nn_config,
@@ -71,15 +72,17 @@ async fn bench_game_task<G: Game>(
 
 /// Play a single benchmark game. NN turns use async eval via batcher;
 /// baseline turns use run_to_completion locally.
-async fn play_bench_game<G: Game>(
+async fn play_bench_game<G: Game, E: StateEncoder<G>>(
     state: &mut G,
     nn_player: Player,
     nn_config: &Config,
     baseline_config: &Config,
     baseline_eval: &RolloutEvaluator,
-    request_tx: &EvalSender<G>,
+    request_tx: &InferSender,
     rng: &mut fastrand::Rng,
 ) -> f32 {
+    let mut encode_buf = Vec::with_capacity(E::FEATURE_SIZE);
+
     loop {
         if let Some(action) = state.sample_chance(rng) {
             state.apply_action(action);
@@ -96,20 +99,35 @@ async fn play_bench_game<G: Game>(
                         match step {
                             Step::NeedsEval(pendings) => {
                                 let mut receivers = Vec::with_capacity(pendings.len());
+                                let mut pending_store = Vec::with_capacity(pendings.len());
                                 for pending in pendings {
+                                    let sign = match pending.state.status() {
+                                        Status::Ongoing(p) => p.sign(),
+                                        Status::Terminal(_) => 1.0,
+                                    };
+                                    encode_buf.clear();
+                                    E::encode(&pending.state, &mut encode_buf);
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     request_tx
-                                        .send(EvalRequest {
-                                            pending,
+                                        .send(InferRequest {
+                                            features: encode_buf.clone(),
                                             response_tx: tx,
                                         })
                                         .await
                                         .unwrap();
-                                    receivers.push(rx);
+                                    receivers.push((rx, sign));
+                                    pending_store.push(pending);
                                 }
                                 let mut evals = Vec::with_capacity(receivers.len());
-                                for rx in receivers {
-                                    evals.push(rx.await.unwrap());
+                                for ((rx, sign), pending) in
+                                    receivers.into_iter().zip(pending_store)
+                                {
+                                    let resp = rx.await.unwrap();
+                                    let eval = Evaluation {
+                                        policy_logits: resp.policy_logits,
+                                        value: resp.value * sign,
+                                    };
+                                    evals.push((eval, pending));
                                 }
                                 step = search.supply(evals, rng);
                             }
@@ -131,12 +149,17 @@ async fn play_bench_game<G: Game>(
 
 /// Play benchmark games: NN evaluator vs RolloutEvaluator, alternating seats.
 /// Returns (nn_wins, nn_losses, draws).
-pub(super) fn run_benchmark<G: Game + 'static, Ev: Evaluator<G> + 'static>(
+pub(super) fn run_benchmark<G, E, Ev>(
     evaluator: Ev,
     config: &TrainConfig,
     rng: &mut fastrand::Rng,
     new_state: &Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
-) -> (u32, u32, u32) {
+) -> (u32, u32, u32)
+where
+    G: Game + 'static,
+    E: StateEncoder<G> + 'static,
+    Ev: Evaluator<G> + 'static,
+{
     let nn_config = Config {
         num_simulations: config.mcts_sims,
         leaf_batch_size: config.leaf_batch_size,
@@ -167,21 +190,20 @@ pub(super) fn run_benchmark<G: Game + 'static, Ev: Evaluator<G> + 'static>(
 
     let concurrent_games = config.concurrent_games.min(config.bench_games as usize);
     let max_batch_size = config.max_batch_size;
+    let num_actions = G::NUM_ACTIONS;
+    let feature_size = E::FEATURE_SIZE;
 
     let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * max_batch_size);
 
-    // Seed batcher rng before spawning
-    let batcher_seed = rng.u64(..);
     let stats = Arc::new(BatcherStats::new());
     let stats_ref = stats.clone();
 
-    // Batcher on a plain std::thread (owns evaluator)
+    // Batcher on a plain std::thread — receives pre-encoded features, runs GPU inference
     let batcher_handle = std::thread::spawn(move || {
-        let mut batcher_rng = fastrand::Rng::with_seed(batcher_seed);
         batcher_loop(
             &mut request_rx,
-            &evaluator,
-            &mut batcher_rng,
+            |features, batch_size| evaluator.infer_features(features, batch_size, feature_size),
+            num_actions,
             max_batch_size,
             &stats_ref,
         );
@@ -198,7 +220,7 @@ pub(super) fn run_benchmark<G: Game + 'static, Ev: Evaluator<G> + 'static>(
 
         for _ in 0..concurrent_games {
             let seed = rng.u64(..);
-            join_set.spawn(bench_game_task::<G>(
+            join_set.spawn(bench_game_task::<G, E>(
                 request_tx.clone(),
                 game_counter.clone(),
                 config.bench_games,
