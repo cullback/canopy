@@ -57,9 +57,18 @@ pub struct TrainConfig {
     pub lr_min: f64,
     /// Number of most-recent iterations kept in the replay buffer.
     pub replay_window: usize,
-    /// Iterations over which the value target transitions from pure Z (game outcome)
-    /// to pure Q (search value). 0 = always use pure Z.
-    pub q_blend_iters: usize,
+    /// Iterations over which MCTS sims ramp from `mcts_sims_start` to `mcts_sims`
+    /// and the value target transitions from pure Z (game outcome) to pure Q
+    /// (search value). 0 = no ramp (full sims and pure Z from the start).
+    ///
+    /// Both ramps are synchronized because they address the same issue: early in
+    /// training the value head is unreliable, so Q (derived from search) is
+    /// near-zero garbage and extra sims just average more noise. Z (game outcome)
+    /// is noisy but carries real signal. As the network improves, Q becomes a
+    /// better per-position target than Z (averaging many sims vs one game result),
+    /// and deeper search produces higher-quality Q. See "Lessons From AlphaZero
+    /// (part 4): Improving the Training Target" (Abrams, 2018).
+    pub warmup_iters: usize,
 
     // -- Self-play --
     /// Self-play games generated per iteration.
@@ -117,7 +126,7 @@ impl Default for TrainConfig {
             lr: 0.001,
             lr_min: 0.0001,
             replay_window: 40,
-            q_blend_iters: 100,
+            warmup_iters: 200,
 
             // Self-play
             games_per_iter: 500,
@@ -149,7 +158,6 @@ pub struct TrainStepConfig {
     pub lr: f64,
     pub batch_size: usize,
     pub epochs: usize,
-    /// z/q blend factor: 0.0 = pure z, 1.0 = pure q
     /// Weight of Q in value target: 0.0 = pure Z, 1.0 = pure Q.
     pub q_weight: f32,
 }
@@ -197,12 +205,19 @@ fn cosine_lr(config: &TrainConfig, iteration: usize) -> f64 {
     config.lr_min + 0.5 * (config.lr - config.lr_min) * (1.0 + (std::f64::consts::PI * t).cos())
 }
 
+fn warmup_t(config: &TrainConfig, iteration: usize) -> f64 {
+    if config.warmup_iters == 0 {
+        return 1.0;
+    }
+    (iteration as f64 / config.warmup_iters as f64).min(1.0)
+}
+
 fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
     let start = config.mcts_sims_start;
-    if start >= config.mcts_sims || config.iterations <= 1 {
+    if start >= config.mcts_sims {
         return config.mcts_sims;
     }
-    let t = iteration as f64 / (config.iterations - 1) as f64;
+    let t = warmup_t(config, iteration);
     let sims = start as f64 + t * (config.mcts_sims - start) as f64;
     (sims.round() as u32).max(1)
 }
@@ -260,11 +275,7 @@ pub fn run_training<G, M>(
             replay_buffer.pop_front();
         }
         let mut samples: Vec<&Sample> = replay_buffer.iter().flat_map(|v| v.iter()).collect();
-        let q_weight = if config.q_blend_iters > 0 {
-            ((iteration + 1) as f32 / config.q_blend_iters as f32).min(1.0)
-        } else {
-            0.0
-        };
+        let q_weight = warmup_t(&config, iteration + 1) as f32;
         fastrand::shuffle(&mut samples);
         let step_cfg = TrainStepConfig {
             lr: effective_lr,

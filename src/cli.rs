@@ -109,9 +109,10 @@ pub fn train_command() -> Command {
                 .help("Resume training from checkpoint path (e.g. checkpoints/run/model_iter_10)"),
         )
         .arg(
-            Arg::new("q-blend-gen")
-                .long("q-blend-gen")
-                .default_value(d.q_blend_iters.to_string()),
+            Arg::new("warmup-iters")
+                .long("warmup-iters")
+                .default_value(d.warmup_iters.to_string())
+                .help("Iterations to ramp MCTS sims and Z→Q blend together"),
         )
         .arg(
             Arg::new("bench-games")
@@ -233,8 +234,8 @@ pub fn parse_train_config(
     if set("resume") {
         config.resume = matches.get_one::<String>("resume").map(PathBuf::from);
     }
-    if set("q-blend-gen") {
-        config.q_blend_iters = val("q-blend-gen").parse().unwrap();
+    if set("warmup-iters") {
+        config.warmup_iters = val("warmup-iters").parse().unwrap();
     }
     if set("bench-games") {
         config.bench_games = val("bench-games").parse().unwrap();
