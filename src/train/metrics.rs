@@ -15,57 +15,121 @@ mod round6 {
     }
 }
 
+/// One row of `metrics.csv`. Field order determines CSV column order.
+///
+/// Columns are grouped logically:
+/// - **Core training**: losses, gradient steps
+/// - **Self-play game stats**: game lengths, win/draw counts
+/// - **Policy diagnostics**: entropy, confidence, network-vs-search agreement
+/// - **Value diagnostics**: Z/Q targets, search correction, phase-split error
+/// - **Benchmark**: win/loss/draw vs baseline opponent
+/// - **Config/infra**: hyperparams and timing
 #[derive(Default, serde::Serialize)]
 pub(super) struct CsvRow {
+    // ── Core training ────────────────────────────────────────────────
     pub iteration: usize,
     #[serde(serialize_with = "round6::f32")]
     pub train_policy_loss: f32,
     #[serde(serialize_with = "round6::f32")]
     pub train_value_loss: f32,
+    /// Validation policy loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub val_policy_loss: f32,
+    /// Validation value loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub val_value_loss: f32,
+    /// Total optimizer updates across all epochs this iteration.
+    pub gradient_steps: usize,
+
+    // ── Self-play game stats ─────────────────────────────────────────
     #[serde(serialize_with = "round6::f64")]
     pub avg_game_length: f64,
+    /// Spread of game lengths. Collapse toward zero signals a degenerate
+    /// strategy; bimodal distributions show up as high stddev.
+    #[serde(serialize_with = "round6::f64")]
+    pub game_length_stddev: f64,
+    pub min_game_length: u32,
+    pub max_game_length: u32,
     pub p1_wins: u32,
     pub p2_wins: u32,
     pub draws: u32,
+
+    // ── Policy diagnostics ───────────────────────────────────────────
+    /// Entropy of the MCTS improved policy (training target). Healthy runs
+    /// dip then plateau; collapse to ~0 means exploration is dead.
     #[serde(serialize_with = "round6::f64")]
     pub avg_policy_entropy: f64,
-    pub replay_buffer_samples: usize,
-    pub bench_wins: u32,
-    pub bench_losses: u32,
-    pub bench_draws: u32,
+    /// Average max probability in the improved policy. Complement of entropy:
+    /// high values mean the policy concentrates on a single move.
     #[serde(serialize_with = "round6::f64")]
-    pub lr: f64,
-    #[serde(serialize_with = "round6::f32")]
-    pub q_weight: f32,
+    pub avg_policy_max_prob: f64,
+    /// Entropy restricted to positions with ≥6 legal actions, filtering out
+    /// forced/near-forced moves that naturally have low entropy.
     #[serde(serialize_with = "round6::f64")]
-    pub self_play_secs: f64,
+    pub avg_entropy_high_branch: f64,
+    /// Max prob restricted to positions with ≥6 legal actions.
     #[serde(serialize_with = "round6::f64")]
-    pub train_secs: f64,
+    pub avg_max_prob_high_branch: f64,
+    /// Fraction of moves where network's top-1 matches MCTS's selected action.
+    /// Should rise over training; plateau at ~40-50% means the network isn't
+    /// distilling search. Jump to ~95%+ early means search isn't contributing.
     #[serde(serialize_with = "round6::f64")]
-    pub bench_secs: f64,
-    pub samples_this_iter: usize,
-    pub min_game_length: u32,
-    pub max_game_length: u32,
+    pub avg_policy_agreement: f64,
+
+    // ── Value diagnostics ────────────────────────────────────────────
+    /// Mean game outcome (Z) from current player's perspective. Near 0 =
+    /// balanced play; persistent bias means one side is stronger.
     #[serde(serialize_with = "round6::f64")]
     pub avg_z: f64,
+    /// Mean MCTS root Q from current player's perspective.
     #[serde(serialize_with = "round6::f64")]
     pub avg_q: f64,
     #[serde(serialize_with = "round6::f64")]
     pub stddev_z: f64,
     #[serde(serialize_with = "round6::f64")]
     pub stddev_q: f64,
+    /// Mean |Q_search − V_network|. How much search corrects the raw network
+    /// value. Should shrink over training but never reach zero.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_policy_max_prob: f64,
+    pub avg_value_correction: f64,
+    /// Std of Q values across visited root children. Measures value head
+    /// discriminative power: very small = can't distinguish moves, very
+    /// large = playing refutation-style (one good move, rest terrible).
     #[serde(serialize_with = "round6::f64")]
-    pub avg_entropy_high_branch: f64,
+    pub avg_q_std: f64,
+    /// Mean |Q − Z| for first-half-of-game positions. Compare with late to
+    /// catch the failure mode where openings are confidently wrong.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_max_prob_high_branch: f64,
+    pub avg_value_error_early: f64,
+    /// Mean |Q − Z| for second-half-of-game positions.
+    #[serde(serialize_with = "round6::f64")]
+    pub avg_value_error_late: f64,
+
+    // ── Benchmark ────────────────────────────────────────────────────
+    pub bench_wins: u32,
+    pub bench_losses: u32,
+    pub bench_draws: u32,
+
+    // ── Config/infra ─────────────────────────────────────────────────
+    /// Cosine-annealed learning rate for this iteration.
+    #[serde(serialize_with = "round6::f64")]
+    pub lr: f64,
+    /// Weight of Q in value target blend (0 = pure Z, 1 = pure Q).
+    /// Ramps from 0→1 over `warmup_iters`.
+    #[serde(serialize_with = "round6::f32")]
+    pub q_weight: f32,
+    /// Effective MCTS simulations this iteration (may ramp up during warmup).
     pub mcts_sims: u32,
-    pub gradient_steps: usize,
+    /// Total samples in the replay buffer (across all retained iterations).
+    pub replay_buffer_samples: usize,
+    /// Samples generated this iteration only.
+    pub samples_this_iter: usize,
+    #[serde(serialize_with = "round6::f64")]
+    pub self_play_secs: f64,
+    #[serde(serialize_with = "round6::f64")]
+    pub train_secs: f64,
+    #[serde(serialize_with = "round6::f64")]
+    pub bench_secs: f64,
 }
 
 pub(super) struct CsvLogger {
@@ -175,6 +239,16 @@ pub(super) struct IterStats {
     pub avg_entropy_high_branch: f64,
     /// Max policy prob averaged over samples with ≥6 legal actions.
     pub avg_max_prob_high_branch: f64,
+    /// Fraction of moves where network top-1 == MCTS selected action.
+    pub avg_policy_agreement: f64,
+    /// Mean |Q_search - V_network|.
+    pub avg_value_correction: f64,
+    /// Mean std of Q across visited root children.
+    pub avg_q_std: f64,
+    /// Mean |q - z| for early-game samples (move_number <= game_length / 2).
+    pub avg_value_error_early: f64,
+    /// Mean |q - z| for late-game samples (move_number > game_length / 2).
+    pub avg_value_error_late: f64,
 }
 
 pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
@@ -188,6 +262,11 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
             avg_policy_max_prob: 0.0,
             avg_entropy_high_branch: 0.0,
             avg_max_prob_high_branch: 0.0,
+            avg_policy_agreement: 0.0,
+            avg_value_correction: 0.0,
+            avg_q_std: 0.0,
+            avg_value_error_early: 0.0,
+            avg_value_error_late: 0.0,
         };
     }
 
@@ -245,6 +324,40 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     }
     let hb_n = hb_count.max(1) as f64;
 
+    let avg_policy_agreement = samples.iter().filter(|s| s.prior_agrees).count() as f64 / n;
+    let avg_value_correction = samples
+        .iter()
+        .map(|s| s.value_correction as f64)
+        .sum::<f64>()
+        / n;
+    let avg_q_std = samples.iter().map(|s| s.q_std as f64).sum::<f64>() / n;
+
+    // Value error stratified by game phase
+    let mut early_err_sum = 0.0f64;
+    let mut early_count = 0u64;
+    let mut late_err_sum = 0.0f64;
+    let mut late_count = 0u64;
+    for s in samples {
+        let err = (s.q - s.z).abs() as f64;
+        if s.game_length > 0 && s.move_number <= s.game_length / 2 {
+            early_err_sum += err;
+            early_count += 1;
+        } else {
+            late_err_sum += err;
+            late_count += 1;
+        }
+    }
+    let avg_value_error_early = if early_count > 0 {
+        early_err_sum / early_count as f64
+    } else {
+        0.0
+    };
+    let avg_value_error_late = if late_count > 0 {
+        late_err_sum / late_count as f64
+    } else {
+        0.0
+    };
+
     IterStats {
         avg_entropy,
         avg_z: mean_z,
@@ -254,5 +367,10 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         avg_policy_max_prob,
         avg_entropy_high_branch: hb_entropy_sum / hb_n,
         avg_max_prob_high_branch: hb_max_prob_sum / hb_n,
+        avg_policy_agreement,
+        avg_value_correction,
+        avg_q_std,
+        avg_value_error_early,
+        avg_value_error_late,
     }
 }

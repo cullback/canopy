@@ -48,6 +48,7 @@ pub(super) struct IterGameResults {
     pub total_turns: u32,
     pub min_game_length: Option<u32>,
     pub max_game_length: u32,
+    pub game_length_stddev: f64,
     pub num_tasks: usize,
     pub total_batches: u64,
     pub total_evals: u64,
@@ -141,6 +142,7 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
             if let Status::Terminal(reward) = search.state().status() {
                 for s in &mut samples {
                     s.z *= reward;
+                    s.game_length = turn_count;
                 }
                 let winner = if reward > 0.0 {
                     Some(Player::One)
@@ -253,12 +255,33 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
                 result.selected_action
             };
 
+            let value_correction = (result.value - result.network_value).abs();
+            let q_std = if result.children_q.len() >= 2 {
+                let mean = result.children_q.iter().map(|&(_, q)| q).sum::<f32>()
+                    / result.children_q.len() as f32;
+                let var = result
+                    .children_q
+                    .iter()
+                    .map(|&(_, q)| (q - mean).powi(2))
+                    .sum::<f32>()
+                    / result.children_q.len() as f32;
+                var.sqrt()
+            } else {
+                0.0
+            };
+            let prior_agrees = result.prior_top1_action == result.selected_action;
+
             samples.push(Sample {
                 features: features_buf.into_boxed_slice(),
                 policy_target: result.policy.into_boxed_slice(),
                 z: current.sign(),
                 q,
                 full_search: is_full_search,
+                move_number: turn_count,
+                game_length: 0, // backfilled at game end
+                value_correction,
+                q_std,
+                prior_agrees,
             });
 
             search.apply_action(chosen);
@@ -466,11 +489,15 @@ where
     let mut p2_wins = 0u32;
     let mut draws = 0u32;
     let mut total_turns = 0u32;
+    let mut sum_turns_sq = 0u64;
     let mut min_game_length: Option<u32> = None;
     let mut max_game_length = 0u32;
+    let mut num_games = 0u32;
 
     for game in game_results {
         total_turns += game.num_turns;
+        sum_turns_sq += (game.num_turns as u64) * (game.num_turns as u64);
+        num_games += 1;
         min_game_length =
             Some(min_game_length.map_or(game.num_turns, |m: u32| m.min(game.num_turns)));
         max_game_length = max_game_length.max(game.num_turns);
@@ -482,6 +509,14 @@ where
         samples.extend(game.samples);
     }
 
+    let game_length_stddev = if num_games > 0 {
+        let mean = total_turns as f64 / num_games as f64;
+        let var = sum_turns_sq as f64 / num_games as f64 - mean * mean;
+        var.max(0.0).sqrt()
+    } else {
+        0.0
+    };
+
     IterGameResults {
         samples,
         p1_wins,
@@ -490,6 +525,7 @@ where
         total_turns,
         min_game_length,
         max_game_length,
+        game_length_stddev,
         num_tasks: concurrent_games,
         total_batches: batcher_stats.batches.load(Relaxed),
         total_evals: batcher_stats.evals.load(Relaxed),

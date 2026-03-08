@@ -42,6 +42,12 @@ pub struct SearchResult {
     pub value: f32,
     /// The action selected by Sequential Halving to play.
     pub selected_action: usize,
+    /// Raw network value (P1 perspective) before search corrections.
+    pub network_value: f32,
+    /// (action, Q) pairs for visited root children.
+    pub children_q: Vec<(usize, f32)>,
+    /// Action with highest raw prior (network policy argmax).
+    pub prior_top1_action: usize,
 }
 
 /// Continuation token for a pending evaluation.
@@ -113,6 +119,9 @@ pub struct Search<G: Game> {
     /// Q bounds for vanilla (non-Gumbel) simulations, used to normalize Q
     /// in interior selection.  Reset each `run`, widened after each sim.
     vanilla_q_bounds: (f32, f32),
+    /// Raw network value for the root (P1 perspective), captured on first
+    /// expansion and reused in the `SearchResult`.
+    root_network_value: f32,
 }
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -195,6 +204,7 @@ impl<G: Game> Search<G> {
             gumbel: None,
             vanilla_budget_remaining: 0,
             vanilla_q_bounds: (0.0, 0.0),
+            root_network_value: 0.0,
         }
     }
 
@@ -238,6 +248,9 @@ impl<G: Game> Search<G> {
                 policy: vec![0.0; G::NUM_ACTIONS],
                 value: reward,
                 selected_action: 0,
+                network_value: 0.0,
+                children_q: vec![],
+                prior_top1_action: 0,
             });
         }
 
@@ -247,6 +260,7 @@ impl<G: Game> Search<G> {
             self.root = Some(new_root);
 
             let root_value = self.tree.utility(new_root);
+            self.root_network_value = root_value;
             let root_player = match *self.tree.kind(new_root) {
                 NodeKind::Decision(p) => p,
                 _ => return self.run_vanilla_sims(rng),
@@ -270,6 +284,7 @@ impl<G: Game> Search<G> {
                 ExpandResult::Leaf(_) => unreachable!("empty non-terminal tree"),
                 ExpandResult::Chance(id) => {
                     self.root = Some(id);
+                    self.root_network_value = self.tree.utility(id);
                     self.run_vanilla_sims(rng)
                 }
                 ExpandResult::NeedsEval(player) => Step::NeedsEval(vec![PendingEval {
@@ -325,6 +340,7 @@ impl<G: Game> Search<G> {
                         .tree
                         .complete_expand(&eval, &actions, player, state_key);
                     self.root = Some(root);
+                    self.root_network_value = eval.value;
 
                     // Initialize Gumbel state for root
                     self.gumbel = Some(init_gumbel(
@@ -393,6 +409,7 @@ impl<G: Game> Search<G> {
 
     fn run_simulations(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
         let root = self.root();
+        let network_value = self.root_network_value;
         let gs = self
             .gumbel
             .as_mut()
@@ -405,6 +422,7 @@ impl<G: Game> Search<G> {
                 root,
                 gs,
                 &self.config,
+                network_value,
             ));
         }
 
@@ -420,6 +438,7 @@ impl<G: Game> Search<G> {
                     root,
                     gs,
                     &self.config,
+                    network_value,
                 ));
             }
 
@@ -492,7 +511,8 @@ impl<G: Game> Search<G> {
         if !batch.is_empty() {
             return Step::NeedsEval(batch);
         }
-        Step::Done(visit_count_result::<G>(&self.tree, root))
+        let network_value = self.root_network_value;
+        Step::Done(visit_count_result::<G>(&self.tree, root, network_value))
     }
 }
 
@@ -897,7 +917,7 @@ fn widen_q_bounds(tree: &Tree, path: &[(NodeId, usize)], bounds: &mut (f32, f32)
 }
 
 /// Build a result from visit counts (used for chance roots without Gumbel state).
-fn visit_count_result<G: Game>(tree: &Tree, root: NodeId) -> SearchResult {
+fn visit_count_result<G: Game>(tree: &Tree, root: NodeId, network_value: f32) -> SearchResult {
     let edges = tree.edges(root);
     let total_visits: u32 = edges.iter().map(|e| e.visits).sum();
     let mut policy = vec![0.0f32; G::NUM_ACTIONS];
@@ -912,10 +932,22 @@ fn visit_count_result<G: Game>(tree: &Tree, root: NodeId) -> SearchResult {
             }
         }
     }
+    let prior_top1_action = edges
+        .iter()
+        .max_by(|a, b| a.logit.total_cmp(&b.logit))
+        .map(|e| e.action)
+        .unwrap_or(0);
+    let children_q: Vec<(usize, f32)> = edges
+        .iter()
+        .filter_map(|e| e.child.map(|c| (e.action, tree.q(c))))
+        .collect();
     SearchResult {
         policy,
         value: tree.q(root),
         selected_action: best_action,
+        network_value,
+        children_q,
+        prior_top1_action,
     }
 }
 
@@ -925,6 +957,7 @@ fn extract_gumbel_result<G: Game>(
     root: NodeId,
     gs: &GumbelState,
     config: &Config,
+    network_value: f32,
 ) -> SearchResult {
     let ctx = RootContext::new(tree, root);
 
@@ -956,10 +989,29 @@ fn extract_gumbel_result<G: Game>(
         policy[edge.action] = prob;
     }
 
+    // Network's top-1 action (highest raw prior logit)
+    let prior_top1_action = gs
+        .root_logits
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.total_cmp(b.1))
+        .map(|(i, _)| ctx.edges[i].action)
+        .unwrap_or(selected_action);
+
+    // Q values for visited root children
+    let children_q: Vec<(usize, f32)> = ctx
+        .edges
+        .iter()
+        .filter_map(|e| e.child.map(|c| (e.action, tree.q(c))))
+        .collect();
+
     SearchResult {
         policy,
         value: tree.q(root),
         selected_action,
+        network_value,
+        children_q,
+        prior_top1_action,
     }
 }
 

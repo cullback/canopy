@@ -33,6 +33,16 @@ pub struct Sample {
     pub q: f32,
     /// Whether this position used full search (for playout cap randomization)
     pub full_search: bool,
+    /// Turn number when this sample was generated (1-indexed).
+    pub move_number: u32,
+    /// Total game length (backfilled after game ends).
+    pub game_length: u32,
+    /// |Q_search - V_network| — how much search corrected the network's value.
+    pub value_correction: f32,
+    /// Std of Q values across visited root children (value head discriminative power).
+    pub q_std: f32,
+    /// Whether network's top-1 action matches MCTS selected action.
+    pub prior_agrees: bool,
 }
 
 #[derive(Clone, Serialize)]
@@ -291,19 +301,19 @@ pub fn run_training<G, M>(
         checkpoint::save_checkpoint(model, &run_dir, iter_num, &mut rng);
 
         // Benchmark
-        let bench_start = Instant::now();
         let run_bench = config.bench_games > 0
             && config.bench_interval > 0
             && iter_num % config.bench_interval == 0;
-        let (bench_wins, bench_losses, bench_draws) = if run_bench {
+        let (bench_wins, bench_losses, bench_draws, bench_elapsed) = if run_bench {
+            let bench_start = Instant::now();
             let eval = model.evaluator();
-            benchmark::run_benchmark::<G, M::Encoder, M::Evaluator>(
+            let result = benchmark::run_benchmark::<G, M::Encoder, M::Evaluator>(
                 eval, &config, &mut rng, &new_state,
-            )
+            );
+            (result.0, result.1, result.2, bench_start.elapsed())
         } else {
-            (0, 0, 0)
+            (0, 0, 0, std::time::Duration::ZERO)
         };
-        let bench_elapsed = bench_start.elapsed();
 
         // Timing / ETA
         let total_elapsed = training_start.elapsed();
@@ -357,37 +367,49 @@ pub fn run_training<G, M>(
             0.0
         };
         csv.write_row(&metrics::CsvRow {
+            // Core training
             iteration: iters_done,
             train_policy_loss: train_metrics.train_policy_loss,
             train_value_loss: train_metrics.train_value_loss,
             val_policy_loss: train_metrics.val_policy_loss,
             val_value_loss: train_metrics.val_value_loss,
+            gradient_steps: train_metrics.gradient_steps,
+            // Self-play game stats
             avg_game_length,
+            game_length_stddev: sp.game_length_stddev,
+            min_game_length,
+            max_game_length: sp.max_game_length,
             p1_wins: sp.p1_wins,
             p2_wins: sp.p2_wins,
             draws: sp.draws,
+            // Policy diagnostics
             avg_policy_entropy: stats.avg_entropy,
-            replay_buffer_samples: samples.len(),
-            bench_wins,
-            bench_losses,
-            bench_draws,
-            lr: effective_lr,
-            q_weight,
-            self_play_secs: self_play_elapsed.as_secs_f64(),
-            train_secs: train_elapsed.as_secs_f64(),
-            bench_secs: bench_elapsed.as_secs_f64(),
-            samples_this_iter,
-            min_game_length,
-            max_game_length: sp.max_game_length,
+            avg_policy_max_prob: stats.avg_policy_max_prob,
+            avg_entropy_high_branch: stats.avg_entropy_high_branch,
+            avg_max_prob_high_branch: stats.avg_max_prob_high_branch,
+            avg_policy_agreement: stats.avg_policy_agreement,
+            // Value diagnostics
             avg_z: stats.avg_z,
             avg_q: stats.avg_q,
             stddev_z: stats.stddev_z,
             stddev_q: stats.stddev_q,
-            avg_policy_max_prob: stats.avg_policy_max_prob,
-            avg_entropy_high_branch: stats.avg_entropy_high_branch,
-            avg_max_prob_high_branch: stats.avg_max_prob_high_branch,
+            avg_value_correction: stats.avg_value_correction,
+            avg_q_std: stats.avg_q_std,
+            avg_value_error_early: stats.avg_value_error_early,
+            avg_value_error_late: stats.avg_value_error_late,
+            // Benchmark
+            bench_wins,
+            bench_losses,
+            bench_draws,
+            // Config/infra
+            lr: effective_lr,
+            q_weight,
             mcts_sims: effective_sims,
-            gradient_steps: train_metrics.gradient_steps,
+            replay_buffer_samples: samples.len(),
+            samples_this_iter,
+            self_play_secs: self_play_elapsed.as_secs_f64(),
+            train_secs: train_elapsed.as_secs_f64(),
+            bench_secs: bench_elapsed.as_secs_f64(),
         });
     }
 }
