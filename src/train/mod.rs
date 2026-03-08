@@ -126,7 +126,7 @@ impl Default for TrainConfig {
             lr: 0.001,
             lr_min: 0.0001,
             replay_window: 40,
-            warmup_iters: 200,
+            warmup_iters: 100,
 
             // Self-play
             games_per_iter: 500,
