@@ -57,8 +57,9 @@ pub struct TrainConfig {
     pub lr_min: f64,
     /// Number of most-recent iterations kept in the replay buffer.
     pub replay_window: usize,
-    /// Iteration at which Q fully replaces Z as value target (0 = pure Z always).
-    pub q_blend_generations: usize,
+    /// Iterations over which the value target transitions from pure Z (game outcome)
+    /// to pure Q (search value). 0 = always use pure Z.
+    pub q_blend_iters: usize,
 
     // -- Self-play --
     /// Self-play games generated per iteration.
@@ -116,7 +117,7 @@ impl Default for TrainConfig {
             lr: 0.001,
             lr_min: 0.0001,
             replay_window: 40,
-            q_blend_generations: 100,
+            q_blend_iters: 100,
 
             // Self-play
             games_per_iter: 500,
@@ -149,7 +150,8 @@ pub struct TrainStepConfig {
     pub batch_size: usize,
     pub epochs: usize,
     /// z/q blend factor: 0.0 = pure z, 1.0 = pure q
-    pub alpha: f32,
+    /// Weight of Q in value target: 0.0 = pure Z, 1.0 = pure Q.
+    pub q_weight: f32,
 }
 
 /// Metrics returned from a training step.
@@ -258,8 +260,8 @@ pub fn run_training<G, M>(
             replay_buffer.pop_front();
         }
         let mut samples: Vec<&Sample> = replay_buffer.iter().flat_map(|v| v.iter()).collect();
-        let alpha = if config.q_blend_generations > 0 {
-            ((iteration + 1) as f32 / config.q_blend_generations as f32).min(1.0)
+        let q_weight = if config.q_blend_iters > 0 {
+            ((iteration + 1) as f32 / config.q_blend_iters as f32).min(1.0)
         } else {
             0.0
         };
@@ -268,7 +270,7 @@ pub fn run_training<G, M>(
             lr: effective_lr,
             batch_size: config.batch_size,
             epochs: config.epochs,
-            alpha,
+            q_weight,
         };
         let train_metrics = model.train_step(&samples, &step_cfg);
         let train_elapsed = train_start.elapsed();
@@ -359,7 +361,7 @@ pub fn run_training<G, M>(
             bench_losses,
             bench_draws,
             lr: effective_lr,
-            q_alpha: alpha,
+            q_weight,
             self_play_secs: self_play_elapsed.as_secs_f64(),
             train_secs: train_elapsed.as_secs_f64(),
             bench_secs: bench_elapsed.as_secs_f64(),

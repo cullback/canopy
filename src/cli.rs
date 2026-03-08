@@ -111,7 +111,7 @@ pub fn train_command() -> Command {
         .arg(
             Arg::new("q-blend-gen")
                 .long("q-blend-gen")
-                .default_value(d.q_blend_generations.to_string()),
+                .default_value(d.q_blend_iters.to_string()),
         )
         .arg(
             Arg::new("bench-games")
@@ -234,7 +234,7 @@ pub fn parse_train_config(
         config.resume = matches.get_one::<String>("resume").map(PathBuf::from);
     }
     if set("q-blend-gen") {
-        config.q_blend_generations = val("q-blend-gen").parse().unwrap();
+        config.q_blend_iters = val("q-blend-gen").parse().unwrap();
     }
     if set("bench-games") {
         config.bench_games = val("bench-games").parse().unwrap();

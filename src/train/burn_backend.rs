@@ -50,7 +50,7 @@ pub fn default_device() -> Device {
 /// Returns (features, policy_targets, value_targets, mask, num_full) tensors.
 fn prepare_batch<B: Backend>(
     samples: &[&Sample],
-    alpha: f32,
+    q_weight: f32,
     feature_size: usize,
     num_actions: usize,
     device: &B::Device,
@@ -79,7 +79,7 @@ fn prepare_batch<B: Backend>(
 
     let value_targets: Vec<f32> = samples
         .iter()
-        .map(|s| (1.0 - alpha) * s.z + alpha * s.q)
+        .map(|s| (1.0 - q_weight) * s.z + q_weight * s.q)
         .collect();
     let value_tensor = Tensor::<B, 2>::from_data(TensorData::new(value_targets, [bs, 1]), device);
 
@@ -186,7 +186,7 @@ where
             let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
                 prepare_batch::<TrainBackend>(
                     &batch_samples,
-                    cfg.alpha,
+                    cfg.q_weight,
                     E::FEATURE_SIZE,
                     G::NUM_ACTIONS,
                     &self.device,
@@ -244,7 +244,7 @@ where
             let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
                 prepare_batch::<InferBackend>(
                     batch,
-                    cfg.alpha,
+                    cfg.q_weight,
                     E::FEATURE_SIZE,
                     G::NUM_ACTIONS,
                     &self.device,

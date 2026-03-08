@@ -40,7 +40,7 @@ pub(super) struct CsvRow {
     #[serde(serialize_with = "round6::f64")]
     pub lr: f64,
     #[serde(serialize_with = "round6::f32")]
-    pub q_alpha: f32,
+    pub q_weight: f32,
     #[serde(serialize_with = "round6::f64")]
     pub self_play_secs: f64,
     #[serde(serialize_with = "round6::f64")]
