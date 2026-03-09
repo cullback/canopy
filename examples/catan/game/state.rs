@@ -80,11 +80,17 @@ pub enum Phase {
     PlaceRoad,
     PreRoll,
     Roll,
-    Discard { player: Player, remaining: u8 },
+    Discard {
+        player: Player,
+        remaining: u8,
+        roller: Player,
+    },
     MoveRobber,
     StealResolve,
     Main,
-    RoadBuilding { roads_left: u8 },
+    RoadBuilding {
+        roads_left: u8,
+    },
     GameOver(Player),
 }
 

@@ -328,21 +328,24 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
 }
 
 fn handle_seven(state: &mut GameState) {
-    let current = state.current_player;
-    let opponent = current.opponent();
+    let roller = state.current_player;
+    let opponent = roller.opponent();
 
-    let current_total = state.players[current].hand.total();
-    if current_total > DISCARD_THRESHOLD {
+    let roller_total = state.players[roller].hand.total();
+    if roller_total > DISCARD_THRESHOLD {
         state.phase = Phase::Discard {
-            player: current,
-            remaining: current_total / 2,
+            player: roller,
+            remaining: roller_total / 2,
+            roller,
         };
     } else {
         let opp_total = state.players[opponent].hand.total();
         if opp_total > DISCARD_THRESHOLD {
+            state.current_player = opponent;
             state.phase = Phase::Discard {
                 player: opponent,
                 remaining: opp_total / 2,
+                roller,
             };
         } else {
             state.phase = Phase::MoveRobber;
@@ -581,7 +584,12 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
 }
 
 fn apply_discard_resource(state: &mut GameState, resource: Resource) {
-    if let Phase::Discard { player, remaining } = state.phase {
+    if let Phase::Discard {
+        player,
+        remaining,
+        roller,
+    } = state.phase
+    {
         state.players[player].hand[resource] -= 1;
         state.bank[resource] += 1;
 
@@ -590,17 +598,21 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
             state.phase = Phase::Discard {
                 player,
                 remaining: new_remaining,
+                roller,
             };
         } else {
-            // Check if the opponent also needs to discard
-            let opponent = player.opponent();
-            let opp_total = state.players[opponent].hand.total();
-            if opp_total > DISCARD_THRESHOLD {
+            // Check if the other player also needs to discard
+            let other = player.opponent();
+            let other_total = state.players[other].hand.total();
+            if other_total > DISCARD_THRESHOLD {
+                state.current_player = other;
                 state.phase = Phase::Discard {
-                    player: opponent,
-                    remaining: opp_total / 2,
+                    player: other,
+                    remaining: other_total / 2,
+                    roller,
                 };
             } else {
+                state.current_player = roller;
                 state.phase = Phase::MoveRobber;
             }
         }
@@ -1242,7 +1254,8 @@ mod tests {
                 state.phase,
                 Phase::Discard {
                     player: Player::One,
-                    remaining: 5
+                    remaining: 5,
+                    ..
                 }
             ),
             "P1 with 10 cards should discard 5, got {:?}",
