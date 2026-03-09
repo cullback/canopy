@@ -279,6 +279,7 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
                 full_search: is_full_search,
                 move_number: turn_count,
                 game_length: 0, // backfilled at game end
+                network_value: result.network_value * current.sign(),
                 value_correction,
                 q_std,
                 prior_agrees,

@@ -37,6 +37,8 @@ pub struct Sample {
     pub move_number: u32,
     /// Total game length (backfilled after game ends).
     pub game_length: u32,
+    /// Raw network value for this position (current player's perspective).
+    pub network_value: f32,
     /// |Q_search - V_network| — how much search corrected the network's value.
     pub value_correction: f32,
     /// Std of Q values across visited root children (value head discriminative power).
@@ -397,6 +399,7 @@ pub fn run_training<G, M>(
             avg_q_std: stats.avg_q_std,
             avg_value_error_early: stats.avg_value_error_early,
             avg_value_error_late: stats.avg_value_error_late,
+            stddev_network_value: stats.stddev_network_value,
             // Benchmark
             bench_wins,
             bench_losses,

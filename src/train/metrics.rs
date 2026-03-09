@@ -104,6 +104,10 @@ pub(super) struct CsvRow {
     /// Mean |Q − Z| for second-half-of-game positions.
     #[serde(serialize_with = "round6::f64")]
     pub avg_value_error_late: f64,
+    /// Stddev of raw network value outputs. Near zero = value head outputs
+    /// a constant; spread comparable to stddev_q = actually differentiating.
+    #[serde(serialize_with = "round6::f64")]
+    pub stddev_network_value: f64,
 
     // ── Benchmark ────────────────────────────────────────────────────
     pub bench_wins: u32,
@@ -249,6 +253,9 @@ pub(super) struct IterStats {
     pub avg_value_error_early: f64,
     /// Mean |q - z| for late-game samples (move_number > game_length / 2).
     pub avg_value_error_late: f64,
+    /// Stddev of raw network value outputs. Near zero means the value head
+    /// is outputting a constant; healthy spread means it differentiates positions.
+    pub stddev_network_value: f64,
 }
 
 pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
@@ -267,6 +274,7 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
             avg_q_std: 0.0,
             avg_value_error_early: 0.0,
             avg_value_error_late: 0.0,
+            stddev_network_value: 0.0,
         };
     }
 
@@ -358,6 +366,14 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         0.0
     };
 
+    let sum_nv: f64 = samples.iter().map(|s| s.network_value as f64).sum();
+    let mean_nv = sum_nv / n;
+    let var_nv: f64 = samples
+        .iter()
+        .map(|s| (s.network_value as f64 - mean_nv).powi(2))
+        .sum::<f64>()
+        / n;
+
     IterStats {
         avg_entropy,
         avg_z: mean_z,
@@ -372,5 +388,6 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         avg_q_std,
         avg_value_error_early,
         avg_value_error_late,
+        stddev_network_value: var_nv.sqrt(),
     }
 }
