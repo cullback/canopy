@@ -183,7 +183,7 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
             mcts_sims: 800,
             mcts_sims_start: 400,
             bench_games: 20,
-            bench_interval: 20,
+            bench_interval: 10,
             bench_baseline_sims: 800,
             ..TrainConfig::default()
         },
