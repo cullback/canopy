@@ -29,13 +29,22 @@ use game::dice::Dice;
 use game::state::GameState;
 
 fn app() -> Command {
+    let mut viz = Command::new("visualize")
+        .about("Convert a game log to an HTML visualization")
+        .arg(Arg::new("log-file").required(true));
+
+    #[cfg(feature = "nn")]
+    {
+        viz = viz.arg(
+            Arg::new("encoder")
+                .long("encoder")
+                .help("Embed encoder features in the visualization (gnn or gnn2)"),
+        );
+    }
+
     let mut cmd = Command::new("catan")
         .about("Catan tournament between two MCTS bots")
-        .subcommand(
-            Command::new("visualize")
-                .about("Convert a game log to an HTML visualization")
-                .arg(Arg::new("log-file").required(true)),
-        );
+        .subcommand(viz);
 
     // Train subcommand (always visible, but requires nn feature to run)
     #[cfg(feature = "nn")]
@@ -128,6 +137,14 @@ fn main() {
         let log_path = std::path::PathBuf::from(sub.get_one::<String>("log-file").unwrap());
         let game_log = GameLog::read(&log_path);
         let html_path = log_path.with_extension("html");
+
+        #[cfg(feature = "nn")]
+        if let Some(enc) = sub.get_one::<String>("encoder") {
+            render_with_encoder_dispatch(enc, &game_log, &html_path);
+            println!("Wrote {} (with {} features)", html_path.display(), enc);
+            return;
+        }
+
         visualize::render(&game_log, &html_path);
         println!("Wrote {}", html_path.display());
         return;
@@ -142,6 +159,136 @@ fn main() {
 
     // Tournament mode
     run_tournament(&matches);
+}
+
+#[cfg(feature = "nn")]
+fn render_with_encoder_dispatch(encoder_type: &str, log: &GameLog, output: &std::path::Path) {
+    let res = ["lumber", "brick", "wool", "grain", "ore"];
+
+    // Phase labels (7)
+    let phase_labels: Vec<String> = [
+        "phase_settlement",
+        "phase_road",
+        "phase_pre_roll",
+        "phase_discard",
+        "phase_robber",
+        "phase_main",
+        "phase_road_building",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    // Per-player standard labels (21)
+    let player_std = |prefix: &str| -> Vec<String> {
+        let mut v = Vec::new();
+        for r in &res {
+            v.push(format!("{prefix}_{r}"));
+        }
+        for d in ["dev_knight", "dev_vp", "dev_rb", "dev_yop", "dev_monopoly"] {
+            v.push(format!("{prefix}_{d}"));
+        }
+        for d in [
+            "played_knight",
+            "played_vp",
+            "played_rb",
+            "played_yop",
+            "played_monopoly",
+        ] {
+            v.push(format!("{prefix}_{d}"));
+        }
+        v.push(format!("{prefix}_settlements_left"));
+        v.push(format!("{prefix}_cities_left"));
+        v.push(format!("{prefix}_roads_left"));
+        v.push(format!("{prefix}_longest_road"));
+        v.push(format!("{prefix}_largest_army"));
+        v.push(format!("{prefix}_road_length"));
+        v
+    };
+
+    match encoder_type {
+        "gnn" => {
+            // Global: phase(7) + player_std(21×2) = 49
+            let mut global_labels = phase_labels.clone();
+            global_labels.extend(player_std("cur"));
+            global_labels.extend(player_std("opp"));
+
+            // Per-node (24): building(2) + prod(5) + robbed(5) + port(6) + road(6)
+            let mut node_labels = vec!["building_cur".into(), "building_opp".into()];
+            for r in &res {
+                node_labels.push(format!("prod_{r}"));
+            }
+            for r in &res {
+                node_labels.push(format!("robbed_{r}"));
+            }
+            for r in &res {
+                node_labels.push(format!("port_{r}"));
+            }
+            node_labels.push("port_generic".into());
+            for i in 0..3 {
+                node_labels.push(format!("road{i}_cur"));
+                node_labels.push(format!("road{i}_opp"));
+            }
+
+            visualize::render_with_encoder::<encoder::GnnEncoder>(
+                log,
+                output,
+                global_labels,
+                node_labels,
+            );
+        }
+        "gnn2" => {
+            // Global: phase(7) + player_std(21×2) + player_ext(26×2) = 101
+            let mut global_labels = phase_labels;
+            global_labels.extend(player_std("cur"));
+            global_labels.extend(player_std("opp"));
+
+            // Extended per-player labels (26)
+            let player_ext = |prefix: &str| -> Vec<String> {
+                let mut v = Vec::new();
+                for r in &res {
+                    v.push(format!("{prefix}_trade_{r}"));
+                }
+                for r in &res {
+                    v.push(format!("{prefix}_prod_{r}"));
+                }
+                for r in &res {
+                    v.push(format!("{prefix}_robbed_{r}"));
+                }
+                for n in 2..=12u8 {
+                    v.push(format!("{prefix}_num_{n}"));
+                }
+                v
+            };
+            global_labels.extend(player_ext("cur"));
+            global_labels.extend(player_ext("opp"));
+
+            // Per-node (34): building(2) + tile_slot×3(21) + port(5) + road(6)
+            let mut node_labels: Vec<String> = vec!["building_cur".into(), "building_opp".into()];
+            for i in 0..3 {
+                for r in &res {
+                    node_labels.push(format!("t{i}_{r}"));
+                }
+                node_labels.push(format!("t{i}_number"));
+                node_labels.push(format!("t{i}_robber"));
+            }
+            for r in &res {
+                node_labels.push(format!("port_{r}"));
+            }
+            for i in 0..3 {
+                node_labels.push(format!("road{i}_cur"));
+                node_labels.push(format!("road{i}_opp"));
+            }
+
+            visualize::render_with_encoder::<encoder::Gnn2Encoder>(
+                log,
+                output,
+                global_labels,
+                node_labels,
+            );
+        }
+        other => panic!("unknown encoder '{other}', expected 'gnn' or 'gnn2'"),
+    }
 }
 
 #[cfg(feature = "nn")]

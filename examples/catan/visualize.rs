@@ -27,6 +27,19 @@ struct ReplayData {
     result: String,
     bot1: String,
     bot2: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    features: Option<ReplayFeatures>,
+}
+
+#[derive(Serialize)]
+struct ReplayFeatures {
+    global_labels: Vec<String>,
+    node_labels: Vec<String>,
+    global_len: usize,
+    nodes_f: usize,
+    /// Which player's perspective each frame is encoded from (0 or 1).
+    perspectives: Vec<u8>,
+    frames: Vec<Vec<f32>>,
 }
 
 #[derive(Serialize)]
@@ -455,6 +468,144 @@ pub fn render(log: &GameLog, output: &Path) {
         result,
         bot1: "P1".to_string(),
         bot2: "P2".to_string(),
+        features: None,
+    };
+
+    let json = serde_json::to_string(&data).expect("failed to serialize replay data");
+    let html = include_str!("visualize_template.html").replace("\"__REPLAY_DATA__\"", &json);
+    std::fs::write(output, html).expect("failed to write HTML file");
+}
+
+/// Whether the encoder can handle this phase (chance nodes and game-over are excluded).
+fn is_encodable_phase(state: &GameState) -> bool {
+    !matches!(
+        state.phase,
+        Phase::Roll | Phase::StealResolve | Phase::GameOver(_)
+    )
+}
+
+/// Render a game log with per-frame encoder features embedded in the HTML.
+#[cfg(feature = "nn")]
+pub fn render_with_encoder<E: canopy2::nn::StateEncoder<GameState>>(
+    log: &GameLog,
+    output: &Path,
+    global_labels: Vec<String>,
+    node_labels: Vec<String>,
+) {
+    let mut state = game::new_game(log.seed, Dice::Random);
+    let board = build_board(&state);
+
+    let global_len = global_labels.len();
+    let nodes_f = node_labels.len();
+    let feature_size = E::FEATURE_SIZE;
+
+    let mut buf = Vec::with_capacity(feature_size);
+    let mut feature_frames = Vec::new();
+    let mut perspectives = Vec::new();
+
+    let encode_frame = |state: &GameState, buf: &mut Vec<f32>| -> Vec<f32> {
+        if is_encodable_phase(state) {
+            E::encode(state, buf);
+            // Round to 3 decimals to reduce JSON size
+            buf.iter().map(|v| (v * 1000.0).round() / 1000.0).collect()
+        } else {
+            vec![0.0; feature_size]
+        }
+    };
+
+    // Frame 0
+    let mut frames = vec![capture_frame(&state, "Game start", 0, None)];
+    feature_frames.push(encode_frame(&state, &mut buf));
+    perspectives.push(state.current_player as u8);
+
+    for &action in &log.actions {
+        let player = state.current_player as u8;
+
+        if matches!(state.phase, Phase::Roll) {
+            // Chance node — Roll phase is unencodable, encode after
+            let roll = (action + 2) as u8;
+            let hands_before = [
+                state.players[Player::One].hand.0,
+                state.players[Player::Two].hand.0,
+            ];
+            state.apply_action(action);
+
+            let player_name = if player == 0 { "P1" } else { "P2" };
+            let mut desc = format!("{player_name}: Roll dice \u{2192} {roll}");
+            let mut lines = Vec::new();
+            format_dice_production(&state, &hands_before, roll, &mut lines);
+            for line in &lines {
+                desc.push('\n');
+                desc.push_str(line);
+            }
+            frames.push(capture_frame(&state, &desc, player, Some(roll)));
+            feature_frames.push(encode_frame(&state, &mut buf));
+            perspectives.push(state.current_player as u8);
+        } else if matches!(state.phase, Phase::StealResolve) {
+            // Chance node — folds into previous frame, re-encode with steal result
+            let acting = state.current_player;
+            let hands_before = [
+                state.players[Player::One].hand.0,
+                state.players[Player::Two].hand.0,
+            ];
+            state.apply_action(action);
+
+            let mut lines = Vec::new();
+            format_steal_result(&state, &hands_before, &mut lines);
+            if let Some(prev) = frames.last_mut() {
+                let mut desc = prev.action.clone();
+                for line in &lines {
+                    desc.push('\n');
+                    desc.push_str(line);
+                }
+                *prev = capture_frame(&state, &desc, prev.player, prev.last_roll);
+            }
+            // Re-encode from the robber-mover's perspective with updated resources
+            let next = state.current_player;
+            state.current_player = acting;
+            if let Some(last) = feature_frames.last_mut() {
+                *last = encode_frame(&state, &mut buf);
+            }
+            state.current_player = next;
+        } else {
+            // Player action — encode AFTER applying, from acting player's perspective
+            let action_id = ActionId(action as u8);
+            let desc = format_action(action_id, &state);
+            let acting = state.current_player;
+            state.apply_action(action);
+
+            // Temporarily restore acting player's perspective for encoding
+            let next = state.current_player;
+            state.current_player = acting;
+            let feat = encode_frame(&state, &mut buf);
+            state.current_player = next;
+
+            frames.push(capture_frame(&state, &desc, player, None));
+            feature_frames.push(feat);
+            perspectives.push(player);
+        }
+    }
+
+    let result = match &state.phase {
+        Phase::GameOver(Player::One) => "P1 wins!".to_string(),
+        Phase::GameOver(Player::Two) => "P2 wins!".to_string(),
+        _ => "Game in progress".to_string(),
+    };
+
+    let data = ReplayData {
+        board,
+        frames,
+        result,
+        bot1: "P1".to_string(),
+        bot2: "P2".to_string(),
+        features: Some(ReplayFeatures {
+            global_labels,
+            node_labels,
+            global_len,
+            nodes_f,
+            perspectives,
+            frames: feature_frames,
+        }),
     };
 
     let json = serde_json::to_string(&data).expect("failed to serialize replay data");
