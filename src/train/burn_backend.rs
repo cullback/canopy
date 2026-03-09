@@ -343,10 +343,10 @@ where
         pb.finish();
 
         TrainMetrics {
-            train_policy_loss: final_train_ploss,
-            train_value_loss: final_train_vloss,
-            val_policy_loss: final_val_ploss,
-            val_value_loss: final_val_vloss,
+            loss_policy_train: final_train_ploss,
+            loss_value_train: final_train_vloss,
+            loss_policy_val: final_val_ploss,
+            loss_value_val: final_val_vloss,
             gradient_steps: total_gradient_steps,
         }
     }

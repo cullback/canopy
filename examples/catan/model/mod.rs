@@ -1,6 +1,8 @@
+mod gnn;
 mod resnet;
 mod simple;
 
+pub use gnn::{CatanGnnModel, CatanGnnModelConfig};
 pub use resnet::CatanResModelConfig;
 pub use simple::{CatanModel, CatanModelConfig};
 

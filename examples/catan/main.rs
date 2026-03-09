@@ -103,14 +103,14 @@ fn train_command() -> Command {
         .arg(
             Arg::new("model")
                 .long("model")
-                .default_value("resnet")
-                .help("Model architecture: simple or resnet"),
+                .default_value("gnn")
+                .help("Model architecture: simple, resnet, or gnn"),
         )
         .arg(
             Arg::new("encoder")
                 .long("encoder")
-                .default_value("rich")
-                .help("Encoder: basic (480 features) or rich (1490 features)"),
+                .default_value("gnn")
+                .help("Encoder: basic, rich, or gnn"),
         )
         .arg(
             Arg::new("balanced")
@@ -165,6 +165,20 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
             lr: 0.0005,
             batch_size: 256,
             replay_window: 20,
+            games_per_iter: 150,
+            mcts_sims: 800,
+            mcts_sims_start: 400,
+            bench_games: 20,
+            bench_interval: 20,
+            bench_baseline_sims: 800,
+            ..TrainConfig::default()
+        },
+        "gnn" => TrainConfig {
+            iterations: 1000,
+            epochs: 3,
+            lr: 0.001,
+            batch_size: 256,
+            replay_window: 10,
             games_per_iter: 150,
             mcts_sims: 800,
             mcts_sims_start: 400,
@@ -245,6 +259,12 @@ fn run_train(matches: &clap::ArgMatches) {
             train!(
                 encoder::RichNodeEncoder,
                 resnet_cfg!(encoder::RichNodeEncoder)
+            )
+        }
+        ("gnn", "gnn") => {
+            train!(
+                encoder::GnnEncoder,
+                model::CatanGnnModelConfig::new(GameState::NUM_ACTIONS)
             )
         }
         (m, e) => panic!("unknown model '{m}' or encoder '{e}'"),
@@ -369,6 +389,14 @@ fn load_nn_eval(checkpoint_path: &str, encoder_type: &str) -> Box<dyn Evaluator<
     match encoder_type {
         "basic" => load!(encoder::BasicEncoder),
         "rich" => load!(encoder::RichNodeEncoder),
-        other => panic!("unknown encoder '{other}', expected 'basic' or 'rich'"),
+        "gnn" => {
+            let mc = model::CatanGnnModelConfig::new(GameState::NUM_ACTIONS);
+            let model: model::CatanGnnModel<InferBackend> = mc.init(&device);
+            let model = model
+                .load_file(checkpoint_path, &recorder, &device)
+                .expect("failed to load nn checkpoint");
+            Box::new(NeuralEvaluator::<InferBackend, encoder::GnnEncoder, _>::new(model, device))
+        }
+        other => panic!("unknown encoder '{other}', expected 'basic', 'rich', or 'gnn'"),
     }
 }

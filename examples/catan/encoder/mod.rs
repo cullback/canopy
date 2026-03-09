@@ -72,9 +72,11 @@ use crate::game::state::{GameState, Phase, PlayerBoards};
 use crate::game::topology::Topology;
 
 mod basic;
+mod gnn;
 mod rich_node;
 
 pub use basic::BasicEncoder;
+pub use gnn::GnnEncoder;
 pub use rich_node::RichNodeEncoder;
 
 /// Dice probability for each sum (indices 2..=12, 0 and 1 unused).

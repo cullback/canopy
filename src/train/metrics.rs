@@ -29,85 +29,85 @@ pub(super) struct CsvRow {
     // ── Core training ────────────────────────────────────────────────
     pub iteration: usize,
     #[serde(serialize_with = "round6::f32")]
-    pub train_policy_loss: f32,
+    pub loss_policy_train: f32,
     #[serde(serialize_with = "round6::f32")]
-    pub train_value_loss: f32,
+    pub loss_value_train: f32,
     /// Validation policy loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
-    pub val_policy_loss: f32,
+    pub loss_policy_val: f32,
     /// Validation value loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
-    pub val_value_loss: f32,
+    pub loss_value_val: f32,
     /// Total optimizer updates across all epochs this iteration.
     pub gradient_steps: usize,
 
     // ── Self-play game stats ─────────────────────────────────────────
     #[serde(serialize_with = "round6::f64")]
-    pub avg_game_length: f64,
+    pub game_length_avg: f64,
     /// Spread of game lengths. Collapse toward zero signals a degenerate
     /// strategy; bimodal distributions show up as high stddev.
     #[serde(serialize_with = "round6::f64")]
     pub game_length_stddev: f64,
-    pub min_game_length: u32,
-    pub max_game_length: u32,
-    pub p1_wins: u32,
-    pub p2_wins: u32,
-    pub draws: u32,
+    pub game_length_min: u32,
+    pub game_length_max: u32,
+    pub game_p1_wins: u32,
+    pub game_p2_wins: u32,
+    pub game_draws: u32,
 
     // ── Policy diagnostics ───────────────────────────────────────────
     /// Entropy of the MCTS improved policy (training target). Healthy runs
     /// dip then plateau; collapse to ~0 means exploration is dead.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_policy_entropy: f64,
+    pub policy_entropy_avg: f64,
     /// Average max probability in the improved policy. Complement of entropy:
     /// high values mean the policy concentrates on a single move.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_policy_max_prob: f64,
+    pub policy_max_prob_avg: f64,
     /// Entropy restricted to positions with ≥6 legal actions, filtering out
     /// forced/near-forced moves that naturally have low entropy.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_entropy_high_branch: f64,
+    pub policy_entropy_high_branch_avg: f64,
     /// Max prob restricted to positions with ≥6 legal actions.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_max_prob_high_branch: f64,
+    pub policy_max_prob_high_branch_avg: f64,
     /// Fraction of moves where network's top-1 matches MCTS's selected action.
     /// Should rise over training; plateau at ~40-50% means the network isn't
     /// distilling search. Jump to ~95%+ early means search isn't contributing.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_policy_agreement: f64,
+    pub policy_agreement_avg: f64,
 
     // ── Value diagnostics ────────────────────────────────────────────
     /// Mean game outcome (Z) from current player's perspective. Near 0 =
     /// balanced play; persistent bias means one side is stronger.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_z: f64,
+    pub value_z_avg: f64,
     /// Mean MCTS root Q from current player's perspective.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_q: f64,
+    pub value_q_avg: f64,
     #[serde(serialize_with = "round6::f64")]
-    pub stddev_z: f64,
+    pub value_z_stddev: f64,
     #[serde(serialize_with = "round6::f64")]
-    pub stddev_q: f64,
+    pub value_q_stddev: f64,
     /// Mean |Q_search − V_network|. How much search corrects the raw network
     /// value. Should shrink over training but never reach zero.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_value_correction: f64,
+    pub value_correction_avg: f64,
     /// Std of Q values across visited root children. Measures value head
     /// discriminative power: very small = can't distinguish moves, very
     /// large = playing refutation-style (one good move, rest terrible).
     #[serde(serialize_with = "round6::f64")]
-    pub avg_q_std: f64,
+    pub value_q_spread_avg: f64,
     /// Mean |Q − Z| for first-half-of-game positions. Compare with late to
     /// catch the failure mode where openings are confidently wrong.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_value_error_early: f64,
+    pub value_error_early_avg: f64,
     /// Mean |Q − Z| for second-half-of-game positions.
     #[serde(serialize_with = "round6::f64")]
-    pub avg_value_error_late: f64,
+    pub value_error_late_avg: f64,
     /// Stddev of raw network value outputs. Near zero = value head outputs
-    /// a constant; spread comparable to stddev_q = actually differentiating.
+    /// a constant; spread comparable to value_q_stddev = actually differentiating.
     #[serde(serialize_with = "round6::f64")]
-    pub stddev_network_value: f64,
+    pub value_network_stddev: f64,
 
     // ── Benchmark ────────────────────────────────────────────────────
     pub bench_wins: u32,
@@ -125,15 +125,15 @@ pub(super) struct CsvRow {
     /// Effective MCTS simulations this iteration (may ramp up during warmup).
     pub mcts_sims: u32,
     /// Total samples in the replay buffer (across all retained iterations).
-    pub replay_buffer_samples: usize,
+    pub replay_samples: usize,
     /// Samples generated this iteration only.
-    pub samples_this_iter: usize,
+    pub samples_iter: usize,
     #[serde(serialize_with = "round6::f64")]
-    pub self_play_secs: f64,
+    pub time_selfplay_secs: f64,
     #[serde(serialize_with = "round6::f64")]
-    pub train_secs: f64,
+    pub time_train_secs: f64,
     #[serde(serialize_with = "round6::f64")]
-    pub bench_secs: f64,
+    pub time_bench_secs: f64,
 }
 
 pub(super) struct CsvLogger {
@@ -233,48 +233,48 @@ impl CsvLogger {
 }
 
 pub(super) struct IterStats {
-    pub avg_entropy: f64,
-    pub avg_z: f64,
-    pub avg_q: f64,
-    pub stddev_z: f64,
-    pub stddev_q: f64,
-    pub avg_policy_max_prob: f64,
+    pub policy_entropy_avg: f64,
+    pub policy_max_prob_avg: f64,
     /// Entropy averaged over samples with ≥6 legal actions.
-    pub avg_entropy_high_branch: f64,
+    pub policy_entropy_high_branch_avg: f64,
     /// Max policy prob averaged over samples with ≥6 legal actions.
-    pub avg_max_prob_high_branch: f64,
+    pub policy_max_prob_high_branch_avg: f64,
     /// Fraction of moves where network top-1 == MCTS selected action.
-    pub avg_policy_agreement: f64,
+    pub policy_agreement_avg: f64,
+    pub value_z_avg: f64,
+    pub value_q_avg: f64,
+    pub value_z_stddev: f64,
+    pub value_q_stddev: f64,
     /// Mean |Q_search - V_network|.
-    pub avg_value_correction: f64,
+    pub value_correction_avg: f64,
     /// Mean std of Q across visited root children.
-    pub avg_q_std: f64,
+    pub value_q_spread_avg: f64,
     /// Mean |q - z| for early-game samples (move_number <= game_length / 2).
-    pub avg_value_error_early: f64,
+    pub value_error_early_avg: f64,
     /// Mean |q - z| for late-game samples (move_number > game_length / 2).
-    pub avg_value_error_late: f64,
+    pub value_error_late_avg: f64,
     /// Stddev of raw network value outputs. Near zero means the value head
     /// is outputting a constant; healthy spread means it differentiates positions.
-    pub stddev_network_value: f64,
+    pub value_network_stddev: f64,
 }
 
 pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     if samples.is_empty() {
         return IterStats {
-            avg_entropy: 0.0,
-            avg_z: 0.0,
-            avg_q: 0.0,
-            stddev_z: 0.0,
-            stddev_q: 0.0,
-            avg_policy_max_prob: 0.0,
-            avg_entropy_high_branch: 0.0,
-            avg_max_prob_high_branch: 0.0,
-            avg_policy_agreement: 0.0,
-            avg_value_correction: 0.0,
-            avg_q_std: 0.0,
-            avg_value_error_early: 0.0,
-            avg_value_error_late: 0.0,
-            stddev_network_value: 0.0,
+            policy_entropy_avg: 0.0,
+            policy_max_prob_avg: 0.0,
+            policy_entropy_high_branch_avg: 0.0,
+            policy_max_prob_high_branch_avg: 0.0,
+            policy_agreement_avg: 0.0,
+            value_z_avg: 0.0,
+            value_q_avg: 0.0,
+            value_z_stddev: 0.0,
+            value_q_stddev: 0.0,
+            value_correction_avg: 0.0,
+            value_q_spread_avg: 0.0,
+            value_error_early_avg: 0.0,
+            value_error_late_avg: 0.0,
+            value_network_stddev: 0.0,
         };
     }
 
@@ -375,19 +375,19 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         / n;
 
     IterStats {
-        avg_entropy,
-        avg_z: mean_z,
-        avg_q: mean_q,
-        stddev_z: var_z.sqrt(),
-        stddev_q: var_q.sqrt(),
-        avg_policy_max_prob,
-        avg_entropy_high_branch: hb_entropy_sum / hb_n,
-        avg_max_prob_high_branch: hb_max_prob_sum / hb_n,
-        avg_policy_agreement,
-        avg_value_correction,
-        avg_q_std,
-        avg_value_error_early,
-        avg_value_error_late,
-        stddev_network_value: var_nv.sqrt(),
+        policy_entropy_avg: avg_entropy,
+        policy_max_prob_avg: avg_policy_max_prob,
+        policy_entropy_high_branch_avg: hb_entropy_sum / hb_n,
+        policy_max_prob_high_branch_avg: hb_max_prob_sum / hb_n,
+        policy_agreement_avg: avg_policy_agreement,
+        value_z_avg: mean_z,
+        value_q_avg: mean_q,
+        value_z_stddev: var_z.sqrt(),
+        value_q_stddev: var_q.sqrt(),
+        value_correction_avg: avg_value_correction,
+        value_q_spread_avg: avg_q_std,
+        value_error_early_avg: avg_value_error_early,
+        value_error_late_avg: avg_value_error_late,
+        value_network_stddev: var_nv.sqrt(),
     }
 }

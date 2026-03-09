@@ -105,3 +105,4 @@ repos
 - <https://github.com/google-deepmind/mctx>
 - <https://github.com/gorisanson/quoridor-ai>
 - <https://github.com/Aenteas/MCTS>
+- <https://github.com/hzyhhzy/KataGomo>
