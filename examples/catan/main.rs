@@ -104,13 +104,13 @@ fn train_command() -> Command {
             Arg::new("model")
                 .long("model")
                 .default_value("gnn")
-                .help("Model architecture: simple, resnet, or gnn"),
+                .help("Model architecture: simple, resnet, gnn, or gnn2"),
         )
         .arg(
             Arg::new("encoder")
                 .long("encoder")
                 .default_value("gnn")
-                .help("Encoder: basic, rich, or gnn"),
+                .help("Encoder: basic, rich, gnn, or gnn2"),
         )
         .arg(
             Arg::new("balanced")
@@ -173,7 +173,7 @@ fn train_config(model: &str) -> canopy2::train::TrainConfig {
             bench_baseline_sims: 800,
             ..TrainConfig::default()
         },
-        "gnn" => TrainConfig {
+        "gnn" | "gnn2" => TrainConfig {
             iterations: 1000,
             epochs: 3,
             lr: 0.001,
@@ -266,6 +266,14 @@ fn run_train(matches: &clap::ArgMatches) {
                 encoder::GnnEncoder,
                 model::CatanGnnModelConfig::new(GameState::NUM_ACTIONS)
             )
+        }
+        ("gnn2", "gnn2") => {
+            let mc = model::CatanGnnModelConfig::new(GameState::NUM_ACTIONS);
+            let mut trainable = BurnTrainableModel::<GameState, encoder::Gnn2Encoder, _>::new(
+                move |dev| mc.init_with::<_, 101, 34>(dev),
+                &device,
+            );
+            canopy2::train::run_training::<GameState, _>(config, &mut trainable, new_state);
         }
         (m, e) => panic!("unknown model '{m}' or encoder '{e}'"),
     }
@@ -397,6 +405,14 @@ fn load_nn_eval(checkpoint_path: &str, encoder_type: &str) -> Box<dyn Evaluator<
                 .expect("failed to load nn checkpoint");
             Box::new(NeuralEvaluator::<InferBackend, encoder::GnnEncoder, _>::new(model, device))
         }
-        other => panic!("unknown encoder '{other}', expected 'basic', 'rich', or 'gnn'"),
+        "gnn2" => {
+            let mc = model::CatanGnnModelConfig::new(GameState::NUM_ACTIONS);
+            let model: model::CatanGnnModel<InferBackend, 101, 34> = mc.init_with(&device);
+            let model = model
+                .load_file(checkpoint_path, &recorder, &device)
+                .expect("failed to load nn checkpoint");
+            Box::new(NeuralEvaluator::<InferBackend, encoder::Gnn2Encoder, _>::new(model, device))
+        }
+        other => panic!("unknown encoder '{other}', expected 'basic', 'rich', 'gnn', or 'gnn2'"),
     }
 }

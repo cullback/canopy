@@ -16,10 +16,8 @@ use crate::game::topology::Topology;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
 const HIDDEN: usize = 128;
-const GLOBAL_LEN: usize = 49;
 const GLOBAL_HIDDEN: usize = 64;
 const NUM_LAYERS: usize = 4;
-const NODES_F: usize = 24;
 
 // ── Static graph topology ────────────────────────────────────────────
 
@@ -119,7 +117,7 @@ impl<B: Backend> GnnLayer<B> {
 // ── GNN Model ────────────────────────────────────────────────────────
 
 #[derive(Module, Debug)]
-pub struct CatanGnnModel<B: Backend> {
+pub struct CatanGnnModel<B: Backend, const GLOBAL_LEN: usize = 49, const NODES_F: usize = 24> {
     // Input projections
     global_proj: Linear<B>,
     node_proj: Linear<B>,
@@ -158,6 +156,13 @@ pub struct CatanGnnModelConfig {
 
 impl CatanGnnModelConfig {
     pub fn init<B: Backend>(&self, device: &B::Device) -> CatanGnnModel<B> {
+        self.init_with(device)
+    }
+
+    pub fn init_with<B: Backend, const GL: usize, const NF: usize>(
+        &self,
+        device: &B::Device,
+    ) -> CatanGnnModel<B, GL, NF> {
         let num_other = self.num_actions - NUM_NODES - NUM_EDGES - NUM_NODES;
         let graph = graph_data();
 
@@ -180,8 +185,8 @@ impl CatanGnnModelConfig {
         );
 
         CatanGnnModel {
-            global_proj: LinearConfig::new(GLOBAL_LEN, GLOBAL_HIDDEN).init(device),
-            node_proj: LinearConfig::new(NODES_F, HIDDEN).init(device),
+            global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
+            node_proj: LinearConfig::new(NF, HIDDEN).init(device),
             inject_proj: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
             inject_norm: LayerNormConfig::new(HIDDEN).init(device),
 
@@ -205,7 +210,9 @@ impl CatanGnnModelConfig {
     }
 }
 
-impl<B: Backend> PolicyValueNet<B> for CatanGnnModel<B> {
+impl<B: Backend, const GLOBAL_LEN: usize, const NODES_F: usize> PolicyValueNet<B>
+    for CatanGnnModel<B, GLOBAL_LEN, NODES_F>
+{
     fn forward(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let [batch, _] = input.dims();
 

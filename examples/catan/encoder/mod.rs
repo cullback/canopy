@@ -73,10 +73,12 @@ use crate::game::topology::Topology;
 
 mod basic;
 mod gnn;
+mod gnn2;
 mod rich_node;
 
 pub use basic::BasicEncoder;
 pub use gnn::GnnEncoder;
+pub use gnn2::Gnn2Encoder;
 pub use rich_node::RichNodeEncoder;
 
 /// Dice probability for each sum (indices 2..=12, 0 and 1 unused).
