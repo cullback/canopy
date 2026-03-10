@@ -147,23 +147,34 @@ impl BalancedDice {
     fn apply_seven_adjustment(&self, weights: &mut [f32; 11], current_player: Player) {
         let seven_idx = 5; // sum 7 is at index 5
 
-        // Streak penalty: if same player rolled consecutive 7s
-        if self.seven_streak_player == current_player as u8 && self.seven_streak_count > 0 {
-            let penalty = 1.0 - PROB_REDUCTION_SEVEN_STREAK * self.seven_streak_count as f32;
-            weights[seven_idx] *= penalty.max(0.0);
-        }
+        // Streak adjustment: reduce if current player is on a 7-streak,
+        // boost if the OTHER player is on a 7-streak
+        let streak_adj = if self.seven_streak_count > 0 {
+            let magnitude = PROB_REDUCTION_SEVEN_STREAK * self.seven_streak_count as f32;
+            if self.seven_streak_player == current_player as u8 {
+                -magnitude // current player streaking -> suppress
+            } else {
+                magnitude // other player streaking -> boost
+            }
+        } else {
+            0.0
+        };
 
         // Imbalance adjustment: push toward equal share of 7s
-        let total = self.total_sevens[0] + self.total_sevens[1];
-        if total > 0 {
-            let my_sevens = self.total_sevens[current_player as usize] as f32;
-            let expected = total as f32 / 2.0;
-            if my_sevens > expected {
-                // This player has rolled too many 7s, reduce probability
-                let excess = (my_sevens - expected) / total as f32;
-                weights[seven_idx] *= (1.0 - excess).max(0.1);
-            }
-        }
+        // Activates once total sevens >= num_players (2 for 2p)
+        let total_sevens = self.total_sevens[0] + self.total_sevens[1];
+        let imbalance_adj = if total_sevens >= 2 {
+            let total = total_sevens as f32;
+            let ideal_share = 0.5; // 1 / num_players for 2p
+            let actual_share = self.total_sevens[current_player as usize] as f32 / total;
+            1.0 + (ideal_share - actual_share) / ideal_share
+        } else {
+            1.0
+        };
+
+        // Combined: additive, clamped to [0, 2]
+        let combined = (imbalance_adj + streak_adj).clamp(0.0, 2.0);
+        weights[seven_idx] *= combined;
     }
 
     pub fn draw(&mut self, sum: u8, current_player: Player) {
@@ -189,7 +200,7 @@ impl BalancedDice {
         }
         self.recent_count[idx] += 1;
 
-        // Update seven tracking
+        // Update seven tracking (only on 7s — non-7 rolls leave streak untouched)
         if sum == 7 {
             let pid = current_player as usize;
             self.total_sevens[pid] += 1;
@@ -199,9 +210,6 @@ impl BalancedDice {
                 self.seven_streak_player = current_player as u8;
                 self.seven_streak_count = 1;
             }
-        } else {
-            self.seven_streak_count = 0;
-            self.seven_streak_player = 0xFF;
         }
     }
 
