@@ -1,15 +1,16 @@
-//! # Gnn2Encoder (1937 features)
+//! # Gnn2Encoder (1949 features)
 //!
 //! Restructured GNN encoder that preserves tile-level identity and adds
 //! global production/trade features.
 //!
-//! ## Global (101 features)
+//! ## Global (113 features)
 //!
 //! | Block               | Count | Source                    |
 //! |---------------------|-------|---------------------------|
 //! | Phase one-hot       |     7 | `encode_phase` (shared)   |
 //! | Per-player std × 2  |    42 | `encode_player` (shared)  |
 //! | Per-player ext × 2  |    52 | `encode_player_extended`  |
+//! | Dice state          |    12 | `encode_dice`             |
 //!
 //! ### Per-player extended features (26)
 //!
@@ -32,9 +33,25 @@
 use canopy2::nn::StateEncoder;
 
 use crate::game::board::Port;
+use crate::game::dice::Dice;
 use crate::game::state::GameState;
 
 use super::{PIPS, encode_phase, encode_player, node_value};
+
+/// Random dice weights (unnormalized): [1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1], total 36.
+const RANDOM_DICE_PROBS: [f32; 11] = [
+    1.0 / 36.0,
+    2.0 / 36.0,
+    3.0 / 36.0,
+    4.0 / 36.0,
+    5.0 / 36.0,
+    6.0 / 36.0,
+    5.0 / 36.0,
+    4.0 / 36.0,
+    3.0 / 36.0,
+    2.0 / 36.0,
+    1.0 / 36.0,
+];
 
 /// Maximum production normalization: MAX_NODE_PIPS (13) × city weight (2) = 26.
 const MAX_PRODUCTION: f32 = 26.0;
@@ -120,11 +137,34 @@ fn encode_player_extended(
     }
 }
 
+/// Push dice state features (12): roll probabilities (11) + deck fraction (1).
+fn encode_dice(state: &GameState, out: &mut Vec<f32>) {
+    match &state.dice {
+        Dice::Random => {
+            out.extend_from_slice(&RANDOM_DICE_PROBS);
+            out.push(1.0);
+        }
+        Dice::Balanced(b) => {
+            let ws = b.weights(state.current_player);
+            let total: u32 = ws.iter().map(|(_, w)| w).sum();
+            if total > 0 {
+                let inv = 1.0 / total as f32;
+                for &(_, w) in &ws {
+                    out.push(w as f32 * inv);
+                }
+            } else {
+                out.extend_from_slice(&RANDOM_DICE_PROBS);
+            }
+            out.push(b.cards_left() as f32 / 36.0);
+        }
+    }
+}
+
 impl StateEncoder<GameState> for Gnn2Encoder {
-    // Global: 7 + 42 + 52 = 101
+    // Global: 7 + 42 + 52 + 12 = 113
     // Node stream: 54 × 34 = 1836
-    // Total: 1937
-    const FEATURE_SIZE: usize = 1937;
+    // Total: 1949
+    const FEATURE_SIZE: usize = 1949;
 
     fn encode(state: &GameState, out: &mut Vec<f32>) {
         out.clear();
@@ -152,6 +192,9 @@ impl StateEncoder<GameState> for Gnn2Encoder {
         // Per-player extended (26 × 2 = 52)
         encode_player_extended(state, current, &tile_numbers, out);
         encode_player_extended(state, opp, &tile_numbers, out);
+
+        // Dice state (12)
+        encode_dice(state, out);
 
         // === Node stream (54 × 34 = 1836) ===
         let cur_board = &state.boards[current];
@@ -326,7 +369,7 @@ mod tests {
 
     // ── Feature offset helpers ───────────────────────────────────────
 
-    const GLOBAL_OFF: usize = 101;
+    const GLOBAL_OFF: usize = 113;
 
     fn node_feat(n: usize, f: usize) -> usize {
         GLOBAL_OFF + n * 34 + f

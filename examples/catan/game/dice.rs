@@ -4,8 +4,6 @@ const INITIAL_DECK: [u8; 11] = [1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 const TOTAL_CARDS: u8 = 36;
 const MIN_CARDS_RESHUFFLE: u8 = 13;
 const RECENT_MEMORY: usize = 5;
-const PROB_REDUCTION_RECENT: f32 = 0.34;
-const PROB_REDUCTION_SEVEN_STREAK: f32 = 0.4;
 
 #[derive(Clone, Copy, Debug)]
 pub enum Dice {
@@ -57,6 +55,10 @@ impl BalancedDice {
         }
     }
 
+    pub fn cards_left(&self) -> u8 {
+        self.cards_left
+    }
+
     /// Unnormalized integer weights for each dice outcome (index 0..11 → sum 2..12).
     pub fn weights(&self, current_player: Player) -> [(usize, u32); 11] {
         let deck = if self.cards_left < MIN_CARDS_RESHUFFLE {
@@ -79,46 +81,6 @@ impl BalancedDice {
         let mut result = [(0usize, 0u32); 11];
         for i in 0..11 {
             result[i] = (i, weights[i]);
-        }
-        result
-    }
-
-    pub fn probabilities(&self, current_player: Player) -> [(u32, f32); 11] {
-        let mut weights = [0.0f32; 11];
-
-        // Base probability from remaining deck counts
-        // If deck is nearly empty, use initial deck weights (reshuffle will happen at draw time)
-        if self.cards_left < MIN_CARDS_RESHUFFLE {
-            for i in 0..11 {
-                weights[i] = INITIAL_DECK[i] as f32;
-            }
-        } else {
-            for i in 0..11 {
-                weights[i] = self.deck[i] as f32;
-            }
-        }
-
-        // Recent-roll penalty
-        for i in 0..11 {
-            let penalty = 1.0 - PROB_REDUCTION_RECENT * self.recent_count[i] as f32;
-            weights[i] *= penalty.max(0.0);
-        }
-
-        // Seven-streak adjustment (index 5 = sum 7)
-        self.apply_seven_adjustment(&mut weights, current_player);
-
-        // Normalize
-        let total_weight: f32 = weights.iter().sum();
-        let mut result = [(0u32, 0.0f32); 11];
-        if total_weight > 0.0 {
-            for i in 0..11 {
-                result[i] = (i as u32, weights[i] / total_weight);
-            }
-        } else {
-            // Fallback: uniform over initial deck
-            for i in 0..11 {
-                result[i] = (i as u32, INITIAL_DECK[i] as f32 / TOTAL_CARDS as f32);
-            }
         }
         result
     }
@@ -170,82 +132,10 @@ impl BalancedDice {
 
     #[cfg(test)]
     pub fn roll(&mut self, rng: &mut fastrand::Rng, current_player: Player) -> u8 {
-        let mut weights = [0.0f32; 11];
-
-        // Base probability from remaining deck counts
-        // If deck is nearly empty, use initial deck weights (reshuffle will happen at draw time)
-        if self.cards_left < MIN_CARDS_RESHUFFLE {
-            for i in 0..11 {
-                weights[i] = INITIAL_DECK[i] as f32;
-            }
-        } else {
-            for i in 0..11 {
-                weights[i] = self.deck[i] as f32;
-            }
-        }
-
-        // Recent-roll penalty
-        for i in 0..11 {
-            let penalty = 1.0 - PROB_REDUCTION_RECENT * self.recent_count[i] as f32;
-            weights[i] *= penalty.max(0.0);
-        }
-
-        // Seven-streak adjustment (index 5 = sum 7)
-        self.apply_seven_adjustment(&mut weights, current_player);
-
-        // Weighted draw
-        let total_weight: f32 = weights.iter().sum();
-        if total_weight <= 0.0 {
-            // Fallback: pick uniformly from available deck slots
-            return self.fallback_draw(rng, current_player);
-        }
-
-        let mut pick = rng.f32() * total_weight;
-        let mut chosen = 10; // default to last
-        for i in 0..11 {
-            pick -= weights[i];
-            if pick <= 0.0 {
-                chosen = i;
-                break;
-            }
-        }
-
+        let chosen = self.sample(current_player, rng);
         let sum = (chosen + 2) as u8;
         self.draw(sum, current_player);
         sum
-    }
-
-    fn apply_seven_adjustment(&self, weights: &mut [f32; 11], current_player: Player) {
-        let seven_idx = 5; // sum 7 is at index 5
-
-        // Streak adjustment: reduce if current player is on a 7-streak,
-        // boost if the OTHER player is on a 7-streak
-        let streak_adj = if self.seven_streak_count > 0 {
-            let magnitude = PROB_REDUCTION_SEVEN_STREAK * self.seven_streak_count as f32;
-            if self.seven_streak_player == current_player as u8 {
-                -magnitude // current player streaking -> suppress
-            } else {
-                magnitude // other player streaking -> boost
-            }
-        } else {
-            0.0
-        };
-
-        // Imbalance adjustment: push toward equal share of 7s
-        // Activates once total sevens >= num_players (2 for 2p)
-        let total_sevens = self.total_sevens[0] + self.total_sevens[1];
-        let imbalance_adj = if total_sevens >= 2 {
-            let total = total_sevens as f32;
-            let ideal_share = 0.5; // 1 / num_players for 2p
-            let actual_share = self.total_sevens[current_player as usize] as f32 / total;
-            1.0 + (ideal_share - actual_share) / ideal_share
-        } else {
-            1.0
-        };
-
-        // Combined: additive, clamped to [0, 2]
-        let combined = (imbalance_adj + streak_adj).clamp(0.0, 2.0);
-        weights[seven_idx] *= combined;
     }
 
     pub fn draw(&mut self, sum: u8, current_player: Player) {
@@ -287,25 +177,6 @@ impl BalancedDice {
     fn reshuffle(&mut self) {
         self.deck = INITIAL_DECK;
         self.cards_left = TOTAL_CARDS;
-    }
-
-    #[cfg(test)]
-    fn fallback_draw(&mut self, rng: &mut fastrand::Rng, current_player: Player) -> u8 {
-        // Pick uniformly from remaining cards in deck
-        if self.cards_left == 0 {
-            self.reshuffle();
-        }
-        let pick = rng.u8(0..self.cards_left);
-        let mut count = 0u8;
-        for i in 0..11 {
-            count += self.deck[i];
-            if count > pick {
-                let sum = (i + 2) as u8;
-                self.draw(sum, current_player);
-                return sum;
-            }
-        }
-        unreachable!()
     }
 }
 
