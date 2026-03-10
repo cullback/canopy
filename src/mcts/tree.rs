@@ -36,11 +36,11 @@ impl Edge {
         }
     }
 
-    fn new_chance((action, prior): (usize, f32)) -> Self {
+    fn new_chance((action, weight): (usize, u32)) -> Self {
         Self {
             action,
             child: None,
-            prior,
+            prior: weight as f32,
             logit: 0.0,
             visits: 0,
             virtual_losses: 0,
@@ -91,7 +91,7 @@ struct NodeEntry {
 #[derive(Default)]
 pub(super) struct Bufs {
     pub actions: Vec<usize>,
-    pub chances: Vec<(usize, f32)>,
+    pub chances: Vec<(usize, u32)>,
     pub path: Vec<(NodeId, usize)>,
     /// Recycled path Vecs to avoid per-leaf allocation.
     spare_paths: Vec<Vec<(NodeId, usize)>>,
@@ -455,16 +455,17 @@ impl Tree {
             .and_then(|e| e.child)
     }
 
-    /// Sample a chance edge proportional to priors.
+    /// Sample a chance edge proportional to weights (stored as f32 in `prior`).
     pub fn sample_chance_edge(&self, node: NodeId, rng: &mut fastrand::Rng) -> usize {
         let edges = self.edges(node);
-        let total: f32 = edges.iter().map(|e| e.prior).sum();
-        let mut r = rng.f32() * total;
+        let total: u32 = edges.iter().map(|e| e.prior as u32).sum();
+        let mut r = rng.u32(0..total);
         for (i, edge) in edges.iter().enumerate() {
-            r -= edge.prior;
-            if r <= 0.0 {
+            let w = edge.prior as u32;
+            if r < w {
                 return i;
             }
+            r -= w;
         }
         edges.len() - 1
     }
@@ -497,13 +498,13 @@ mod tests {
             None,
             NodeKind::Terminal,
             0.0,
-            std::iter::once(Edge::new_chance((0, 1.0))),
+            std::iter::once(Edge::new_chance((0, 1))),
         );
         let b = tree.insert(
             None,
             NodeKind::Terminal,
             0.0,
-            std::iter::once(Edge::new_chance((0, 1.0))),
+            std::iter::once(Edge::new_chance((0, 1))),
         );
         let c = tree.insert(None, NodeKind::Terminal, 0.0, std::iter::empty());
 

@@ -34,18 +34,18 @@ pub fn new_game(seed: u64, dice: Dice) -> GameState {
     GameState::from_seed(seed, dice)
 }
 
-const DICE_PROBS: [(usize, f32); 11] = [
-    (0, 1.0 / 36.0),
-    (1, 2.0 / 36.0),
-    (2, 3.0 / 36.0),
-    (3, 4.0 / 36.0),
-    (4, 5.0 / 36.0),
-    (5, 6.0 / 36.0),
-    (6, 5.0 / 36.0),
-    (7, 4.0 / 36.0),
-    (8, 3.0 / 36.0),
-    (9, 2.0 / 36.0),
-    (10, 1.0 / 36.0),
+const DICE_WEIGHTS: [(usize, u32); 11] = [
+    (0, 1),
+    (1, 2),
+    (2, 3),
+    (3, 4),
+    (4, 5),
+    (5, 6),
+    (6, 5),
+    (7, 4),
+    (8, 3),
+    (9, 2),
+    (10, 1),
 ];
 
 impl Game for GameState {
@@ -115,26 +115,25 @@ impl Game for GameState {
         }
     }
 
-    fn chance_outcomes(&self, buf: &mut Vec<(usize, f32)>) {
+    fn chance_outcomes(&self, buf: &mut Vec<(usize, u32)>) {
         match self.phase {
             Phase::Roll => match &self.dice {
-                Dice::Random => buf.extend_from_slice(&DICE_PROBS),
+                Dice::Random => buf.extend_from_slice(&DICE_WEIGHTS),
                 Dice::Balanced(b) => {
-                    for &(i, p) in &b.probabilities(self.current_player) {
-                        buf.push((i as usize, p));
+                    for (i, w) in b.weights(self.current_player) {
+                        if w > 0 {
+                            buf.push((i, w));
+                        }
                     }
                 }
             },
             Phase::StealResolve => {
                 let target = self.current_player.opponent();
                 let target_hand = &self.players[target].hand;
-                let total = target_hand.total() as f32;
-                if total > 0.0 {
-                    for (i, &r) in ALL_RESOURCES.iter().enumerate() {
-                        let count = target_hand[r];
-                        if count > 0 {
-                            buf.push((i, count as f32 / total));
-                        }
+                for (i, &r) in ALL_RESOURCES.iter().enumerate() {
+                    let count = target_hand[r];
+                    if count > 0 {
+                        buf.push((i, count as u32));
                     }
                 }
             }
@@ -144,16 +143,10 @@ impl Game for GameState {
 
     fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
         match self.phase {
-            Phase::Roll => {
-                let probs: [(usize, f32); 11] = match &self.dice {
-                    Dice::Random => DICE_PROBS,
-                    Dice::Balanced(b) => {
-                        let bp = b.probabilities(self.current_player);
-                        bp.map(|(i, p)| (i as usize, p))
-                    }
-                };
-                canopy2::utils::sample_weighted(&probs, rng)
-            }
+            Phase::Roll => match &self.dice {
+                Dice::Random => canopy2::utils::sample_weighted(&DICE_WEIGHTS, rng),
+                Dice::Balanced(b) => Some(b.sample(self.current_player, rng)),
+            },
             Phase::StealResolve => {
                 let target = self.current_player.opponent();
                 let target_hand = &self.players[target].hand;

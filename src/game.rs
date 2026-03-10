@@ -29,14 +29,14 @@ pub trait Game: Clone + Send + Sync {
 
     // ── Stochastic ────────────────────────────────────────────────
 
-    /// Fills `buf` with `(outcome, probability)` pairs. Probabilities must sum to 1.
+    /// Fills `buf` with `(outcome, weight)` pairs (unnormalized integer weights).
     /// An empty buffer means this is a decision node; non-empty means chance node.
     /// Outcomes are passed back to `apply_action` — the game knows it's in a chance
     /// state and interprets the `usize` accordingly.
     ///
     /// Used by MCTS to enumerate all chance branches. For sampling a single
     /// outcome, use [`sample_chance`](Game::sample_chance) instead.
-    fn chance_outcomes(&self, _buf: &mut Vec<(usize, f32)>) {}
+    fn chance_outcomes(&self, _buf: &mut Vec<(usize, u32)>) {}
 
     /// Sample a single chance outcome. Returns `None` for decision/terminal nodes.
     ///

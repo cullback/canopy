@@ -14,15 +14,17 @@ pub fn softmax_masked(logits: &[f32], indices: &[usize]) -> Vec<f32> {
 }
 
 /// Sample from a weighted `(item, weight)` slice. Returns `None` if empty.
-/// Weights need not sum to 1.
-pub fn sample_weighted(items: &[(usize, f32)], rng: &mut fastrand::Rng) -> Option<usize> {
-    let total: f32 = items.iter().map(|(_, p)| p).sum();
-    let mut r = rng.f32() * total;
-    for &(item, p) in items {
-        r -= p;
-        if r <= 0.0 {
+pub fn sample_weighted(items: &[(usize, u32)], rng: &mut fastrand::Rng) -> Option<usize> {
+    let total: u32 = items.iter().map(|(_, w)| w).sum();
+    if total == 0 {
+        return None;
+    }
+    let mut r = rng.u32(0..total);
+    for &(item, w) in items {
+        if r < w {
             return Some(item);
         }
+        r -= w;
     }
     items.last().map(|&(item, _)| item)
 }

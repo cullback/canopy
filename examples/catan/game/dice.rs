@@ -57,6 +57,32 @@ impl BalancedDice {
         }
     }
 
+    /// Unnormalized integer weights for each dice outcome (index 0..11 → sum 2..12).
+    pub fn weights(&self, current_player: Player) -> [(usize, u32); 11] {
+        let deck = if self.cards_left < MIN_CARDS_RESHUFFLE {
+            &INITIAL_DECK
+        } else {
+            &self.deck
+        };
+
+        let mut weights = [0u32; 11];
+        for i in 0..11 {
+            let penalty = (100 - 34 * self.recent_count[i] as i32).max(0) as u32;
+            weights[i] = deck[i] as u32 * penalty;
+        }
+
+        let seven_factor = self.seven_combined_100(current_player);
+        for i in 0..11 {
+            weights[i] *= if i == 5 { seven_factor } else { 100 };
+        }
+
+        let mut result = [(0usize, 0u32); 11];
+        for i in 0..11 {
+            result[i] = (i, weights[i]);
+        }
+        result
+    }
+
     pub fn probabilities(&self, current_player: Player) -> [(u32, f32); 11] {
         let mut weights = [0.0f32; 11];
 
@@ -95,6 +121,51 @@ impl BalancedDice {
             }
         }
         result
+    }
+
+    /// Sample a dice outcome using integer arithmetic only.
+    /// Returns an action index 0..11 (sum 2..12).
+    pub fn sample(&self, current_player: Player, rng: &mut fastrand::Rng) -> usize {
+        let ws = self.weights(current_player);
+        let total: u32 = ws.iter().map(|(_, w)| w).sum();
+        if total == 0 {
+            return rng.usize(0..11);
+        }
+        let mut r = rng.u32(0..total);
+        for &(i, w) in &ws {
+            if r < w {
+                return i;
+            }
+            r -= w;
+        }
+        10
+    }
+
+    /// Seven combined adjustment factor in fixed-point scale 100.
+    /// Returns 0..=200 (representing 0.0..=2.0).
+    fn seven_combined_100(&self, current_player: Player) -> u32 {
+        // Streak: ±0.4 * count → ±40 * count
+        let streak: i32 = if self.seven_streak_count > 0 {
+            let mag = 40 * self.seven_streak_count as i32;
+            if self.seven_streak_player == current_player as u8 {
+                -mag
+            } else {
+                mag
+            }
+        } else {
+            0
+        };
+
+        // Imbalance: 2 - 2*my/total → 200 - 200*my/total
+        let total_sevens = self.total_sevens[0] + self.total_sevens[1];
+        let imbalance: i32 = if total_sevens >= 2 {
+            let my = self.total_sevens[current_player as usize] as i32;
+            200 - 200 * my / total_sevens as i32
+        } else {
+            100
+        };
+
+        (imbalance + streak).clamp(0, 200) as u32
     }
 
     #[cfg(test)]

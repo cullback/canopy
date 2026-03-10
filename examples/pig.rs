@@ -113,10 +113,10 @@ impl Game for PigGame {
         }
     }
 
-    fn chance_outcomes(&self, buf: &mut Vec<(usize, f32)>) {
+    fn chance_outcomes(&self, buf: &mut Vec<(usize, u32)>) {
         if matches!(self.phase, Phase::Rolling) {
             for i in 0..6 {
-                buf.push((i, 1.0 / 6.0));
+                buf.push((i, 1));
             }
         }
     }
