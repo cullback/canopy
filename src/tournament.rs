@@ -3,8 +3,29 @@ use indicatif::{ProgressBar, ProgressStyle};
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
-use crate::mcts::{Config, Search};
+use crate::mcts::{Config, Search, SearchResult, Step};
 use crate::player::{PerPlayer, Player};
+
+/// Drive a search to completion using the provided evaluator.
+fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
+    search: &mut Search<G>,
+    config: &Config,
+    evaluator: &E,
+    rng: &mut fastrand::Rng,
+) -> SearchResult {
+    let mut step = search.run(config, rng);
+    loop {
+        match step {
+            Step::NeedsEval(pendings) => {
+                let states: Vec<&G> = pendings.iter().map(|p| &p.state).collect();
+                let evals = evaluator.evaluate_batch(&states, rng);
+                let paired = evals.into_iter().zip(pendings).collect();
+                step = search.supply(paired, rng);
+            }
+            Step::Done(result) => return result,
+        }
+    }
+}
 
 /// Play a single match between two MCTS bots.
 ///
@@ -35,7 +56,7 @@ pub fn play_match<G: Game>(
             let seat = if swap { player.opponent() } else { player };
             let eval = evaluators.0[seat as usize];
             let config = &configs[seat];
-            let result = Search::new(state.clone()).run_to_completion(config, eval, rng);
+            let result = run_to_completion(&mut Search::new(state.clone()), config, eval, rng);
             let action = result.selected_action;
 
             actions.push(action);

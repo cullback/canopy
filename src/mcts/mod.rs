@@ -1,6 +1,6 @@
 mod tree;
 
-use crate::eval::{Evaluation, Evaluator};
+use crate::eval::Evaluation;
 use crate::game::{Game, Status};
 use crate::player::Player;
 
@@ -94,8 +94,8 @@ pub enum Step<G: Game> {
 /// 3. [`run`](Self::run) — begin/continue a search, returning a `Step`.
 /// 4. [`supply`](Self::supply) — feed an evaluation back; may yield another
 ///    `NeedsEval` or a final `Done`.
-/// 5. [`run_to_completion`](Self::run_to_completion) — convenience wrapper
-///    around `run` + `supply` loop.
+/// 5. Drive the `run` + `supply` loop externally (or use a convenience
+///    helper like the one in `tournament.rs`).
 ///
 /// The caller never touches the tree directly; all interaction goes through
 /// `Step` / `PendingEval`.
@@ -298,25 +298,6 @@ impl<G: Game> Search<G> {
         }
     }
 
-    /// Run the search to completion, driving the `NeedsEval`/`supply` loop
-    /// internally using the provided evaluator.
-    pub fn run_to_completion<E: Evaluator<G> + ?Sized>(
-        &mut self,
-        config: &Config,
-        evaluator: &E,
-        rng: &mut fastrand::Rng,
-    ) -> SearchResult {
-        let mut step = self.run(config, rng);
-        loop {
-            match step {
-                Step::NeedsEval(pendings) => {
-                    step = self.supply_with(pendings, evaluator, rng);
-                }
-                Step::Done(result) => return result,
-            }
-        }
-    }
-
     /// Feed evaluations back into the search.
     ///
     /// Each `(Evaluation, PendingEval)` pair corresponds to a leaf from the
@@ -385,19 +366,6 @@ impl<G: Game> Search<G> {
         } else {
             self.run_vanilla_sims(rng)
         }
-    }
-
-    /// Evaluate a batch of pending leaves and supply the results back.
-    pub fn supply_with<E: Evaluator<G> + ?Sized>(
-        &mut self,
-        pendings: Vec<PendingEval<G>>,
-        evaluator: &E,
-        rng: &mut fastrand::Rng,
-    ) -> Step<G> {
-        let states: Vec<&G> = pendings.iter().map(|p| &p.state).collect();
-        let evals = evaluator.evaluate_batch(&states, rng);
-        let paired: Vec<_> = evals.into_iter().zip(pendings).collect();
-        self.supply(paired, rng)
     }
 
     /// The current root node. Panics if root is unset (only possible for
@@ -1018,8 +986,28 @@ fn extract_gumbel_result<G: Game>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::eval::RolloutEvaluator;
+    use crate::eval::{Evaluator, RolloutEvaluator};
     use crate::player::Player;
+
+    fn run_to_completion<G: Game>(
+        search: &mut Search<G>,
+        config: &Config,
+        evaluator: &impl Evaluator<G>,
+        rng: &mut fastrand::Rng,
+    ) -> SearchResult {
+        let mut step = search.run(config, rng);
+        loop {
+            match step {
+                Step::NeedsEval(pendings) => {
+                    let states: Vec<&G> = pendings.iter().map(|p| &p.state).collect();
+                    let evals = evaluator.evaluate_batch(&states, rng);
+                    let paired = evals.into_iter().zip(pendings).collect();
+                    step = search.supply(paired, rng);
+                }
+                Step::Done(result) => return result,
+            }
+        }
+    }
 
     /// Trivial one-step game: player picks action 0 (win) or 1 (lose).
     #[derive(Clone)]
@@ -1069,7 +1057,7 @@ mod tests {
         let mut rng = fastrand::Rng::new();
 
         let mut search = Search::new(TrivialGame::new());
-        let result = search.run_to_completion(&config, &evaluator, &mut rng);
+        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
 
         assert_eq!(
             result.selected_action, 0,
@@ -1144,7 +1132,7 @@ mod tests {
         let mut rng = fastrand::Rng::new();
 
         let mut search = Search::new(TwoStepGame::new());
-        let result = search.run_to_completion(&config, &evaluator, &mut rng);
+        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
 
         let action = result.selected_action;
         let node_count_before = search.tree.node_count();
@@ -1158,7 +1146,12 @@ mod tests {
 
         let result2 = loop {
             step = match step {
-                Step::NeedsEval(pendings) => search.supply_with(pendings, &evaluator, &mut rng),
+                Step::NeedsEval(pendings) => {
+                    let states: Vec<&TwoStepGame> = pendings.iter().map(|p| &p.state).collect();
+                    let evals = evaluator.evaluate_batch(&states, &mut rng);
+                    let paired = evals.into_iter().zip(pendings).collect();
+                    search.supply(paired, &mut rng)
+                }
                 Step::Done(r) => break r,
             };
         };
@@ -1198,7 +1191,7 @@ mod tests {
         let mut rng = fastrand::Rng::new();
 
         let mut search = Search::new(TrivialGame::new());
-        let result = search.run_to_completion(&config, &evaluator, &mut rng);
+        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
 
         let total: f32 = result.policy.iter().sum();
         assert!(
@@ -1220,7 +1213,7 @@ mod tests {
         let mut rng = fastrand::Rng::new();
 
         let mut search = Search::new(game);
-        let result = search.run_to_completion(&config, &evaluator, &mut rng);
+        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
 
         // Should complete successfully and pick the winning action
         assert_eq!(result.selected_action, 0);

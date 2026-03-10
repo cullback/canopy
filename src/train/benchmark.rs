@@ -70,6 +70,27 @@ async fn bench_game_task<G: Game, E: StateEncoder<G>>(
     }
 }
 
+/// Drive a search to completion using a local evaluator.
+fn run_to_completion<G: Game>(
+    search: &mut Search<G>,
+    config: &Config,
+    evaluator: &RolloutEvaluator,
+    rng: &mut fastrand::Rng,
+) -> crate::mcts::SearchResult {
+    let mut step = search.run(config, rng);
+    loop {
+        match step {
+            Step::NeedsEval(pendings) => {
+                let states: Vec<&G> = pendings.iter().map(|p| &p.state).collect();
+                let evals = evaluator.evaluate_batch(&states, rng);
+                let paired = evals.into_iter().zip(pendings).collect();
+                step = search.supply(paired, rng);
+            }
+            Step::Done(result) => return result,
+        }
+    }
+}
+
 /// Play a single benchmark game. NN turns use async eval via batcher;
 /// baseline turns use run_to_completion locally.
 async fn play_bench_game<G: Game, E: StateEncoder<G>>(
@@ -137,9 +158,13 @@ async fn play_bench_game<G: Game, E: StateEncoder<G>>(
                     result.selected_action
                 } else {
                     // Baseline player: local rollout eval
-                    Search::new(state.clone())
-                        .run_to_completion(baseline_config, baseline_eval, rng)
-                        .selected_action
+                    run_to_completion(
+                        &mut Search::new(state.clone()),
+                        baseline_config,
+                        baseline_eval,
+                        rng,
+                    )
+                    .selected_action
                 };
                 state.apply_action(action);
             }
