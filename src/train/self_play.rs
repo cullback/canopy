@@ -408,6 +408,7 @@ where
         c_visit: config.c_visit,
         c_scale: config.c_scale,
         leaf_batch_size: config.leaf_batch_size,
+        ..Default::default()
     };
     let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 

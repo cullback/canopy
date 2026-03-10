@@ -1,9 +1,11 @@
+mod seq_halving;
 mod tree;
 
 use crate::eval::Evaluation;
 use crate::game::{Game, Status};
 use crate::player::Player;
 
+use seq_halving::Schedule;
 use tree::{Bufs, ExpandResult, NodeId, NodeKind, Tree};
 
 // ── Public types ──────────────────────────────────────────────────────
@@ -20,6 +22,10 @@ pub struct Config {
     pub c_scale: f32,
     /// Leaves to collect per batch before requesting evaluation (1 = no batching).
     pub leaf_batch_size: u32,
+    /// Scale of the Gumbel noise at the root. Use 1.0 (default) for
+    /// stochastic or imperfect-information games; 0.0 for deterministic
+    /// perfect-information games where exploration noise is unnecessary.
+    pub gumbel_scale: f32,
 }
 
 impl Default for Config {
@@ -30,6 +36,7 @@ impl Default for Config {
             c_visit: 50.0,
             c_scale: 1.0,
             leaf_batch_size: 1,
+            gumbel_scale: 1.0,
         }
     }
 }
@@ -85,10 +92,9 @@ pub struct Search<G: Game> {
     bufs: Bufs,
     config: Config,
     /// Gumbel Sequential Halving state — present for decision roots, `None`
-    /// for chance roots.  When `Some`, simulation budget is tracked inside
-    /// `GumbelState::budget_remaining` (per-candidate round-robin with
-    /// halving).  When `None`, `vanilla_budget_remaining` is used instead
-    /// as a simple countdown.
+    /// for chance roots.  When `Some`, the pre-computed schedule drives
+    /// simulation assignment and halving.  When `None`,
+    /// `vanilla_budget_remaining` is used instead as a simple countdown.
     gumbel: Option<GumbelState>,
     /// Simulation budget for chance roots (no Gumbel).  Ignored when
     /// `gumbel` is `Some`, since that state tracks its own budget.
@@ -133,37 +139,14 @@ struct GumbelState {
     root_logits: Vec<f32>,
     /// Edge indices alive in sequential halving.
     candidates: Vec<usize>,
-    /// Current SH phase (0-indexed).
-    phase: u32,
-    /// ceil(log2(m)).
-    total_phases: u32,
-    /// Sims allocated per candidate this phase.
-    sims_per_candidate: u32,
-    /// Sims completed this phase (monotonic counter; candidate_idx and
-    /// phase-complete are derived from this).
-    sims_this_phase: u32,
+    /// Pre-computed Sequential Halving schedule (candidate offsets + halving points).
+    schedule: Schedule,
+    /// Monotonic simulation counter, incremented at queue time.
+    sim_index: usize,
     /// Min Q across tree (P1 perspective) for normalization.
     q_min: f32,
     /// Max Q across tree (P1 perspective) for normalization.
     q_max: f32,
-    /// Simulation budget remaining (Gumbel decision roots only).
-    /// Decremented each simulation; when exhausted the search finishes
-    /// even if Sequential Halving hasn't reduced to one candidate.
-    budget_remaining: u32,
-}
-
-impl GumbelState {
-    /// Which candidate in the round-robin is currently being simulated.
-    fn candidate_idx(&self) -> usize {
-        debug_assert!(self.sims_per_candidate > 0);
-        debug_assert!(!self.candidates.is_empty());
-        (self.sims_this_phase / self.sims_per_candidate) as usize % self.candidates.len()
-    }
-
-    /// Whether all candidates have received their allocation this phase.
-    fn phase_complete(&self) -> bool {
-        self.sims_this_phase >= self.sims_per_candidate * self.candidates.len() as u32
-    }
 }
 
 /// Borrow the simulation path from a Phase (empty for root expansion).
@@ -374,23 +357,11 @@ impl<G: Game> Search<G> {
             .as_mut()
             .expect("run_simulations called without gumbel state");
 
-        // Single candidate remaining — no more simulations needed.
-        if gs.candidates.len() <= 1 {
-            self.search_active = false;
-            return Step::Done(extract_gumbel_result::<G>(
-                &self.tree,
-                root,
-                gs,
-                &self.config,
-                network_value,
-            ));
-        }
-
         self.pending_states.clear();
         self.pending_contexts.clear();
         loop {
-            // Check if SH is complete (1 candidate left or budget exhausted)
-            if gs.candidates.len() <= 1 || gs.budget_remaining == 0 {
+            // SH complete: schedule exhausted or 1 candidate left.
+            if gs.sim_index >= gs.schedule.len() || gs.candidates.len() <= 1 {
                 if !self.pending_states.is_empty() {
                     return Step::NeedsEval(&self.pending_states);
                 }
@@ -404,7 +375,8 @@ impl<G: Game> Search<G> {
                 ));
             }
 
-            let forced_edge = gs.candidates[gs.candidate_idx()];
+            let offset = gs.schedule.candidate_offset(gs.sim_index);
+            let forced_edge = gs.candidates[offset % gs.candidates.len()];
             let q_bounds = (gs.q_min, gs.q_max);
             let config = &self.config;
             match simulate(
@@ -417,15 +389,15 @@ impl<G: Game> Search<G> {
                 |tree, node, player| gumbel_interior_select(tree, node, player, config, q_bounds),
             ) {
                 SimResult::Complete => {
-                    advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
+                    advance_sim(gs, &self.tree, &self.bufs.path, root, &self.config);
                 }
                 SimResult::NeedsEval { state, context } => {
-                    // Advance round-robin before applying virtual loss so that
+                    // Advance before applying virtual loss so that
                     // update_q_bounds reads Q values not yet polluted by this
                     // simulation's virtual loss (q_min/q_max never contract,
                     // so feeding in artificially low values widens the range
                     // permanently).
-                    advance_round_robin(gs, &self.tree, phase_path(&context), root, &self.config);
+                    advance_sim(gs, &self.tree, phase_path(&context), root, &self.config);
                     self.tree.apply_virtual_loss(phase_path(&context));
                     self.pending_states.push(state);
                     self.pending_contexts.push(context);
@@ -701,9 +673,10 @@ fn init_gumbel(
     let num_edges = edges.len();
 
     let root_logits: Vec<f32> = edges.iter().map(|e| e.logit).collect();
+    let scale = config.gumbel_scale;
     let gumbel_scores: Vec<f32> = root_logits
         .iter()
-        .map(|&l| sample_gumbel(rng) + l)
+        .map(|&l| scale * sample_gumbel(rng) + l)
         .collect();
 
     // Gumbel-Top-k: score = g + logit, take top m
@@ -719,37 +692,17 @@ fn init_gumbel(
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let candidates: Vec<usize> = scored.iter().take(m).map(|&(i, _)| i).collect();
 
-    let m = candidates.len();
-    let total_phases = if m <= 1 {
-        1
-    } else {
-        (m as f32).log2().ceil() as u32
-    };
-    let budget = config.num_simulations;
-    // The paper's Sequential Halving allocates floor(n / (ceil(log2(m)) * |S_k|))
-    // per candidate per phase, where |S_k| shrinks each phase — so later phases
-    // with fewer candidates get proportionally more sims each. Here we allocate
-    // uniformly for phase 0; halve_candidates then redistributes the remaining
-    // budget over fewer candidates, achieving the same escalation adaptively
-    // while also reclaiming any rounding leftovers.
-    let sims_per_candidate = if m > 0 && total_phases > 0 {
-        (budget / (total_phases * m as u32)).max(1)
-    } else {
-        1
-    };
+    let schedule = Schedule::new(config.num_simulations as usize, candidates.len());
 
     GumbelState {
         root_player,
         gumbel_scores,
         root_logits,
         candidates,
-        phase: 0,
-        total_phases,
-        sims_per_candidate,
-        sims_this_phase: 0,
+        schedule,
+        sim_index: 0,
         q_min: root_value,
         q_max: root_value,
-        budget_remaining: budget,
     }
 }
 
@@ -781,10 +734,11 @@ fn score_candidate(edge_idx: usize, gs: &GumbelState, ctx: &RootContext, config:
 }
 
 /// Halve candidates at end of a Sequential Halving phase.
+/// Scores all candidates by g(a) + logit(a) + σ(completedQ(a)) and keeps
+/// the top half (ceil).
 fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Config) {
     let ctx = RootContext::new(tree, root);
 
-    // Score all candidates
     let mut scored: Vec<(usize, f32)> = gs
         .candidates
         .iter()
@@ -792,45 +746,17 @@ fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Co
         .collect();
     scored.sort_by(|a, b| b.1.total_cmp(&a.1));
 
-    // Keep top half (ceil)
     let keep = scored.len().div_ceil(2);
     gs.candidates = scored.into_iter().take(keep).map(|(idx, _)| idx).collect();
-
-    gs.phase += 1;
-    gs.sims_this_phase = 0;
-
-    // Recompute sims_per_candidate for remaining budget and candidates
-    let remaining_phases = gs.total_phases.saturating_sub(gs.phase);
-    let m = gs.candidates.len() as u32;
-    if remaining_phases > 0 && m > 0 {
-        gs.sims_per_candidate = (gs.budget_remaining / (remaining_phases * m)).max(1);
-    } else {
-        gs.sims_per_candidate = 1;
-    }
 }
 
-/// Advance Sequential Halving round-robin after a simulation is committed.
+/// Advance the simulation counter and check for phase boundaries.
 ///
 /// Called at queue time for both synchronously completed simulations and
-/// in-flight leaves (before eval returns).  Budget and phase transitions
-/// proceed as if the simulation completed, even though the eval hasn't
-/// returned yet.  This is a deliberate tradeoff:
-///
-/// **Why not defer to `step`?**  The batch collection loop needs the
-/// round-robin counter to decide which candidate edge to force next.
-/// Deferring would mean we can't advance the round-robin during
-/// collection — we'd have to serialize leaf collection or invent
-/// deferred bookkeeping to reconcile counters after evals arrive.
-///
-/// **Why halving at queue time is acceptable:**  Round-robin distributes
-/// in-flight sims roughly evenly across candidates, so virtual-loss bias
-/// is approximately symmetric and relative candidate ranking is preserved.
-/// Q bounds are updated *before* virtual loss is applied (see call site),
-/// preventing permanent widening from pessimistic values.  The
-/// `debug_assert` in `run_simulations` guards against `leaf_batch_size`
-/// dominating the phase budget, which would make most halving data
-/// virtual-loss-polluted.
-fn advance_round_robin(
+/// in-flight leaves (before eval returns).  Q bounds are updated *before*
+/// virtual loss is applied (see call site), preventing permanent widening
+/// from pessimistic values.
+fn advance_sim(
     gs: &mut GumbelState,
     tree: &Tree,
     path: &[(NodeId, usize)],
@@ -838,10 +764,8 @@ fn advance_round_robin(
     config: &Config,
 ) {
     update_q_bounds(gs, tree, path);
-    gs.budget_remaining = gs.budget_remaining.saturating_sub(1);
-    gs.sims_this_phase += 1;
-
-    if gs.phase_complete() {
+    gs.sim_index += 1;
+    if gs.schedule.should_halve(gs.sim_index) {
         halve_candidates(gs, tree, root, config);
     }
 }

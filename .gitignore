@@ -4,3 +4,7 @@ target/
 perf.*
 logs/
 checkpoints/
+MCTS/
+AlphaZero.jl/
+KataGomo/
+mctx/
