@@ -67,7 +67,7 @@ pub enum Step<'a, G: Game> {
 /// search).  The public methods form a simple protocol:
 ///
 /// 1. [`new`](Self::new) — construct with a root game state and config.
-/// 2. [`supply`](Self::supply) — the only stepping function.  Call with an
+/// 2. [`step`](Self::step) — the only stepping function.  Call with an
 ///    empty slice to start a search; feed evaluations back on subsequent
 ///    calls.  Returns [`Step::NeedsEval`] or [`Step::Done`].
 /// 3. [`pending_states`](Self::pending_states) — borrow the leaf states that
@@ -79,7 +79,7 @@ pub enum Step<'a, G: Game> {
 pub struct Search<G: Game> {
     tree: Tree,
     /// `None` initially or after `apply_action` walks through an unexpanded
-    /// child.  The next `supply` will discard the old tree and start fresh.
+    /// child.  The next `step` will discard the old tree and start fresh.
     root: Option<NodeId>,
     root_state: G,
     bufs: Bufs,
@@ -99,10 +99,10 @@ pub struct Search<G: Game> {
     /// Raw network value for the root (P1 perspective), captured on first
     /// expansion and reused in the `SearchResult`.
     root_network_value: f32,
-    /// Whether a search is currently active (between first `supply` and `Done`).
+    /// Whether a search is currently active (between first `step` and `Done`).
     search_active: bool,
     /// Leaf states awaiting evaluation.  Filled by simulation, consumed by
-    /// `supply`.  Reused across calls to avoid allocation.
+    /// `step`.  Reused across calls to avoid allocation.
     pending_states: Vec<G>,
     /// Matching contexts for `pending_states` (same length, same order).
     pending_contexts: Vec<Phase>,
@@ -184,7 +184,7 @@ enum SimResult<G: Game> {
 impl<G: Game> Search<G> {
     /// Create a new search with the given root game state and config.
     ///
-    /// The tree starts empty; the first call to [`supply`](Self::supply) with
+    /// The tree starts empty; the first call to [`step`](Self::step) with
     /// an empty slice will expand from scratch.
     pub fn new(root_state: G, config: Config) -> Self {
         Self {
@@ -234,7 +234,7 @@ impl<G: Game> Search<G> {
     ///
     /// Returns [`Step::NeedsEval`] with the leaf states that need evaluation,
     /// or [`Step::Done`] when the search is complete.
-    pub fn supply(&mut self, evals: &[Evaluation], rng: &mut fastrand::Rng) -> Step<'_, G> {
+    pub fn step(&mut self, evals: &[Evaluation], rng: &mut fastrand::Rng) -> Step<'_, G> {
         if !self.search_active {
             return self.begin_search(rng);
         }
@@ -816,7 +816,7 @@ fn halve_candidates(gs: &mut GumbelState, tree: &Tree, root: NodeId, config: &Co
 /// proceed as if the simulation completed, even though the eval hasn't
 /// returned yet.  This is a deliberate tradeoff:
 ///
-/// **Why not defer to `supply`?**  The batch collection loop needs the
+/// **Why not defer to `step`?**  The batch collection loop needs the
 /// round-robin counter to decide which candidate edge to force next.
 /// Deferring would mean we can't advance the round-robin during
 /// collection — we'd have to serialize leaf collection or invent
@@ -994,7 +994,7 @@ mod tests {
     ) -> SearchResult {
         let mut evals = vec![];
         loop {
-            match search.supply(&evals, rng) {
+            match search.step(&evals, rng) {
                 Step::NeedsEval(states) => {
                     let refs: Vec<&G> = states.iter().collect();
                     evals = evaluator.evaluate_batch(&refs, rng);
@@ -1159,7 +1159,7 @@ mod tests {
             },
             Config::default(),
         );
-        match search.supply(&[], &mut rng) {
+        match search.step(&[], &mut rng) {
             Step::Done(result) => {
                 assert_eq!(result.value, 1.0);
                 assert!(result.policy.iter().all(|&p| p == 0.0));

@@ -11,7 +11,7 @@ Search::new(root_state: G, config: Config) -> Self
 search.state() -> &G
 search.set_num_simulations(n: u32)
 search.apply_action(action: usize)
-search.supply(evals: &[Evaluation], rng: &mut Rng) -> Step<'_, G>
+search.step(evals: &[Evaluation], rng: &mut Rng) -> Step<'_, G>
 ```
 
 The search tree persists across moves. Call `apply_action` to mirror game actions — if the tree has an expanded child for that action, the root pointer follows it in O(1). The next search compacts the tree to the surviving subtree. If the child wasn't expanded, the tree is discarded and a fresh search starts.
@@ -52,13 +52,13 @@ struct Config {
 
 ## Usage
 
-`supply` is the only stepping function. Pass an empty slice to start a search; pass evaluations on subsequent calls. `NeedsEval` borrows the leaf states directly.
+`step` is the only stepping function. Pass an empty slice to start a search; pass evaluations on subsequent calls. `NeedsEval` borrows the leaf states directly.
 
 ```rust
 let mut search = Search::new(state, config);
 let mut evals = vec![];
 loop {
-    match search.supply(&evals, &mut rng) {
+    match search.step(&evals, &mut rng) {
         Step::NeedsEval(states) => {
             evals = evaluate(states);
         }
@@ -66,7 +66,7 @@ loop {
     }
 }
 search.apply_action(result.selected_action);
-// next search: just loop supply again (tree is reused)
+// next search: just loop step again (tree is reused)
 ```
 
 The caller controls batching across multiple concurrent searches — the neural evaluator can combine leaf requests from parallel self-play workers into a single forward pass. The MCTS module has no dependency on `Evaluator`; evaluation is entirely the caller's responsibility.
@@ -83,7 +83,7 @@ Replaces the tree with a directed acyclic graph, enabling transposition tables w
 
 > **Resumable search with batched NN evaluation**
 
-Splits the MCTS loop so that search pauses at leaf nodes, batches multiple pending evaluations into a single GPU forward pass, then resumes. The `supply`/`pending_states` state machine makes this the natural API rather than a retrofit. `leaf_batch_size` controls how many leaves to collect before yielding.
+Splits the MCTS loop so that search pauses at leaf nodes, batches multiple pending evaluations into a single GPU forward pass, then resumes. The `step`/`pending_states` state machine makes this the natural API rather than a retrofit. `leaf_batch_size` controls how many leaves to collect before yielding.
 
 > **Efficient arena-based tree data structure with tree reuse**
 

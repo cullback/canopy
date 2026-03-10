@@ -206,7 +206,7 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
             // MCTS search with eval requests sent to batcher
             let mut evals: Vec<Evaluation> = vec![];
             let result = loop {
-                match search.supply(&evals, &mut rng) {
+                match search.step(&evals, &mut rng) {
                     Step::NeedsEval(states) => {
                         let mut receivers = Vec::with_capacity(states.len());
                         for pending_state in states {

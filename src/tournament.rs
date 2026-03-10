@@ -14,7 +14,7 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
 ) -> SearchResult {
     let mut evals = vec![];
     loop {
-        match search.supply(&evals, rng) {
+        match search.step(&evals, rng) {
             Step::NeedsEval(states) => {
                 let refs: Vec<&G> = states.iter().collect();
                 evals = evaluator.evaluate_batch(&refs, rng);

@@ -78,7 +78,7 @@ fn run_to_completion<G: Game>(
 ) -> crate::mcts::SearchResult {
     let mut evals = vec![];
     loop {
-        match search.supply(&evals, rng) {
+        match search.step(&evals, rng) {
             Step::NeedsEval(states) => {
                 let refs: Vec<&G> = states.iter().collect();
                 evals = evaluator.evaluate_batch(&refs, rng);
@@ -114,7 +114,7 @@ async fn play_bench_game<G: Game, E: StateEncoder<G>>(
                     let mut search = Search::new(state.clone(), nn_config.clone());
                     let mut evals: Vec<Evaluation> = vec![];
                     let result = loop {
-                        match search.supply(&evals, rng) {
+                        match search.step(&evals, rng) {
                             Step::NeedsEval(states) => {
                                 let mut receivers = Vec::with_capacity(states.len());
                                 for pending_state in states {
