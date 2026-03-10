@@ -126,7 +126,7 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
             break;
         }
 
-        let mut search = Search::new(new_state(&mut rng));
+        let mut search = Search::new(new_state(&mut rng), base_config.clone());
         let mut samples: Vec<Sample> = Vec::new();
         let mut turn_count: u32 = 0;
         let mut last_player: Option<Player> = None;
@@ -193,34 +193,29 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
 
             // Playout cap randomization
             let is_full_search = rng.f32() < config.playout_cap_full_prob;
-            let move_config = Config {
-                num_simulations: if is_full_search {
-                    effective_sims
-                } else {
-                    fast_sims
-                },
-                ..base_config.clone()
-            };
+            search.set_num_simulations(if is_full_search {
+                effective_sims
+            } else {
+                fast_sims
+            });
 
             // Encode features before search
             let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
             E::encode(search.state(), &mut features_buf);
 
             // MCTS search with eval requests sent to batcher
-            let mut step = search.run(&move_config, &mut rng);
+            let mut evals: Vec<Evaluation> = vec![];
             let result = loop {
-                match step {
-                    Step::NeedsEval(pendings) => {
-                        let mut receivers = Vec::with_capacity(pendings.len());
-                        let mut pending_store = Vec::with_capacity(pendings.len());
-                        for pending in pendings {
-                            // Pre-encode features in the task
-                            let sign = match pending.state.status() {
+                match search.supply(&evals, &mut rng) {
+                    Step::NeedsEval(states) => {
+                        let mut receivers = Vec::with_capacity(states.len());
+                        for pending_state in states {
+                            let sign = match pending_state.status() {
                                 Status::Ongoing(p) => p.sign(),
                                 Status::Terminal(_) => 1.0,
                             };
                             encode_buf.clear();
-                            E::encode(&pending.state, &mut encode_buf);
+                            E::encode(pending_state, &mut encode_buf);
                             let (tx, rx) = tokio::sync::oneshot::channel();
                             request_tx
                                 .send(InferRequest {
@@ -230,18 +225,15 @@ async fn game_task<G: Game, E: StateEncoder<G>>(
                                 .await
                                 .unwrap();
                             receivers.push((rx, sign));
-                            pending_store.push(pending);
                         }
-                        let mut evals = Vec::with_capacity(receivers.len());
-                        for ((rx, sign), pending) in receivers.into_iter().zip(pending_store) {
+                        evals.clear();
+                        for (rx, sign) in receivers {
                             let resp = rx.await.unwrap();
-                            let eval = Evaluation {
+                            evals.push(Evaluation {
                                 policy_logits: resp.policy_logits,
                                 value: resp.value * sign,
-                            };
-                            evals.push((eval, pending));
+                            });
                         }
-                        step = search.supply(evals, &mut rng);
                     }
                     Step::Done(result) => break result,
                 }

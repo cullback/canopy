@@ -50,35 +50,12 @@ pub struct SearchResult {
     pub prior_top1_action: usize,
 }
 
-/// Continuation token for a pending evaluation.
-///
-/// Returned inside [`Step::NeedsEval`] when the search cannot proceed without
-/// an evaluation of a new state.  The caller evaluates `state` to produce an
-/// [`Evaluation`], then hands *both* the evaluation and this token to
-/// [`Search::supply`].  The token's private `context` carries the internal
-/// bookkeeping (which node is being expanded, where in the tree to attach the
-/// result) so that `Search` itself needs no mutable "phase" field — all
-/// in-flight state lives here, making it impossible to call `supply` without
-/// a matching `NeedsEval`.
-pub struct PendingEval<G: Game> {
-    pub state: G,
-    context: Phase,
-}
-
-impl<G: Game> PendingEval<G> {
-    /// Borrow the simulation path (empty for root expansion).
-    fn path(&self) -> &[(NodeId, usize)] {
-        match &self.context {
-            Phase::Simulating { path, .. } => path,
-            Phase::ExpandingRoot { .. } => &[],
-        }
-    }
-}
-
 /// One step of the MCTS state machine.
-pub enum Step<G: Game> {
-    /// Search needs evaluation(s) for one or more leaf states.
-    NeedsEval(Vec<PendingEval<G>>),
+pub enum Step<'a, G: Game> {
+    /// Search needs evaluation of one or more leaf states.
+    /// Evaluate each state and pass the results (in the same order) to the
+    /// next [`Search::supply`] call.
+    NeedsEval(&'a [G]),
     /// Search complete — improved policy, value, and selected action are ready.
     Done(SearchResult),
 }
@@ -86,23 +63,23 @@ pub enum Step<G: Game> {
 /// Gumbel AlphaZero MCTS, driven as a state machine.
 ///
 /// The search tree persists across moves so that subtrees explored in earlier
-/// searches can be reused (the tree is compacted, not rebuilt, on each
-/// [`run`](Self::run)).  The public methods form a simple protocol:
+/// searches can be reused (the tree is compacted, not rebuilt, on each new
+/// search).  The public methods form a simple protocol:
 ///
-/// 1. [`new`](Self::new) — construct with a root game state.
-/// 2. [`apply_action`](Self::apply_action) — mirror actions as they happen.
-/// 3. [`run`](Self::run) — begin/continue a search, returning a `Step`.
-/// 4. [`supply`](Self::supply) — feed an evaluation back; may yield another
-///    `NeedsEval` or a final `Done`.
-/// 5. Drive the `run` + `supply` loop externally (or use a convenience
-///    helper like the one in `tournament.rs`).
+/// 1. [`new`](Self::new) — construct with a root game state and config.
+/// 2. [`supply`](Self::supply) — the only stepping function.  Call with an
+///    empty slice to start a search; feed evaluations back on subsequent
+///    calls.  Returns [`Step::NeedsEval`] or [`Step::Done`].
+/// 3. [`pending_states`](Self::pending_states) — borrow the leaf states that
+///    need evaluation (valid after `NeedsEval`).
+/// 4. [`apply_action`](Self::apply_action) — mirror actions as they happen.
 ///
 /// The caller never touches the tree directly; all interaction goes through
-/// `Step` / `PendingEval`.
+/// `Step`.
 pub struct Search<G: Game> {
     tree: Tree,
     /// `None` initially or after `apply_action` walks through an unexpanded
-    /// child.  The next `run` will discard the old tree and start fresh.
+    /// child.  The next `supply` will discard the old tree and start fresh.
     root: Option<NodeId>,
     root_state: G,
     bufs: Bufs,
@@ -117,11 +94,18 @@ pub struct Search<G: Game> {
     /// `gumbel` is `Some`, since that state tracks its own budget.
     vanilla_budget_remaining: u32,
     /// Q bounds for vanilla (non-Gumbel) simulations, used to normalize Q
-    /// in interior selection.  Reset each `run`, widened after each sim.
+    /// in interior selection.  Reset each search, widened after each sim.
     vanilla_q_bounds: (f32, f32),
     /// Raw network value for the root (P1 perspective), captured on first
     /// expansion and reused in the `SearchResult`.
     root_network_value: f32,
+    /// Whether a search is currently active (between first `supply` and `Done`).
+    search_active: bool,
+    /// Leaf states awaiting evaluation.  Filled by simulation, consumed by
+    /// `supply`.  Reused across calls to avoid allocation.
+    pending_states: Vec<G>,
+    /// Matching contexts for `pending_states` (same length, same order).
+    pending_contexts: Vec<Phase>,
 }
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -182,29 +166,40 @@ impl GumbelState {
     }
 }
 
+/// Borrow the simulation path from a Phase (empty for root expansion).
+fn phase_path(phase: &Phase) -> &[(NodeId, usize)] {
+    match phase {
+        Phase::Simulating { path, .. } => path,
+        Phase::ExpandingRoot { .. } => &[],
+    }
+}
+
 enum SimResult<G: Game> {
     Complete,
-    NeedsEval(PendingEval<G>),
+    NeedsEval { state: G, context: Phase },
 }
 
 // ── Public API ────────────────────────────────────────────────────────
 
 impl<G: Game> Search<G> {
-    /// Create a new search with the given root game state.
+    /// Create a new search with the given root game state and config.
     ///
-    /// The tree starts empty (`root: None`); the first call to [`run`](Self::run)
-    /// will expand from scratch.
-    pub fn new(root_state: G) -> Self {
+    /// The tree starts empty; the first call to [`supply`](Self::supply) with
+    /// an empty slice will expand from scratch.
+    pub fn new(root_state: G, config: Config) -> Self {
         Self {
             tree: Tree::default(),
             root: None,
             root_state,
             bufs: Bufs::default(),
-            config: Config::default(),
+            config,
             gumbel: None,
             vanilla_budget_remaining: 0,
             vanilla_q_bounds: (0.0, 0.0),
             root_network_value: 0.0,
+            search_active: false,
+            pending_states: Vec::new(),
+            pending_contexts: Vec::new(),
         }
     }
 
@@ -213,37 +208,54 @@ impl<G: Game> Search<G> {
         &self.root_state
     }
 
+    /// Update the simulation budget (takes effect on the next search).
+    pub fn set_num_simulations(&mut self, n: u32) {
+        self.config.num_simulations = n;
+    }
+
     /// Apply an action to the internal game state and walk the tree pointer.
     ///
     /// If the tree has an expanded child for `action`, the root pointer follows
     /// it (O(1)).  Otherwise the root pointer becomes `None` and the next
-    /// [`run`](Self::run) will discard the old tree and start fresh.
+    /// search will discard the old tree and start fresh.
     pub fn apply_action(&mut self, action: usize) {
         self.root_state.apply_action(action);
         if let Some(root) = self.root {
             self.root = self.tree.child_for_action(root, action);
         }
+        self.search_active = false;
     }
 
-    /// Begin (or continue) an MCTS search from the current state.
+    /// Feed evaluations and advance the search.
     ///
-    /// If the tree root survived prior [`apply_action`](Self::apply_action)
-    /// calls, the tree is compacted and Gumbel state reinitialized.  If the
-    /// root was lost (unexpanded child), the old tree is discarded and a fresh
-    /// search starts from scratch.
+    /// On the first call (when no search is active), pass an empty slice to
+    /// start a new search.  On subsequent calls, pass one [`Evaluation`] per
+    /// state from the previous [`Step::NeedsEval`] (same order).
     ///
-    /// Returns `Step::Done` immediately for terminal states, or
-    /// `Step::NeedsEval` when a leaf needs evaluation.
-    pub fn run(&mut self, config: &Config, rng: &mut fastrand::Rng) -> Step<G> {
-        self.config = config.clone();
+    /// Returns [`Step::NeedsEval`] with the leaf states that need evaluation,
+    /// or [`Step::Done`] when the search is complete.
+    pub fn supply(&mut self, evals: &[Evaluation], rng: &mut fastrand::Rng) -> Step<'_, G> {
+        if !self.search_active {
+            return self.begin_search(rng);
+        }
+        self.integrate_evals(evals, rng);
+        if self.gumbel.is_some() {
+            self.run_simulations(rng)
+        } else {
+            self.run_vanilla_sims(rng)
+        }
+    }
+
+    /// Start a new search: compact/clear tree, initialize gumbel state.
+    fn begin_search(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
+        self.search_active = true;
         self.gumbel = None;
-        self.vanilla_budget_remaining = config.num_simulations;
+        self.vanilla_budget_remaining = self.config.num_simulations;
         self.vanilla_q_bounds = (0.0, 0.0);
 
         // Terminal root requires no tree logic — immediate result.
-        // selected_action is meaningless here (no legal actions); callers
-        // should check game status before using it.
         if let Status::Terminal(reward) = self.root_state.status() {
+            self.search_active = false;
             return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
                 value: reward,
@@ -287,39 +299,28 @@ impl<G: Game> Search<G> {
                     self.root_network_value = self.tree.utility(id);
                     self.run_vanilla_sims(rng)
                 }
-                ExpandResult::NeedsEval(player) => Step::NeedsEval(vec![PendingEval {
-                    state: self.root_state.clone(),
-                    context: Phase::ExpandingRoot {
+                ExpandResult::NeedsEval(player) => {
+                    self.pending_states.clear();
+                    self.pending_contexts.clear();
+                    self.pending_states.push(self.root_state.clone());
+                    self.pending_contexts.push(Phase::ExpandingRoot {
                         player,
                         actions: self.bufs.take_actions(),
-                    },
-                }]),
+                    });
+                    Step::NeedsEval(&self.pending_states)
+                }
             }
         }
     }
 
-    /// Feed evaluations back into the search.
-    ///
-    /// Each `(Evaluation, PendingEval)` pair corresponds to a leaf from the
-    /// most recent `NeedsEval` step.  The tokens carry the private context
-    /// describing *where* in the tree each new node should be attached.
-    ///
-    /// Config is *not* accepted here because the search is mid-flight;
-    /// changing simulation budget or Gumbel parameters between leaf
-    /// expansions would invalidate Sequential Halving bookkeeping.  Config
-    /// changes take effect at the next [`run`](Self::run).
-    pub fn supply(
-        &mut self,
-        evals: Vec<(Evaluation, PendingEval<G>)>,
-        rng: &mut fastrand::Rng,
-    ) -> Step<G> {
-        for (eval, pending) in evals {
-            match pending.context {
+    /// Integrate evaluations into the tree for previously pending leaves.
+    fn integrate_evals(&mut self, evals: &[Evaluation], rng: &mut fastrand::Rng) {
+        debug_assert_eq!(evals.len(), self.pending_contexts.len());
+        for (eval, context) in evals.iter().zip(self.pending_contexts.drain(..)) {
+            match context {
                 Phase::ExpandingRoot { player, actions } => {
                     let state_key = self.root_state.state_key();
-                    let root = self
-                        .tree
-                        .complete_expand(&eval, &actions, player, state_key);
+                    let root = self.tree.complete_expand(eval, &actions, player, state_key);
                     self.root = Some(root);
                     self.root_network_value = eval.value;
 
@@ -343,15 +344,9 @@ impl<G: Game> Search<G> {
                     self.tree.remove_virtual_loss(&path);
                     let &(parent, edge_idx) = path.last().unwrap();
                     if self.tree.edges(parent)[edge_idx].child.is_none() {
-                        // Check transposition table: another leaf in this batch
-                        // may have already expanded the same state via a different
-                        // path. Reuse the existing node to avoid duplicates and
-                        // prevent overwriting the table entry.
                         let child = match state_key.and_then(|k| self.tree.lookup(k)) {
                             Some(existing) => existing,
-                            None => self
-                                .tree
-                                .complete_expand(&eval, &actions, player, state_key),
+                            None => self.tree.complete_expand(eval, &actions, player, state_key),
                         };
                         self.tree.set_child(parent, edge_idx, child);
                     }
@@ -361,11 +356,7 @@ impl<G: Game> Search<G> {
                 }
             }
         }
-        if self.gumbel.is_some() {
-            self.run_simulations(rng)
-        } else {
-            self.run_vanilla_sims(rng)
-        }
+        self.pending_states.clear();
     }
 
     /// The current root node. Panics if root is unset (only possible for
@@ -375,7 +366,7 @@ impl<G: Game> Search<G> {
             .expect("root accessed before initialization or after terminal")
     }
 
-    fn run_simulations(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
+    fn run_simulations(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
         let root = self.root();
         let network_value = self.root_network_value;
         let gs = self
@@ -385,6 +376,7 @@ impl<G: Game> Search<G> {
 
         // Single candidate remaining — no more simulations needed.
         if gs.candidates.len() <= 1 {
+            self.search_active = false;
             return Step::Done(extract_gumbel_result::<G>(
                 &self.tree,
                 root,
@@ -394,13 +386,15 @@ impl<G: Game> Search<G> {
             ));
         }
 
-        let mut batch: Vec<PendingEval<G>> = Vec::new();
+        self.pending_states.clear();
+        self.pending_contexts.clear();
         loop {
             // Check if SH is complete (1 candidate left or budget exhausted)
             if gs.candidates.len() <= 1 || gs.budget_remaining == 0 {
-                if !batch.is_empty() {
-                    return Step::NeedsEval(batch);
+                if !self.pending_states.is_empty() {
+                    return Step::NeedsEval(&self.pending_states);
                 }
+                self.search_active = false;
                 return Step::Done(extract_gumbel_result::<G>(
                     &self.tree,
                     root,
@@ -425,17 +419,18 @@ impl<G: Game> Search<G> {
                 SimResult::Complete => {
                     advance_round_robin(gs, &self.tree, &self.bufs.path, root, &self.config);
                 }
-                SimResult::NeedsEval(pending) => {
+                SimResult::NeedsEval { state, context } => {
                     // Advance round-robin before applying virtual loss so that
                     // update_q_bounds reads Q values not yet polluted by this
                     // simulation's virtual loss (q_min/q_max never contract,
                     // so feeding in artificially low values widens the range
                     // permanently).
-                    advance_round_robin(gs, &self.tree, pending.path(), root, &self.config);
-                    self.tree.apply_virtual_loss(pending.path());
-                    batch.push(pending);
-                    if batch.len() as u32 >= self.config.leaf_batch_size {
-                        return Step::NeedsEval(batch);
+                    advance_round_robin(gs, &self.tree, phase_path(&context), root, &self.config);
+                    self.tree.apply_virtual_loss(phase_path(&context));
+                    self.pending_states.push(state);
+                    self.pending_contexts.push(context);
+                    if self.pending_states.len() as u32 >= self.config.leaf_batch_size {
+                        return Step::NeedsEval(&self.pending_states);
                     }
                 }
             }
@@ -443,11 +438,12 @@ impl<G: Game> Search<G> {
     }
 
     /// Fallback for roots without Gumbel state (chance roots).
-    fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<G> {
+    fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
         let root = self.root();
         let config = &self.config;
         let mut q_bounds = self.vanilla_q_bounds;
-        let mut batch: Vec<PendingEval<G>> = Vec::new();
+        self.pending_states.clear();
+        self.pending_contexts.clear();
         while self.vanilla_budget_remaining > 0 {
             match simulate(
                 &mut self.tree,
@@ -462,23 +458,25 @@ impl<G: Game> Search<G> {
                     widen_q_bounds(&self.tree, &self.bufs.path, &mut q_bounds);
                     self.vanilla_budget_remaining -= 1;
                 }
-                SimResult::NeedsEval(pending) => {
+                SimResult::NeedsEval { state, context } => {
                     // Widen bounds before virtual loss (same rationale as Gumbel path)
-                    widen_q_bounds(&self.tree, pending.path(), &mut q_bounds);
-                    self.tree.apply_virtual_loss(pending.path());
+                    widen_q_bounds(&self.tree, phase_path(&context), &mut q_bounds);
+                    self.tree.apply_virtual_loss(phase_path(&context));
                     self.vanilla_budget_remaining -= 1;
-                    batch.push(pending);
-                    if batch.len() as u32 >= self.config.leaf_batch_size {
+                    self.pending_states.push(state);
+                    self.pending_contexts.push(context);
+                    if self.pending_states.len() as u32 >= self.config.leaf_batch_size {
                         self.vanilla_q_bounds = q_bounds;
-                        return Step::NeedsEval(batch);
+                        return Step::NeedsEval(&self.pending_states);
                     }
                 }
             }
         }
         self.vanilla_q_bounds = q_bounds;
-        if !batch.is_empty() {
-            return Step::NeedsEval(batch);
+        if !self.pending_states.is_empty() {
+            return Step::NeedsEval(&self.pending_states);
         }
+        self.search_active = false;
         let network_value = self.root_network_value;
         Step::Done(visit_count_result::<G>(&self.tree, root, network_value))
     }
@@ -523,7 +521,7 @@ fn simulate<G: Game>(
         match tree.try_expand(&state, bufs) {
             ExpandResult::NeedsEval(player) => {
                 let state_key = state.state_key();
-                return SimResult::NeedsEval(PendingEval {
+                return SimResult::NeedsEval {
                     state,
                     context: Phase::Simulating {
                         player,
@@ -531,7 +529,7 @@ fn simulate<G: Game>(
                         path: bufs.take_path(),
                         state_key,
                     },
-                });
+                };
             }
             ExpandResult::Chance(id) => {
                 tree.set_child(current, edge_idx, id);
@@ -991,18 +989,15 @@ mod tests {
 
     fn run_to_completion<G: Game>(
         search: &mut Search<G>,
-        config: &Config,
         evaluator: &impl Evaluator<G>,
         rng: &mut fastrand::Rng,
     ) -> SearchResult {
-        let mut step = search.run(config, rng);
+        let mut evals = vec![];
         loop {
-            match step {
-                Step::NeedsEval(pendings) => {
-                    let states: Vec<&G> = pendings.iter().map(|p| &p.state).collect();
-                    let evals = evaluator.evaluate_batch(&states, rng);
-                    let paired = evals.into_iter().zip(pendings).collect();
-                    step = search.supply(paired, rng);
+            match search.supply(&evals, rng) {
+                Step::NeedsEval(states) => {
+                    let refs: Vec<&G> = states.iter().collect();
+                    evals = evaluator.evaluate_batch(&refs, rng);
                 }
                 Step::Done(result) => return result,
             }
@@ -1056,8 +1051,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let mut search = Search::new(TrivialGame::new());
-        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
+        let mut search = Search::new(TrivialGame::new(), config);
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
 
         assert_eq!(
             result.selected_action, 0,
@@ -1131,30 +1126,20 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let mut search = Search::new(TwoStepGame::new());
-        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
+        let mut search = Search::new(TwoStepGame::new(), config);
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
 
         let action = result.selected_action;
         let node_count_before = search.tree.node_count();
         search.apply_action(action);
-        let mut step = search.run(&config, &mut rng);
+
+        // Second search reuses tree; compaction happens inside supply.
+        let result2 = run_to_completion(&mut search, &evaluator, &mut rng);
         let node_count_after_compact = search.tree.node_count();
         assert!(
             node_count_after_compact < node_count_before,
             "retain_subtree should compact: {node_count_after_compact} >= {node_count_before}"
         );
-
-        let result2 = loop {
-            step = match step {
-                Step::NeedsEval(pendings) => {
-                    let states: Vec<&TwoStepGame> = pendings.iter().map(|p| &p.state).collect();
-                    let evals = evaluator.evaluate_batch(&states, &mut rng);
-                    let paired = evals.into_iter().zip(pendings).collect();
-                    search.supply(paired, &mut rng)
-                }
-                Step::Done(r) => break r,
-            };
-        };
 
         let total: f32 = result2.policy.iter().sum();
         assert!(
@@ -1165,14 +1150,16 @@ mod tests {
 
     #[test]
     fn state_machine_terminal_root() {
-        let config = Config::default();
         let mut rng = fastrand::Rng::new();
 
-        let mut search = Search::new(TrivialGame {
-            done: true,
-            chose_win: true,
-        });
-        match search.run(&config, &mut rng) {
+        let mut search = Search::new(
+            TrivialGame {
+                done: true,
+                chose_win: true,
+            },
+            Config::default(),
+        );
+        match search.supply(&[], &mut rng) {
             Step::Done(result) => {
                 assert_eq!(result.value, 1.0);
                 assert!(result.policy.iter().all(|&p| p == 0.0));
@@ -1190,8 +1177,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let mut search = Search::new(TrivialGame::new());
-        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
+        let mut search = Search::new(TrivialGame::new(), config);
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
 
         let total: f32 = result.policy.iter().sum();
         assert!(
@@ -1203,7 +1190,6 @@ mod tests {
     #[test]
     fn sequential_halving_halves_candidates() {
         // With 4 candidates, after one phase we should have 2
-        let game = TrivialGame::new();
         let evaluator = RolloutEvaluator { num_rollouts: 1 };
         let config = Config {
             num_simulations: 100,
@@ -1212,8 +1198,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::new();
 
-        let mut search = Search::new(game);
-        let result = run_to_completion(&mut search, &config, &evaluator, &mut rng);
+        let mut search = Search::new(TrivialGame::new(), config);
+        let result = run_to_completion(&mut search, &evaluator, &mut rng);
 
         // Should complete successfully and pick the winning action
         assert_eq!(result.selected_action, 0);

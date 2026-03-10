@@ -9,18 +9,15 @@ use crate::player::{PerPlayer, Player};
 /// Drive a search to completion using the provided evaluator.
 fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
     search: &mut Search<G>,
-    config: &Config,
     evaluator: &E,
     rng: &mut fastrand::Rng,
 ) -> SearchResult {
-    let mut step = search.run(config, rng);
+    let mut evals = vec![];
     loop {
-        match step {
-            Step::NeedsEval(pendings) => {
-                let states: Vec<&G> = pendings.iter().map(|p| &p.state).collect();
-                let evals = evaluator.evaluate_batch(&states, rng);
-                let paired = evals.into_iter().zip(pendings).collect();
-                step = search.supply(paired, rng);
+        match search.supply(&evals, rng) {
+            Step::NeedsEval(states) => {
+                let refs: Vec<&G> = states.iter().collect();
+                evals = evaluator.evaluate_batch(&refs, rng);
             }
             Step::Done(result) => return result,
         }
@@ -55,8 +52,8 @@ pub fn play_match<G: Game>(
         } else {
             let seat = if swap { player.opponent() } else { player };
             let eval = evaluators.0[seat as usize];
-            let config = &configs[seat];
-            let result = run_to_completion(&mut Search::new(state.clone()), config, eval, rng);
+            let config = configs[seat].clone();
+            let result = run_to_completion(&mut Search::new(state.clone(), config), eval, rng);
             let action = result.selected_action;
 
             actions.push(action);

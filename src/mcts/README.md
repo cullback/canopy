@@ -7,34 +7,23 @@ Gumbel AlphaZero MCTS with DAG-based search, leaf parallelism, and tree reuse. I
 ### `Search<G: Game>` — state-machine driver
 
 ```rust
-Search::new(root_state: G) -> Self
+Search::new(root_state: G, config: Config) -> Self
 search.state() -> &G
+search.set_num_simulations(n: u32)
 search.apply_action(action: usize)
-search.run(config: &Config, rng: &mut Rng) -> Step<G>
-search.supply(evals: Vec<(Evaluation, PendingEval<G>)>, rng: &mut Rng) -> Step<G>
+search.supply(evals: &[Evaluation], rng: &mut Rng) -> Step<'_, G>
 ```
 
-The search tree persists across moves. Call `apply_action` to mirror game actions — if the tree has an expanded child for that action, the root pointer follows it in O(1). The next `run` compacts the tree to the surviving subtree. If the child wasn't expanded, the tree is discarded and a fresh search starts.
+The search tree persists across moves. Call `apply_action` to mirror game actions — if the tree has an expanded child for that action, the root pointer follows it in O(1). The next search compacts the tree to the surviving subtree. If the child wasn't expanded, the tree is discarded and a fresh search starts.
 
-### `Step<G>` — state-machine output
+### `Step` — state-machine output
 
 ```rust
-enum Step<G: Game> {
-    NeedsEval(Vec<PendingEval<G>>),  // leaf states needing neural evaluation
-    Done(SearchResult),               // search complete
+enum Step<'a, G: Game> {
+    NeedsEval(&'a [G]), // leaf states that need evaluation
+    Done(SearchResult),  // search complete
 }
 ```
-
-### `PendingEval<G>` — continuation token
-
-```rust
-struct PendingEval<G: Game> {
-    pub state: G,       // the leaf state to evaluate
-    context: Phase,     // private: where to attach the result in the tree
-}
-```
-
-Fully self-contained. The private `context` carries all bookkeeping so that `supply` knows where to attach results without any ambient mutable state. It is impossible to call `supply` without a matching `NeedsEval`.
 
 ### `SearchResult` — search output
 
@@ -61,13 +50,23 @@ struct Config {
 }
 ```
 
-## Usage protocol
+## Usage
 
-```
-1. search.run(config, rng)          → Step::NeedsEval or Step::Done
-2. evaluate the batch on GPU
-3. search.supply(evals, rng)        → Step::NeedsEval or Step::Done
-4. repeat until Step::Done
+`supply` is the only stepping function. Pass an empty slice to start a search; pass evaluations on subsequent calls. `NeedsEval` borrows the leaf states directly.
+
+```rust
+let mut search = Search::new(state, config);
+let mut evals = vec![];
+loop {
+    match search.supply(&evals, &mut rng) {
+        Step::NeedsEval(states) => {
+            evals = evaluate(states);
+        }
+        Step::Done(result) => break result,
+    }
+}
+search.apply_action(result.selected_action);
+// next search: just loop supply again (tree is reused)
 ```
 
 The caller controls batching across multiple concurrent searches — the neural evaluator can combine leaf requests from parallel self-play workers into a single forward pass. The MCTS module has no dependency on `Evaluator`; evaluation is entirely the caller's responsibility.
@@ -84,7 +83,7 @@ Replaces the tree with a directed acyclic graph, enabling transposition tables w
 
 > **Resumable search with batched NN evaluation**
 
-Splits the MCTS loop so that search pauses at leaf nodes, batches multiple pending evaluations into a single GPU forward pass, then resumes. The `Step`/`PendingEval` state machine makes this the natural API rather than a retrofit. `leaf_batch_size` controls how many leaves to collect before yielding.
+Splits the MCTS loop so that search pauses at leaf nodes, batches multiple pending evaluations into a single GPU forward pass, then resumes. The `supply`/`pending_states` state machine makes this the natural API rather than a retrofit. `leaf_batch_size` controls how many leaves to collect before yielding.
 
 > **Efficient arena-based tree data structure with tree reuse**
 
@@ -100,7 +99,7 @@ Mixes the actual game outcome `z` with the MCTS root Q-value `q` as the training
 
 ## Module layout
 
-| File      | Contents                                                                                                                          |
-| --------- | --------------------------------------------------------------------------------------------------------------------------------- |
-| `mod.rs`  | `Search`, `Config`, `Step`, `PendingEval`, `SearchResult`, Gumbel Sequential Halving, simulation loop, improved policy extraction |
-| `tree.rs` | `Tree` arena, `NodeData`, `Edge`, transposition table, `compact`, `backprop`, `recompute_q`                                       |
+| File      | Contents                                                                                                           |
+| --------- | ------------------------------------------------------------------------------------------------------------------ |
+| `mod.rs`  | `Search`, `Config`, `Step`, `SearchResult`, Gumbel Sequential Halving, simulation loop, improved policy extraction |
+| `tree.rs` | `Tree` arena, `NodeData`, `Edge`, transposition table, `compact`, `backprop`, `recompute_q`                        |
