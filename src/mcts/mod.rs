@@ -111,6 +111,10 @@ pub struct Search<G: Game> {
     pending_states: Vec<G>,
     /// Matching contexts for `pending_states` (same length, same order).
     pending_contexts: Vec<Phase>,
+    /// Reusable buffer for softmax / improved-policy computation during
+    /// interior selection (avoids per-node allocation).  Separate from
+    /// `bufs` so it can be borrowed independently by the selection closure.
+    scratch: Vec<f32>,
 }
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -182,6 +186,7 @@ impl<G: Game> Search<G> {
             search_active: false,
             pending_states: Vec::new(),
             pending_contexts: Vec::new(),
+            scratch: Vec::new(),
         }
     }
 
@@ -392,6 +397,7 @@ impl<G: Game> Search<G> {
             let forced_edge = gs.candidates[offset % gs.candidates.len()];
             let q_bounds = (gs.q_min, gs.q_max);
             let config = &self.config;
+            let scratch = &mut self.scratch;
             match simulate(
                 &mut self.tree,
                 root,
@@ -399,7 +405,9 @@ impl<G: Game> Search<G> {
                 rng,
                 &mut self.bufs,
                 Some(forced_edge),
-                |tree, node, player| gumbel_interior_select(tree, node, player, config, q_bounds),
+                |tree, node, sign| {
+                    gumbel_interior_select(tree, node, sign, config, q_bounds, scratch)
+                },
             ) {
                 SimResult::Complete => {
                     advance_sim(gs, &self.tree, &self.bufs.path, root, &self.config);
@@ -426,6 +434,7 @@ impl<G: Game> Search<G> {
     fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
         let root = self.root();
         let config = &self.config;
+        let scratch = &mut self.scratch;
         let mut q_bounds = self.vanilla_q_bounds;
         self.pending_states.clear();
         self.pending_contexts.clear();
@@ -437,7 +446,9 @@ impl<G: Game> Search<G> {
                 rng,
                 &mut self.bufs,
                 None,
-                |tree, node, player| gumbel_interior_select(tree, node, player, config, q_bounds),
+                |tree, node, sign| {
+                    gumbel_interior_select(tree, node, sign, config, q_bounds, scratch)
+                },
             ) {
                 SimResult::Complete => {
                     widen_q_bounds(&self.tree, &self.bufs.path, &mut q_bounds);
@@ -476,7 +487,7 @@ fn simulate<G: Game>(
     rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
     forced_root_edge: Option<usize>,
-    select_decision: impl Fn(&Tree, NodeId, f32) -> usize,
+    mut select_decision: impl FnMut(&Tree, NodeId, f32) -> usize,
 ) -> SimResult<G> {
     bufs.path.clear();
     let mut current = root;
@@ -547,23 +558,22 @@ fn gumbel_interior_select(
     sign: f32,
     config: &Config,
     q_bounds: (f32, f32),
+    scratch: &mut Vec<f32>,
 ) -> usize {
     let edges = tree.edges(node_id);
     let total_child_visits: u32 = edges.iter().map(|e| e.visits).sum();
     let max_visits = tree.max_edge_visits(node_id);
     let vmix_val = v_mix(tree, node_id);
 
-    // Build improved policy logits: logit + σ(normalized Q)
-    let mut improved_logits = Vec::with_capacity(edges.len());
+    // Build improved policy logits in scratch buffer, then softmax in-place
+    scratch.clear();
     for edge in edges {
         let cq = completed_q(tree, edge, vmix_val);
         let q_norm = normalize_q(cq, q_bounds.0, q_bounds.1, sign);
         let s = sigma(q_norm, max_visits, config.c_visit, config.c_scale);
-        improved_logits.push(edge.logit + s);
+        scratch.push(edge.logit + s);
     }
-
-    // Softmax the improved logits
-    let improved_policy = softmax(&improved_logits);
+    softmax(scratch);
 
     // Select argmax(π'(a) - N(a) / (1 + Σ N))
     let denom = 1.0 + total_child_visits as f32;
@@ -571,7 +581,7 @@ fn gumbel_interior_select(
         .iter()
         .enumerate()
         .map(|(i, e)| {
-            let score = improved_policy[i] - e.visits as f32 / denom;
+            let score = scratch[i] - e.visits as f32 / denom;
             (i, score)
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
@@ -657,12 +667,17 @@ fn v_mix(tree: &Tree, id: NodeId) -> f32 {
     (v + n_total * weighted_q) / (1.0 + n_total)
 }
 
-fn softmax(logits: &[f32]) -> Vec<f32> {
-    let max = logits.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
-    let mut probs: Vec<f32> = logits.iter().map(|&l| (l - max).exp()).collect();
-    let sum: f32 = probs.iter().sum();
-    probs.iter_mut().for_each(|p| *p /= sum);
-    probs
+/// In-place softmax: transforms logits into probabilities.
+fn softmax(buf: &mut [f32]) {
+    let max = buf.iter().fold(f32::NEG_INFINITY, |a, &b| a.max(b));
+    let mut sum = 0.0f32;
+    for v in buf.iter_mut() {
+        *v = (*v - max).exp();
+        sum += *v;
+    }
+    for v in buf.iter_mut() {
+        *v /= sum;
+    }
 }
 
 /// Sample Gumbel(0) = -ln(-ln(U)).
@@ -883,10 +898,10 @@ fn extract_gumbel_result<G: Game>(
         let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
         improved_logits.push(gs.root_logits[i] + s);
     }
-    let improved_probs = softmax(&improved_logits);
+    softmax(&mut improved_logits);
 
     let mut policy = vec![0.0f32; G::NUM_ACTIONS];
-    for (edge, &prob) in ctx.edges.iter().zip(&improved_probs) {
+    for (edge, &prob) in ctx.edges.iter().zip(&improved_logits) {
         policy[edge.action] = prob;
     }
 
