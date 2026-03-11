@@ -1,10 +1,11 @@
-//! # Pig dice game — tournament mode
+//! # Pig dice game — tournament & training
 //!
 //! Runs a head-to-head tournament between two MCTS bots with different
 //! configurations playing the Pig dice game.
 //!
 //! ```text
 //! cargo run --example pig -- --p1-simulations 1000 --p2-simulations 5000
+//! cargo run --example pig --features nn -- train --iterations 5 --games 20
 //! ```
 
 use clap::Command;
@@ -15,6 +16,11 @@ use canopy2::game::{Game, Status};
 use canopy2::tournament;
 
 mod game;
+
+#[cfg(feature = "nn")]
+mod encoder;
+#[cfg(feature = "nn")]
+mod model;
 
 use game::{PigGame, Player};
 
@@ -68,14 +74,69 @@ impl Game for PigGame {
 
 fn app() -> Command {
     let mut cmd = Command::new("pig").about("Pig dice game tournament between two MCTS bots");
+
+    #[cfg(feature = "nn")]
+    {
+        cmd = cmd.subcommand(cli::train_command());
+    }
+
     for arg in cli::tournament_args() {
         cmd = cmd.arg(arg);
     }
     cmd
 }
 
+#[cfg(feature = "nn")]
+fn train_config() -> canopy2::train::TrainConfig {
+    use canopy2::train::TrainConfig;
+
+    TrainConfig {
+        iterations: 200,
+        games_per_iter: 100,
+        mcts_sims: 200,
+        mcts_sims_start: 50,
+        epochs: 3,
+        batch_size: 128,
+        replay_window: 5,
+        warmup_iters: 50,
+        bench_games: 20,
+        bench_interval: 10,
+        bench_baseline_sims: 200,
+        gumbel_m: 2,
+        leaf_batch_size: 1,
+        explore_moves: 10,
+        ..TrainConfig::default()
+    }
+}
+
+#[cfg(feature = "nn")]
+fn run_train(matches: &clap::ArgMatches) {
+    use canopy2::game::Game;
+    use canopy2::nn::StateEncoder;
+    use canopy2::train::{BurnTrainableModel, default_device};
+
+    let config = cli::parse_train_config(matches, train_config());
+    let device = default_device();
+
+    let new_state = |_rng: &mut fastrand::Rng| PigGame::new(100);
+
+    let mc = model::PigModelConfig::new(PigGame::NUM_ACTIONS, encoder::PigEncoder::FEATURE_SIZE);
+    let mut trainable = BurnTrainableModel::<PigGame, encoder::PigEncoder, _>::new(
+        move |dev| mc.init(dev),
+        &device,
+    );
+    canopy2::train::run_training::<PigGame, _>(config, &mut trainable, new_state);
+}
+
 fn main() {
     let matches = app().get_matches();
+
+    #[cfg(feature = "nn")]
+    if let Some(sub) = matches.subcommand_matches("train") {
+        run_train(sub);
+        return;
+    }
+
     let opts = cli::parse_tournament(&matches);
 
     let mut rng = fastrand::Rng::new();

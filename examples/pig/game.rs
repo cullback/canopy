@@ -67,6 +67,14 @@ impl PigGame {
 
     /// True when the game is waiting for a die roll (chance event),
     /// false when the current player must choose ROLL or HOLD.
+    pub fn scores(&self) -> [u32; 2] {
+        self.scores
+    }
+
+    pub fn turn_total(&self) -> u32 {
+        self.turn_total
+    }
+
     pub fn is_rolling(&self) -> bool {
         self.rolling
     }
