@@ -23,6 +23,18 @@ impl Player {
         }
     }
 
+    /// Returns the winner given a terminal reward, or `None` for draws.
+    /// Positive reward → P1, negative → P2, zero → draw.
+    pub fn from_reward(reward: f32) -> Option<Self> {
+        if reward > 0.0 {
+            Some(Player::One)
+        } else if reward < 0.0 {
+            Some(Player::Two)
+        } else {
+            None
+        }
+    }
+
     pub fn sign(self) -> f32 {
         match self {
             Player::One => 1.0,

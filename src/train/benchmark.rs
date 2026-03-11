@@ -8,7 +8,7 @@ use crate::nn::StateEncoder;
 use crate::player::Player;
 
 use super::TrainConfig;
-use super::self_play::{BatcherStats, InferRequest, InferSender, batcher_loop};
+use super::inference::{BatcherStats, InferRequest, InferSender, batcher_loop, gpu_worker_loop};
 
 /// Async bench game task: plays games alternating NN (batched) and baseline (local) turns.
 #[allow(clippy::too_many_arguments)]
@@ -206,22 +206,27 @@ where
     let concurrent_games = config.concurrent_games.min(config.bench_games as usize);
     let max_batch_size = config.max_batch_size;
     let num_actions = G::NUM_ACTIONS;
-    let feature_size = E::FEATURE_SIZE;
 
     let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * max_batch_size);
 
     let stats = Arc::new(BatcherStats::new());
     let stats_ref = stats.clone();
 
-    // Batcher on a plain std::thread — receives pre-encoded features, runs GPU inference
-    let batcher_handle = std::thread::spawn(move || {
-        batcher_loop(
-            &mut request_rx,
-            |features, batch_size| evaluator.infer_features(features, batch_size, feature_size),
+    // Batcher → GPU worker channel (crossbeam SPMC, 1 worker for benchmark)
+    let (work_tx, work_rx) = crossbeam_channel::bounded(2);
+
+    let worker_handle = std::thread::spawn(move || {
+        gpu_worker_loop(
+            work_rx,
+            |features, batch_size, feature_size| {
+                evaluator.infer_features(features, batch_size, feature_size)
+            },
             num_actions,
-            max_batch_size,
-            &stats_ref,
         );
+    });
+
+    let batcher_handle = std::thread::spawn(move || {
+        batcher_loop(&mut request_rx, &work_tx, max_batch_size, &stats_ref);
     });
 
     // Tokio runtime for async bench tasks
@@ -260,6 +265,7 @@ where
     });
 
     batcher_handle.join().unwrap();
+    worker_handle.join().unwrap();
     pb.finish();
 
     (
