@@ -3,7 +3,6 @@ use std::ops::{Index, IndexMut};
 
 use crate::eval::Evaluation;
 use crate::game::{Game, Status};
-use crate::player::Player;
 
 // ── NodeId ───────────────────────────────────────────────────────────
 
@@ -52,7 +51,7 @@ impl Edge {
 
 pub(super) enum NodeKind {
     Terminal,
-    Decision(Player),
+    Decision(f32),
     Chance,
 }
 
@@ -131,7 +130,7 @@ impl Bufs {
 pub(super) enum ExpandResult {
     Leaf(NodeId),
     Chance(NodeId),
-    NeedsEval(Player),
+    NeedsEval(f32),
 }
 
 // ── Tree ─────────────────────────────────────────────────────────────
@@ -229,7 +228,7 @@ impl Tree {
                 let id = self.insert(state_key, NodeKind::Terminal, reward, std::iter::empty());
                 ExpandResult::Leaf(id)
             }
-            Status::Ongoing(player) => {
+            Status::Ongoing => {
                 state.chance_outcomes(&mut bufs.chances);
                 if !bufs.chances.is_empty() {
                     let edges = bufs.chances.drain(..).map(Edge::new_chance);
@@ -239,7 +238,7 @@ impl Tree {
 
                 bufs.actions.clear();
                 state.legal_actions(&mut bufs.actions);
-                ExpandResult::NeedsEval(player)
+                ExpandResult::NeedsEval(state.current_sign())
             }
         }
     }
@@ -248,7 +247,7 @@ impl Tree {
         &mut self,
         eval: &Evaluation,
         actions: &[usize],
-        player: Player,
+        sign: f32,
         state_key: Option<u64>,
     ) -> NodeId {
         let priors = crate::utils::softmax_masked(&eval.policy_logits, actions);
@@ -256,7 +255,7 @@ impl Tree {
             let logit = eval.policy_logits[action];
             Edge::new_decision(action, prior, logit)
         });
-        self.insert(state_key, NodeKind::Decision(player), eval.value, edges)
+        self.insert(state_key, NodeKind::Decision(sign), eval.value, edges)
     }
 
     // ── Backprop ─────────────────────────────────────────────────
@@ -280,14 +279,14 @@ impl Tree {
     /// Recompute Q values along a path (leaf-to-root), accounting for virtual losses.
     ///
     /// For each node on the path, re-derives Q from its edges' visits and children.
-    /// Virtual-loss visits contribute a pessimistic value (`-player.sign()` for
+    /// Virtual-loss visits contribute a pessimistic value (`-sign` for
     /// decision nodes) instead of the child's Q, discouraging re-selection of
     /// in-flight edges. When `virtual_losses == 0` everywhere, this degenerates
     /// to the standard formula.
     pub fn recompute_q(&mut self, path: &[(NodeId, usize)]) {
         for &(nid, _) in path.iter().rev() {
             let vloss_value = match self[nid].kind {
-                NodeKind::Decision(p) => -p.sign(),
+                NodeKind::Decision(sign) => -sign,
                 _ => 0.0,
             };
 

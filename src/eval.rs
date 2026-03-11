@@ -71,7 +71,7 @@ fn rollout<G: Game>(state: &mut G, action_buf: &mut Vec<usize>, rng: &mut fastra
     loop {
         match state.status() {
             Status::Terminal(reward) => return reward,
-            Status::Ongoing(_) => {
+            Status::Ongoing => {
                 if let Some(action) = state.sample_chance(rng) {
                     state.apply_action(action);
                 } else {

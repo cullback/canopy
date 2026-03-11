@@ -3,7 +3,6 @@ use std::path::PathBuf;
 use clap::{Arg, ArgMatches, Command};
 
 use crate::mcts::Config;
-use crate::player::PerPlayer;
 
 const PREFIXES: [&str; 2] = ["p1", "p2"];
 
@@ -45,8 +44,8 @@ pub fn config_args() -> Vec<Arg> {
 }
 
 /// Parse both MCTS [`Config`]s from clap [`ArgMatches`].
-pub fn parse_configs(matches: &ArgMatches) -> PerPlayer<Config> {
-    PerPlayer(PREFIXES.map(|p| parse_one(matches, p)))
+pub fn parse_configs(matches: &ArgMatches) -> [Config; 2] {
+    PREFIXES.map(|p| parse_one(matches, p))
 }
 
 /// Returns a `train` subcommand with all game-agnostic args.

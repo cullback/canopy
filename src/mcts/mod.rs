@@ -3,7 +3,6 @@ mod tree;
 
 use crate::eval::Evaluation;
 use crate::game::{Game, Status};
-use crate::player::Player;
 
 use seq_halving::Schedule;
 use tree::{Bufs, ExpandResult, NodeId, NodeKind, Tree};
@@ -118,11 +117,11 @@ pub struct Search<G: Game> {
 
 enum Phase {
     ExpandingRoot {
-        player: Player,
+        sign: f32,
         actions: Vec<usize>,
     },
     Simulating {
-        player: Player,
+        sign: f32,
         actions: Vec<usize>,
         path: Vec<(NodeId, usize)>,
         state_key: Option<u64>,
@@ -131,8 +130,8 @@ enum Phase {
 
 /// Gumbel Sequential Halving state for root action selection.
 struct GumbelState {
-    /// The player at the root node (needed for Q sign-flipping).
-    root_player: Player,
+    /// The sign at the root node (needed for Q sign-flipping).
+    root_sign: f32,
     /// Pre-summed g(a) + logit(a) per root edge (for candidate scoring).
     gumbel_scores: Vec<f32>,
     /// Raw logits per root edge (needed for improved policy in extract_gumbel_result).
@@ -270,8 +269,8 @@ impl<G: Game> Search<G> {
 
             let root_value = self.tree.utility(new_root);
             self.root_network_value = root_value;
-            let root_player = match *self.tree.kind(new_root) {
-                NodeKind::Decision(p) => p,
+            let root_sign = match *self.tree.kind(new_root) {
+                NodeKind::Decision(sign) => sign,
                 _ => return self.run_vanilla_sims(rng),
             };
 
@@ -279,7 +278,7 @@ impl<G: Game> Search<G> {
                 &self.tree,
                 new_root,
                 root_value,
-                root_player,
+                root_sign,
                 &self.config,
                 rng,
             ));
@@ -296,12 +295,12 @@ impl<G: Game> Search<G> {
                     self.root_network_value = self.tree.utility(id);
                     self.run_vanilla_sims(rng)
                 }
-                ExpandResult::NeedsEval(player) => {
+                ExpandResult::NeedsEval(sign) => {
                     self.pending_states.clear();
                     self.pending_contexts.clear();
                     self.pending_states.push(self.root_state.clone());
                     self.pending_contexts.push(Phase::ExpandingRoot {
-                        player,
+                        sign,
                         actions: self.bufs.take_actions(),
                     });
                     Step::NeedsEval(&self.pending_states)
@@ -315,9 +314,9 @@ impl<G: Game> Search<G> {
         debug_assert_eq!(evals.len(), self.pending_contexts.len());
         for (eval, context) in evals.iter().zip(self.pending_contexts.drain(..)) {
             match context {
-                Phase::ExpandingRoot { player, actions } => {
+                Phase::ExpandingRoot { sign, actions } => {
                     let state_key = self.root_state.state_key();
-                    let root = self.tree.complete_expand(eval, &actions, player, state_key);
+                    let root = self.tree.complete_expand(eval, &actions, sign, state_key);
                     self.root = Some(root);
                     self.root_network_value = eval.value;
 
@@ -326,14 +325,14 @@ impl<G: Game> Search<G> {
                         &self.tree,
                         root,
                         eval.value,
-                        player,
+                        sign,
                         &self.config,
                         rng,
                     ));
                     self.bufs.reclaim_actions(actions);
                 }
                 Phase::Simulating {
-                    player,
+                    sign,
                     actions,
                     path,
                     state_key,
@@ -343,7 +342,7 @@ impl<G: Game> Search<G> {
                     if self.tree.edges(parent)[edge_idx].child.is_none() {
                         let child = match state_key.and_then(|k| self.tree.lookup(k)) {
                             Some(existing) => existing,
-                            None => self.tree.complete_expand(eval, &actions, player, state_key),
+                            None => self.tree.complete_expand(eval, &actions, sign, state_key),
                         };
                         self.tree.set_child(parent, edge_idx, child);
                     }
@@ -477,7 +476,7 @@ fn simulate<G: Game>(
     rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
     forced_root_edge: Option<usize>,
-    select_decision: impl Fn(&Tree, NodeId, Player) -> usize,
+    select_decision: impl Fn(&Tree, NodeId, f32) -> usize,
 ) -> SimResult<G> {
     bufs.path.clear();
     let mut current = root;
@@ -488,9 +487,9 @@ fn simulate<G: Game>(
         let edge_idx = match *tree.kind(current) {
             NodeKind::Terminal => break,
             NodeKind::Chance => tree.sample_chance_edge(current, rng),
-            NodeKind::Decision(player) => forced
+            NodeKind::Decision(sign) => forced
                 .take()
-                .unwrap_or_else(|| select_decision(tree, current, player)),
+                .unwrap_or_else(|| select_decision(tree, current, sign)),
         };
 
         let edges = tree.edges(current);
@@ -505,12 +504,12 @@ fn simulate<G: Game>(
         }
 
         match tree.try_expand(&state, bufs) {
-            ExpandResult::NeedsEval(player) => {
+            ExpandResult::NeedsEval(sign) => {
                 let state_key = state.state_key();
                 return SimResult::NeedsEval {
                     state,
                     context: Phase::Simulating {
-                        player,
+                        sign,
                         actions: bufs.take_actions(),
                         path: bufs.take_path(),
                         state_key,
@@ -545,7 +544,7 @@ fn simulate<G: Game>(
 fn gumbel_interior_select(
     tree: &Tree,
     node_id: NodeId,
-    player: Player,
+    sign: f32,
     config: &Config,
     q_bounds: (f32, f32),
 ) -> usize {
@@ -558,7 +557,7 @@ fn gumbel_interior_select(
     let mut improved_logits = Vec::with_capacity(edges.len());
     for edge in edges {
         let cq = completed_q(tree, edge, vmix_val);
-        let q_norm = normalize_q_for_player(cq, q_bounds.0, q_bounds.1, player);
+        let q_norm = normalize_q(cq, q_bounds.0, q_bounds.1, sign);
         let s = sigma(q_norm, max_visits, config.c_visit, config.c_scale);
         improved_logits.push(edge.logit + s);
     }
@@ -582,23 +581,21 @@ fn gumbel_interior_select(
 
 // ── Gumbel helpers ────────────────────────────────────────────────────
 
-fn normalize_q(q: f32, q_min: f32, q_max: f32) -> f32 {
-    let range = q_max - q_min;
+/// Normalize Q into [0, 1] from the current player's perspective.
+///
+/// Flips Q and bounds for the minimizing player so that higher normalized
+/// values always mean "better for me".
+fn normalize_q(q: f32, q_min: f32, q_max: f32, sign: f32) -> f32 {
+    let (q, lo, hi) = if sign > 0.0 {
+        (q, q_min, q_max)
+    } else {
+        (-q, -q_max, -q_min)
+    };
+    let range = hi - lo;
     if range <= f32::EPSILON {
         return 0.5;
     }
-    (q - q_min) / range
-}
-
-/// Normalize Q from a player's perspective, flipping bounds for P2.
-fn normalize_q_for_player(q: f32, q_min: f32, q_max: f32, player: Player) -> f32 {
-    let sign = player.sign();
-    let (pmin, pmax) = if sign > 0.0 {
-        (q_min, q_max)
-    } else {
-        (-q_max, -q_min)
-    };
-    normalize_q(sign * q, pmin, pmax)
+    (q - lo) / range
 }
 
 fn sigma(q_norm: f32, max_visits: u32, c_visit: f32, c_scale: f32) -> f32 {
@@ -679,7 +676,7 @@ fn init_gumbel(
     tree: &Tree,
     root: NodeId,
     root_value: f32,
-    root_player: Player,
+    root_sign: f32,
     config: &Config,
     rng: &mut fastrand::Rng,
 ) -> GumbelState {
@@ -709,7 +706,7 @@ fn init_gumbel(
     let schedule = Schedule::new(config.num_simulations as usize, candidates.len());
 
     GumbelState {
-        root_player,
+        root_sign,
         gumbel_scores,
         root_logits,
         candidates,
@@ -742,7 +739,7 @@ impl<'a> RootContext<'a> {
 /// Score a candidate edge: g(a) + logit(a) + σ(completedQ(a)).
 fn score_candidate(edge_idx: usize, gs: &GumbelState, ctx: &RootContext, config: &Config) -> f32 {
     let cq = completed_q(ctx.tree, &ctx.edges[edge_idx], ctx.vmix_val);
-    let q_norm = normalize_q_for_player(cq, gs.q_min, gs.q_max, gs.root_player);
+    let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
     let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
     gs.gumbel_scores[edge_idx] + s
 }
@@ -882,7 +879,7 @@ fn extract_gumbel_result<G: Game>(
     let mut improved_logits = Vec::with_capacity(ctx.edges.len());
     for (i, edge) in ctx.edges.iter().enumerate() {
         let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
-        let q_norm = normalize_q_for_player(cq, gs.q_min, gs.q_max, gs.root_player);
+        let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
         let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
         improved_logits.push(gs.root_logits[i] + s);
     }
@@ -923,7 +920,6 @@ fn extract_gumbel_result<G: Game>(
 mod tests {
     use super::*;
     use crate::eval::{Evaluator, RolloutEvaluator};
-    use crate::player::Player;
 
     fn run_to_completion<G: Game>(
         search: &mut Search<G>,
@@ -965,7 +961,7 @@ mod tests {
             if self.done {
                 Status::Terminal(if self.chose_win { 1.0 } else { -1.0 })
             } else {
-                Status::Ongoing(Player::One)
+                Status::Ongoing
             }
         }
         fn legal_actions(&self, buf: &mut Vec<usize>) {
@@ -1028,7 +1024,7 @@ mod tests {
         fn status(&self) -> Status {
             match self.reward {
                 Some(r) => Status::Terminal(r),
-                None => Status::Ongoing(Player::One),
+                None => Status::Ongoing,
             }
         }
         fn legal_actions(&self, buf: &mut Vec<usize>) {

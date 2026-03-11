@@ -13,7 +13,6 @@ use clap::{Arg, Command};
 use canopy2::cli;
 use canopy2::eval::{Evaluator, RolloutEvaluator};
 use canopy2::game_log::GameLog;
-use canopy2::player::PerPlayer;
 use canopy2::tournament;
 
 mod game;
@@ -472,8 +471,8 @@ fn run_tournament(matches: &clap::ArgMatches) {
         }
     };
 
-    let evaluators: PerPlayer<&dyn Evaluator<GameState>> =
-        PerPlayer([eval_ref(p1_eval_name), eval_ref(p2_eval_name)]);
+    let evaluators: [&dyn Evaluator<GameState>; 2] =
+        [eval_ref(p1_eval_name), eval_ref(p2_eval_name)];
 
     let mut rng = fastrand::Rng::new();
 
@@ -485,8 +484,8 @@ fn run_tournament(matches: &clap::ArgMatches) {
 
     println!(
         "=== Catan Tournament: {} vs {} simulations, P1 ({}) vs P2 ({}), {} games, dice: {} ===\n",
-        configs.0[0].num_simulations,
-        configs.0[1].num_simulations,
+        configs[0].num_simulations,
+        configs[1].num_simulations,
         p1_eval_name,
         p2_eval_name,
         num_games,

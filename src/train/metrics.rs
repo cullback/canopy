@@ -50,8 +50,8 @@ pub(super) struct CsvRow {
     pub game_length_stddev: f64,
     pub game_length_min: u32,
     pub game_length_max: u32,
-    pub game_p1_wins: u32,
-    pub game_p2_wins: u32,
+    pub game_wins: u32,
+    pub game_losses: u32,
     pub game_draws: u32,
 
     // ── Policy diagnostics ───────────────────────────────────────────

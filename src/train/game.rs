@@ -4,7 +4,6 @@ use crate::eval::Evaluation;
 use crate::game::{Game, Status};
 use crate::mcts::{Search, Step};
 use crate::nn::StateEncoder;
-use crate::player::Player;
 
 use super::Sample;
 
@@ -19,7 +18,7 @@ pub(super) struct ActorConfig {
 /// Result of a single self-play game.
 pub(super) struct GameResult {
     pub samples: Vec<Sample>,
-    pub winner: Option<Player>,
+    pub reward: f32,
 }
 
 /// Play one full self-play game, returning collected training samples.
@@ -41,7 +40,7 @@ where
 {
     let mut samples: Vec<Sample> = Vec::new();
     let mut turn_count: u32 = 0;
-    let mut last_player: Option<Player> = None;
+    let mut last_sign: Option<f32> = None;
     let mut actions_buf = Vec::new();
     let mut encode_buf = Vec::with_capacity(E::FEATURE_SIZE);
 
@@ -58,21 +57,15 @@ where
                 s.z *= reward;
                 s.game_length = turn_count;
             }
-            return GameResult {
-                samples,
-                winner: Player::from_reward(reward),
-            };
+            return GameResult { samples, reward };
         }
 
-        let current = match search.state().status() {
-            Status::Ongoing(p) => p,
-            Status::Terminal(_) => unreachable!(),
-        };
+        let sign = search.state().current_sign();
 
         // Track turn count via player changes
-        if last_player != Some(current) {
+        if last_sign != Some(sign) {
             turn_count += 1;
-            last_player = Some(current);
+            last_sign = Some(sign);
         }
 
         // Skip forced moves (single legal action)
@@ -103,7 +96,7 @@ where
                     evals.clear();
                     for pending_state in states {
                         let sign = match pending_state.status() {
-                            Status::Ongoing(p) => p.sign(),
+                            Status::Ongoing => pending_state.current_sign(),
                             Status::Terminal(_) => 1.0,
                         };
                         encode_buf.clear();
@@ -120,7 +113,7 @@ where
         };
 
         // Create training sample
-        let q = result.value * current.sign();
+        let q = result.value * sign;
         let chosen = if turn_count <= actor_config.explore_moves {
             sample_from_policy(&result.policy, rng)
         } else {
@@ -146,12 +139,12 @@ where
         samples.push(Sample {
             features: features_buf.into_boxed_slice(),
             policy_target: result.policy.into_boxed_slice(),
-            z: current.sign(),
+            z: sign,
             q,
             full_search: is_full_search,
             move_number: turn_count,
             game_length: 0, // backfilled at game end
-            network_value: result.network_value * current.sign(),
+            network_value: result.network_value * sign,
             value_correction,
             q_std,
             prior_agrees,

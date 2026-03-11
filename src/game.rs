@@ -1,15 +1,13 @@
-use crate::player::Player;
-
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Status {
-    Ongoing(Player),
+    Ongoing,
     /// Reward from P1's perspective. P2's reward is `-reward` (zero-sum).
     Terminal(f32),
 }
 
 /// Core trait: every game implements this.
 ///
-/// Actions are `usize` in `[0, NUM_ACTIONS)`. Players are [`Player`].
+/// Actions are `usize` in `[0, NUM_ACTIONS)`.
 pub trait Game: Clone + Send + Sync {
     // ── Core (required) ───────────────────────────────────────────
 
@@ -19,6 +17,12 @@ pub trait Game: Clone + Send + Sync {
     fn status(&self) -> Status;
     fn legal_actions(&self, buf: &mut Vec<usize>);
     fn apply_action(&mut self, action: usize);
+
+    /// Sign of the current player: `1.0` for the maximizing player, `-1.0`
+    /// for the minimizing player. Single-player games can leave the default.
+    fn current_sign(&self) -> f32 {
+        1.0
+    }
 
     // ── Transposition ─────────────────────────────────────────────
 

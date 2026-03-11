@@ -5,7 +5,6 @@ use crate::eval::Evaluator;
 use crate::game::Game;
 use crate::mcts::Search;
 use crate::nn::StateEncoder;
-use crate::player::Player;
 
 use super::TrainConfig;
 use super::game::{ActorConfig, GameResult, play_game};
@@ -14,8 +13,8 @@ use super::inference::{BatcherStats, InferRequest, batcher_loop, gpu_worker_loop
 /// Aggregated results from one self-play iteration (many games).
 pub(super) struct IterGameResults {
     pub samples: Vec<super::Sample>,
-    pub p1_wins: u32,
-    pub p2_wins: u32,
+    pub wins: u32,
+    pub losses: u32,
     pub draws: u32,
     pub total_turns: u32,
     pub min_game_length: Option<u32>,
@@ -37,8 +36,8 @@ impl IterGameResults {
 
     fn aggregate(games: Vec<GameResult>, stats: &BatcherStats, num_tasks: usize) -> Self {
         let mut samples = Vec::new();
-        let mut p1_wins = 0u32;
-        let mut p2_wins = 0u32;
+        let mut wins = 0u32;
+        let mut losses = 0u32;
         let mut draws = 0u32;
         let mut total_turns = 0u32;
         let mut sum_turns_sq = 0u64;
@@ -51,15 +50,17 @@ impl IterGameResults {
             sum_turns_sq += (game_len as u64) * (game_len as u64);
             min_game_length = Some(min_game_length.map_or(game_len, |m: u32| m.min(game_len)));
             max_game_length = max_game_length.max(game_len);
-            match game.winner {
-                Some(Player::One) => p1_wins += 1,
-                Some(Player::Two) => p2_wins += 1,
-                None => draws += 1,
+            if game.reward > 0.0 {
+                wins += 1;
+            } else if game.reward < 0.0 {
+                losses += 1;
+            } else {
+                draws += 1;
             }
             samples.extend(game.samples);
         }
 
-        let num_games = p1_wins + p2_wins + draws;
+        let num_games = wins + losses + draws;
         let game_length_stddev = if num_games > 0 {
             let mean = total_turns as f64 / num_games as f64;
             let var = sum_turns_sq as f64 / num_games as f64 - mean * mean;
@@ -70,8 +71,8 @@ impl IterGameResults {
 
         Self {
             samples,
-            p1_wins,
-            p2_wins,
+            wins,
+            losses,
             draws,
             total_turns,
             min_game_length,

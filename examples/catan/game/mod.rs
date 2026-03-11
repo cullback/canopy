@@ -71,8 +71,12 @@ impl Game for GameState {
                     Status::Terminal(reward)
                 }
             }
-            _ => Status::Ongoing(self.current_player),
+            _ => Status::Ongoing,
         }
+    }
+
+    fn current_sign(&self) -> f32 {
+        self.current_player.sign()
     }
 
     fn legal_actions(&self, buf: &mut Vec<usize>) {

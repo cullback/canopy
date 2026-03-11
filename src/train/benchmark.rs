@@ -5,7 +5,6 @@ use crate::eval::{Evaluation, Evaluator, RolloutEvaluator};
 use crate::game::{Game, Status};
 use crate::mcts::{Config, Search, Step};
 use crate::nn::StateEncoder;
-use crate::player::Player;
 
 use super::TrainConfig;
 use super::inference::{BatcherStats, InferRequest, InferSender, batcher_loop, gpu_worker_loop};
@@ -35,12 +34,12 @@ async fn bench_game_task<G: Game, E: StateEncoder<G>>(
             break;
         }
 
-        let nn_player = Player::from(i as usize % 2);
+        let nn_sign = if i % 2 == 0 { 1.0f32 } else { -1.0 };
         let mut state = new_state(&mut rng);
 
         let reward = play_bench_game::<G, E>(
             &mut state,
-            nn_player,
+            nn_sign,
             &nn_config,
             &baseline_config,
             &baseline_eval,
@@ -49,7 +48,7 @@ async fn bench_game_task<G: Game, E: StateEncoder<G>>(
         )
         .await;
 
-        let nn_reward = reward * nn_player.sign();
+        let nn_reward = reward * nn_sign;
         match nn_reward.partial_cmp(&0.0) {
             Some(std::cmp::Ordering::Greater) => {
                 nn_wins.fetch_add(1, Relaxed);
@@ -92,7 +91,7 @@ fn run_to_completion<G: Game>(
 /// baseline turns use run_to_completion locally.
 async fn play_bench_game<G: Game, E: StateEncoder<G>>(
     state: &mut G,
-    nn_player: Player,
+    nn_sign: f32,
     nn_config: &Config,
     baseline_config: &Config,
     baseline_eval: &RolloutEvaluator,
@@ -108,8 +107,8 @@ async fn play_bench_game<G: Game, E: StateEncoder<G>>(
         }
         match state.status() {
             Status::Terminal(reward) => return reward,
-            Status::Ongoing(current) => {
-                let action = if current == nn_player {
+            Status::Ongoing => {
+                let action = if state.current_sign() == nn_sign {
                     // NN player: batched eval via batcher
                     let mut search = Search::new(state.clone(), nn_config.clone());
                     let mut evals: Vec<Evaluation> = vec![];
@@ -119,7 +118,7 @@ async fn play_bench_game<G: Game, E: StateEncoder<G>>(
                                 let mut receivers = Vec::with_capacity(states.len());
                                 for pending_state in states {
                                     let sign = match pending_state.status() {
-                                        Status::Ongoing(p) => p.sign(),
+                                        Status::Ongoing => pending_state.current_sign(),
                                         Status::Terminal(_) => 1.0,
                                     };
                                     encode_buf.clear();

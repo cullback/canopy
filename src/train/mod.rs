@@ -274,7 +274,7 @@ pub fn run_training<G, M>(
             &new_state,
         );
         let self_play_elapsed = iter_start.elapsed();
-        let games_done = sp.p1_wins + sp.p2_wins + sp.draws;
+        let games_done = sp.wins + sp.losses + sp.draws;
         let samples_this_iter = sp.samples.len();
         let num_tasks = sp.num_tasks;
         let avg_batch_size = sp.avg_batch_size();
@@ -343,12 +343,12 @@ pub fn run_training<G, M>(
             String::new()
         };
         eprintln!(
-            "iter {}/{}: {} games (P1:{} P2:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | tasks={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
+            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | tasks={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             games_done,
-            sp.p1_wins,
-            sp.p2_wins,
+            sp.wins,
+            sp.losses,
             sp.draws,
             avg_turns,
             samples.len(),
@@ -383,8 +383,8 @@ pub fn run_training<G, M>(
             game_length_stddev: sp.game_length_stddev,
             game_length_min: min_game_length,
             game_length_max: sp.max_game_length,
-            game_p1_wins: sp.p1_wins,
-            game_p2_wins: sp.p2_wins,
+            game_wins: sp.wins,
+            game_losses: sp.losses,
             game_draws: sp.draws,
             // Policy diagnostics
             policy_entropy_avg: stats.policy_entropy_avg,

@@ -81,8 +81,12 @@ impl Game for PigGame {
         } else if self.scores[Player::Two] >= self.target {
             Status::Terminal(-1.0)
         } else {
-            Status::Ongoing(self.current)
+            Status::Ongoing
         }
+    }
+
+    fn current_sign(&self) -> f32 {
+        self.current.sign()
     }
 
     fn legal_actions(&self, buf: &mut Vec<usize>) {
@@ -141,11 +145,11 @@ fn main() {
 
     let mut rng = fastrand::Rng::new();
     let eval = RolloutEvaluator { num_rollouts: 1 };
-    let evaluators: PerPlayer<&dyn Evaluator<PigGame>> = PerPlayer([&eval, &eval]);
+    let evaluators: [&dyn Evaluator<PigGame>; 2] = [&eval, &eval];
 
     println!(
         "=== Pig Tournament: {} vs {} simulations, {} games ===\n",
-        configs.0[0].num_simulations, configs.0[1].num_simulations, num_games,
+        configs[0].num_simulations, configs[1].num_simulations, num_games,
     );
 
     tournament::tournament(

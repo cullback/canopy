@@ -4,7 +4,6 @@ use crate::eval::Evaluator;
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
 use crate::mcts::{Config, Search, SearchResult, Step};
-use crate::player::{PerPlayer, Player};
 
 /// Drive a search to completion using the provided evaluator.
 fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
@@ -29,11 +28,11 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
 /// Returns the terminal reward from P1's perspective and a log of every action
 /// applied (both chance outcomes and player decisions).
 /// When `swap` is true, seat assignments are reversed:
-/// the game's P1 uses `configs[Player::Two]` and vice versa.
+/// the game's P1 uses `configs[1]` and vice versa.
 pub fn play_match<G: Game>(
     game: &G,
-    evaluators: &PerPlayer<&dyn Evaluator<G>>,
-    configs: &PerPlayer<Config>,
+    evaluators: &[&dyn Evaluator<G>; 2],
+    configs: &[Config; 2],
     swap: bool,
     rng: &mut fastrand::Rng,
 ) -> (f32, Vec<usize>) {
@@ -41,17 +40,19 @@ pub fn play_match<G: Game>(
     let mut actions = Vec::new();
 
     loop {
-        let player = match state.status() {
+        match state.status() {
             Status::Terminal(reward) => return (reward, actions),
-            Status::Ongoing(p) => p,
+            Status::Ongoing => {}
         };
 
         if let Some(action) = state.sample_chance(rng) {
             actions.push(action);
             state.apply_action(action);
         } else {
-            let seat = if swap { player.opponent() } else { player };
-            let eval = evaluators.0[seat as usize];
+            // sign-to-index: 1.0 → 0, -1.0 → 1
+            let idx = ((1.0 - state.current_sign()) / 2.0) as usize;
+            let seat = idx ^ (swap as usize);
+            let eval = evaluators[seat];
             let config = configs[seat].clone();
             let result = run_to_completion(&mut Search::new(state.clone(), config), eval, rng);
             let action = result.selected_action;
@@ -69,12 +70,12 @@ pub fn play_match<G: Game>(
 /// odd-numbered games swap which config plays as P1.
 pub fn tournament<G: Game>(
     new_game: impl Fn(u64) -> G,
-    evaluators: &PerPlayer<&dyn Evaluator<G>>,
-    configs: &PerPlayer<Config>,
+    evaluators: &[&dyn Evaluator<G>; 2],
+    configs: &[Config; 2],
     num_games: u32,
     rng: &mut fastrand::Rng,
 ) -> Vec<GameLog> {
-    let mut wins: PerPlayer<u32> = PerPlayer::default();
+    let mut wins: [u32; 2] = [0, 0];
     let mut draws = 0u32;
     let mut game_logs = Vec::with_capacity(num_games as usize);
 
@@ -95,19 +96,14 @@ pub fn tournament<G: Game>(
         let seat0_reward = if swap { -reward } else { reward };
 
         if seat0_reward > 0.0 {
-            wins[Player::One] += 1;
+            wins[0] += 1;
         } else if seat0_reward < 0.0 {
-            wins[Player::Two] += 1;
+            wins[1] += 1;
         } else {
             draws += 1;
         }
 
-        pb.set_message(format!(
-            "{}-{}-{}",
-            wins[Player::One],
-            wins[Player::Two],
-            draws,
-        ));
+        pb.set_message(format!("{}-{}-{}", wins[0], wins[1], draws));
         pb.inc(1);
     }
 
@@ -115,14 +111,15 @@ pub fn tournament<G: Game>(
 
     let total = num_games;
     println!(
-        "P1 {}/{} ({:.1}%) | P2 {}/{} ({:.1}%) | Draws {} ({:.1}%)",
-        wins[Player::One],
+        "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%)",
+        wins[0],
         total,
-        wins[Player::One] as f32 / total as f32 * 100.0,
-        wins[Player::Two],
+        wins[0] as f32 / total as f32 * 100.0,
+        wins[1],
         total,
-        wins[Player::Two] as f32 / total as f32 * 100.0,
+        wins[1] as f32 / total as f32 * 100.0,
         draws,
+        total,
         draws as f32 / total as f32 * 100.0,
     );
 

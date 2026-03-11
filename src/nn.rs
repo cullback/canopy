@@ -72,8 +72,8 @@ where
     M: PolicyValueNet<B> + Send,
 {
     fn evaluate(&self, state: &G, _rng: &mut fastrand::Rng) -> Evaluation {
-        let current = match state.status() {
-            Status::Ongoing(p) => p,
+        let sign = match state.status() {
+            Status::Ongoing => state.current_sign(),
             Status::Terminal(reward) => return Evaluation::uniform(G::NUM_ACTIONS, reward),
         };
 
@@ -100,7 +100,7 @@ where
         // NN outputs value in [-1, 1] from perspective player's view.
         // Convert to P1's perspective by multiplying by current player's sign.
         let raw_value = value_data[0];
-        let value = raw_value * current.sign();
+        let value = raw_value * sign;
 
         Evaluation {
             policy_logits: logits_data,
@@ -123,8 +123,8 @@ where
                 Status::Terminal(reward) => {
                     results[i] = Some(Evaluation::uniform(G::NUM_ACTIONS, reward));
                 }
-                Status::Ongoing(player) => {
-                    signs.push(player.sign());
+                Status::Ongoing => {
+                    signs.push(state.current_sign());
                     nn_indices.push(i);
                 }
             }
