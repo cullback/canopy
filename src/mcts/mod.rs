@@ -111,10 +111,6 @@ pub struct Search<G: Game> {
     pending_states: Vec<G>,
     /// Matching contexts for `pending_states` (same length, same order).
     pending_contexts: Vec<Phase>,
-    /// Reusable buffer for softmax / improved-policy computation during
-    /// interior selection (avoids per-node allocation).  Separate from
-    /// `bufs` so it can be borrowed independently by the selection closure.
-    scratch: Vec<f32>,
 }
 
 // ── Internal types ────────────────────────────────────────────────────
@@ -186,7 +182,6 @@ impl<G: Game> Search<G> {
             search_active: false,
             pending_states: Vec::new(),
             pending_contexts: Vec::new(),
-            scratch: Vec::new(),
         }
     }
 
@@ -397,8 +392,8 @@ impl<G: Game> Search<G> {
             let forced_edge = gs.candidates[offset % gs.candidates.len()];
             let q_bounds = (gs.q_min, gs.q_max);
             let config = &self.config;
-            let scratch = &mut self.scratch;
-            match simulate(
+            let mut scratch = std::mem::take(&mut self.bufs.scratch);
+            let result = simulate(
                 &mut self.tree,
                 root,
                 &self.root_state,
@@ -406,9 +401,11 @@ impl<G: Game> Search<G> {
                 &mut self.bufs,
                 Some(forced_edge),
                 |tree, node, sign| {
-                    gumbel_interior_select(tree, node, sign, config, q_bounds, scratch)
+                    gumbel_interior_select(tree, node, sign, config, q_bounds, &mut scratch)
                 },
-            ) {
+            );
+            self.bufs.scratch = scratch;
+            match result {
                 SimResult::Complete => {
                     advance_sim(gs, &self.tree, &self.bufs.path, root, &self.config);
                 }
@@ -434,7 +431,7 @@ impl<G: Game> Search<G> {
     fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
         let root = self.root();
         let config = &self.config;
-        let scratch = &mut self.scratch;
+        let mut scratch = std::mem::take(&mut self.bufs.scratch);
         let mut q_bounds = self.vanilla_q_bounds;
         self.pending_states.clear();
         self.pending_contexts.clear();
@@ -447,7 +444,7 @@ impl<G: Game> Search<G> {
                 &mut self.bufs,
                 None,
                 |tree, node, sign| {
-                    gumbel_interior_select(tree, node, sign, config, q_bounds, scratch)
+                    gumbel_interior_select(tree, node, sign, config, q_bounds, &mut scratch)
                 },
             ) {
                 SimResult::Complete => {
@@ -463,12 +460,14 @@ impl<G: Game> Search<G> {
                     self.pending_contexts.push(context);
                     if self.pending_states.len() as u32 >= self.config.leaf_batch_size {
                         self.vanilla_q_bounds = q_bounds;
+                        self.bufs.scratch = scratch;
                         return Step::NeedsEval(&self.pending_states);
                     }
                 }
             }
         }
         self.vanilla_q_bounds = q_bounds;
+        self.bufs.scratch = scratch;
         if !self.pending_states.is_empty() {
             return Step::NeedsEval(&self.pending_states);
         }

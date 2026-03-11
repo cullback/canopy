@@ -92,6 +92,9 @@ pub(super) struct Bufs {
     pub actions: Vec<usize>,
     pub chances: Vec<(usize, u32)>,
     pub path: Vec<(NodeId, usize)>,
+    /// Reusable buffer for softmax / improved-policy computation during
+    /// interior selection (avoids per-node allocation).
+    pub scratch: Vec<f32>,
     /// Recycled path Vecs to avoid per-leaf allocation.
     spare_paths: Vec<Vec<(NodeId, usize)>>,
     /// Recycled actions Vecs to avoid per-leaf allocation.
