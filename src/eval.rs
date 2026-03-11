@@ -67,6 +67,44 @@ impl<G: Game> Evaluator<G> for RolloutEvaluator {
     }
 }
 
+/// Named registry of evaluators for tournament CLI dispatch.
+pub struct Evaluators<G: Game> {
+    entries: Vec<(String, Box<dyn Evaluator<G>>)>,
+}
+
+impl<G: Game> Default for Evaluators<G> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<G: Game> Evaluators<G> {
+    pub fn new() -> Self {
+        Self {
+            entries: Vec::new(),
+        }
+    }
+
+    pub fn add(&mut self, name: impl Into<String>, eval: impl Evaluator<G> + 'static) {
+        self.entries.push((name.into(), Box::new(eval)));
+    }
+
+    pub fn add_boxed(&mut self, name: impl Into<String>, eval: Box<dyn Evaluator<G>>) {
+        self.entries.push((name.into(), eval));
+    }
+
+    /// Look up an evaluator by name. Panics with available names on miss.
+    pub fn get(&self, name: &str) -> &dyn Evaluator<G> {
+        for (n, e) in &self.entries {
+            if n == name {
+                return &**e;
+            }
+        }
+        let names: Vec<&str> = self.entries.iter().map(|(n, _)| n.as_str()).collect();
+        panic!("unknown evaluator '{name}', available: {names:?}");
+    }
+}
+
 fn rollout<G: Game>(state: &mut G, action_buf: &mut Vec<usize>, rng: &mut fastrand::Rng) -> f32 {
     loop {
         match state.status() {

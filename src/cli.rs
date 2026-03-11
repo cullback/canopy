@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use clap::{Arg, ArgMatches, Command};
 
 use crate::mcts::Config;
+pub use crate::tournament::TournamentOptions;
 
 const PREFIXES: [&str; 2] = ["p1", "p2"];
 
@@ -58,16 +59,26 @@ pub fn tournament_args() -> Vec<Arg> {
         Arg::new("log-dir")
             .long("log-dir")
             .help("Directory to write game logs"),
+        Arg::new("p1-eval")
+            .long("p1-eval")
+            .default_value("rollout")
+            .help("Evaluator for player 1"),
+        Arg::new("p2-eval")
+            .long("p2-eval")
+            .default_value("rollout")
+            .help("Evaluator for player 2"),
     ];
     args.extend(config_args());
     args
 }
 
-/// Parsed tournament settings.
-pub struct TournamentOptions {
-    pub num_games: u32,
-    pub configs: [Config; 2],
-    pub log_dir: Option<PathBuf>,
+/// Build a complete [`Command`] with all standard tournament args.
+pub fn tournament_command(name: &str, about: &str) -> Command {
+    let mut cmd = Command::new(name.to_string()).about(about.to_string());
+    for arg in tournament_args() {
+        cmd = cmd.arg(arg);
+    }
+    cmd
 }
 
 /// Parse standard tournament options from clap [`ArgMatches`].
@@ -80,6 +91,10 @@ pub fn parse_tournament(matches: &ArgMatches) -> TournamentOptions {
             .unwrap(),
         configs: parse_configs(matches),
         log_dir: matches.get_one::<String>("log-dir").map(PathBuf::from),
+        eval_names: [
+            matches.get_one::<String>("p1-eval").unwrap().clone(),
+            matches.get_one::<String>("p2-eval").unwrap().clone(),
+        ],
     }
 }
 

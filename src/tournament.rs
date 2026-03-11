@@ -1,9 +1,58 @@
+use std::path::PathBuf;
+
 use indicatif::{ProgressBar, ProgressStyle};
 
-use crate::eval::Evaluator;
+use crate::eval::{Evaluator, Evaluators};
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
 use crate::mcts::{Config, Search, SearchResult, Step};
+
+/// Parsed tournament settings.
+pub struct TournamentOptions {
+    pub num_games: u32,
+    pub configs: [Config; 2],
+    pub log_dir: Option<PathBuf>,
+    pub eval_names: [String; 2],
+}
+
+impl TournamentOptions {
+    /// Run a full tournament: print banner, play games, print results, save logs.
+    pub fn run<G: Game>(
+        &self,
+        new_game: impl Fn(u64) -> G,
+        registry: &Evaluators<G>,
+    ) -> Vec<GameLog> {
+        let mut rng = fastrand::Rng::new();
+
+        let evaluators: [&dyn Evaluator<G>; 2] = [
+            registry.get(&self.eval_names[0]),
+            registry.get(&self.eval_names[1]),
+        ];
+
+        println!(
+            "=== Tournament: {} ({}) vs {} ({}) simulations, {} games ===\n",
+            self.eval_names[0],
+            self.configs[0].num_simulations,
+            self.eval_names[1],
+            self.configs[1].num_simulations,
+            self.num_games,
+        );
+
+        let logs = tournament(
+            new_game,
+            &evaluators,
+            &self.configs,
+            self.num_games,
+            &mut rng,
+        );
+
+        if let Some(dir) = &self.log_dir {
+            save_game_logs(&logs, dir);
+        }
+
+        logs
+    }
+}
 
 /// Drive a search to completion using the provided evaluator.
 fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(

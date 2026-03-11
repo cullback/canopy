@@ -11,9 +11,8 @@
 use clap::{Arg, Command};
 
 use canopy2::cli;
-use canopy2::eval::{Evaluator, RolloutEvaluator};
+use canopy2::eval::{Evaluator, Evaluators, RolloutEvaluator};
 use canopy2::game_log::GameLog;
-use canopy2::tournament;
 
 mod game;
 mod heuristic;
@@ -41,29 +40,14 @@ fn app() -> Command {
         );
     }
 
-    let mut cmd = Command::new("catan")
-        .about("Catan tournament between two MCTS bots")
-        .subcommand(viz);
+    let mut cmd =
+        cli::tournament_command("catan", "Catan tournament between two MCTS bots").subcommand(viz);
 
     // Train subcommand (always visible, but requires nn feature to run)
     #[cfg(feature = "nn")]
     {
         cmd = cmd.subcommand(train_command());
     }
-
-    cmd = cmd
-        .arg(
-            Arg::new("p1-eval")
-                .long("p1-eval")
-                .default_value("rollout")
-                .help("Evaluator for player 1: rollout, heuristic, or nn"),
-        )
-        .arg(
-            Arg::new("p2-eval")
-                .long("p2-eval")
-                .default_value("rollout")
-                .help("Evaluator for player 2: rollout, heuristic, or nn"),
-        );
 
     #[cfg(feature = "nn")]
     {
@@ -88,9 +72,6 @@ fn app() -> Command {
             .help("Use balanced dice instead of random"),
     );
 
-    for arg in cli::tournament_args() {
-        cmd = cmd.arg(arg);
-    }
     cmd
 }
 
@@ -417,44 +398,20 @@ fn run_train(matches: &clap::ArgMatches) {
 fn run_tournament(matches: &clap::ArgMatches) {
     let opts = cli::parse_tournament(matches);
 
-    let p1_eval_name = matches.get_one::<String>("p1-eval").unwrap().as_str();
-    let p2_eval_name = matches.get_one::<String>("p2-eval").unwrap().as_str();
-
-    let rollout = RolloutEvaluator { num_rollouts: 1 };
-    let heuristic_eval = heuristic::HeuristicEvaluator {
-        rollout: RolloutEvaluator { num_rollouts: 1 },
-    };
+    let mut evals = Evaluators::new();
+    evals.add("rollout", RolloutEvaluator { num_rollouts: 1 });
+    evals.add(
+        "heuristic",
+        heuristic::HeuristicEvaluator {
+            rollout: RolloutEvaluator { num_rollouts: 1 },
+        },
+    );
 
     #[cfg(feature = "nn")]
-    let nn_eval: Option<Box<dyn Evaluator<GameState>>> = {
-        let nn_model_path = matches.get_one::<String>("nn-model");
-        if p1_eval_name == "nn" || p2_eval_name == "nn" {
-            let encoder_type = matches.get_one::<String>("encoder").unwrap().as_str();
-            Some(load_nn_eval(
-                nn_model_path.expect("--nn-model required when using nn evaluator"),
-                encoder_type,
-            ))
-        } else {
-            None
-        }
-    };
-
-    let eval_ref = |name: &str| -> &dyn Evaluator<GameState> {
-        match name {
-            "rollout" => &rollout,
-            "heuristic" => &heuristic_eval,
-            #[cfg(feature = "nn")]
-            "nn" => nn_eval.as_deref().unwrap(),
-            other => {
-                panic!("unknown evaluator '{other}', expected 'rollout', 'heuristic', or 'nn'")
-            }
-        }
-    };
-
-    let evaluators: [&dyn Evaluator<GameState>; 2] =
-        [eval_ref(p1_eval_name), eval_ref(p2_eval_name)];
-
-    let mut rng = fastrand::Rng::new();
+    if let Some(path) = matches.get_one::<String>("nn-model") {
+        let encoder_type = matches.get_one::<String>("encoder").unwrap().as_str();
+        evals.add_boxed("nn", load_nn_eval(path, encoder_type));
+    }
 
     let dice = if matches.get_flag("balanced") {
         Dice::Balanced(game::dice::BalancedDice::new())
@@ -462,33 +419,7 @@ fn run_tournament(matches: &clap::ArgMatches) {
         Dice::Random
     };
 
-    println!(
-        "=== Catan Tournament: {} vs {} simulations, P1 ({}) vs P2 ({}), {} games, dice: {} ===\n",
-        opts.configs[0].num_simulations,
-        opts.configs[1].num_simulations,
-        p1_eval_name,
-        p2_eval_name,
-        opts.num_games,
-        if matches!(dice, Dice::Balanced(_)) {
-            "balanced"
-        } else {
-            "random"
-        },
-    );
-
-    let new_game = move |seed: u64| game::new_game(seed, dice);
-
-    let game_logs = tournament::tournament(
-        new_game,
-        &evaluators,
-        &opts.configs,
-        opts.num_games,
-        &mut rng,
-    );
-
-    if let Some(dir) = &opts.log_dir {
-        tournament::save_game_logs(&game_logs, dir);
-    }
+    opts.run(move |seed| game::new_game(seed, dice), &evals);
 }
 
 #[cfg(feature = "nn")]

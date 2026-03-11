@@ -12,6 +12,9 @@ use tree::{Bufs, ExpandResult, NodeId, NodeKind, Tree};
 /// Gumbel AlphaZero MCTS configuration.
 #[derive(Clone)]
 pub struct Config {
+    /// Simulation budget per search. Set to 0 to skip search entirely and
+    /// select an action from the evaluator's policy alone (useful for
+    /// heuristic evaluators that encode a fixed strategy).
     pub num_simulations: u32,
     /// Number of actions sampled via Gumbel-Top-k at the root (m).
     pub num_sampled_actions: u32,
@@ -705,9 +708,11 @@ fn init_gumbel(
         .collect();
 
     // Gumbel-Top-k: score = g + logit, take top m
+    // At least 1 candidate is needed to select an action even with 0 simulations.
     let m = (config.num_sampled_actions as usize)
         .min(num_edges)
-        .min(config.num_simulations as usize);
+        .min(config.num_simulations as usize)
+        .max(1);
 
     let mut scored: Vec<(usize, f32)> = gumbel_scores
         .iter()

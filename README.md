@@ -2,17 +2,10 @@
 
 MCTS framework for two player games.
 
-- two-player, stochastic games
-
-## Game ideas
-
-- Pig
-- 2048
-- Connect four
-- 1v1 Catan
-- Checkers
-- Othello
-- Risk
+- a general MCTS framework for one and two player games
+- perfect-information, optionally stochastic
+- best-in-class framework for training games on single machine systems (not distributed, not networked)
+- autoregressive actions
 
 ## Optimizations
 
