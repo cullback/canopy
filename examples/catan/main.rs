@@ -53,17 +53,6 @@ fn app() -> Command {
 
     cmd = cmd
         .arg(
-            Arg::new("num-games")
-                .short('n')
-                .long("num-games")
-                .default_value("20"),
-        )
-        .arg(
-            Arg::new("log-dir")
-                .long("log-dir")
-                .help("Directory to write game logs"),
-        )
-        .arg(
             Arg::new("p1-eval")
                 .long("p1-eval")
                 .default_value("rollout")
@@ -99,7 +88,7 @@ fn app() -> Command {
             .help("Use balanced dice instead of random"),
     );
 
-    for arg in cli::config_args() {
+    for arg in cli::tournament_args() {
         cmd = cmd.arg(arg);
     }
     cmd
@@ -426,16 +415,7 @@ fn run_train(matches: &clap::ArgMatches) {
 }
 
 fn run_tournament(matches: &clap::ArgMatches) {
-    let num_games: u32 = matches
-        .get_one::<String>("num-games")
-        .unwrap()
-        .parse()
-        .unwrap();
-    let log_dir = matches
-        .get_one::<String>("log-dir")
-        .map(std::path::PathBuf::from);
-
-    let configs = cli::parse_configs(matches);
+    let opts = cli::parse_tournament(matches);
 
     let p1_eval_name = matches.get_one::<String>("p1-eval").unwrap().as_str();
     let p2_eval_name = matches.get_one::<String>("p2-eval").unwrap().as_str();
@@ -484,11 +464,11 @@ fn run_tournament(matches: &clap::ArgMatches) {
 
     println!(
         "=== Catan Tournament: {} vs {} simulations, P1 ({}) vs P2 ({}), {} games, dice: {} ===\n",
-        configs[0].num_simulations,
-        configs[1].num_simulations,
+        opts.configs[0].num_simulations,
+        opts.configs[1].num_simulations,
         p1_eval_name,
         p2_eval_name,
-        num_games,
+        opts.num_games,
         if matches!(dice, Dice::Balanced(_)) {
             "balanced"
         } else {
@@ -498,15 +478,16 @@ fn run_tournament(matches: &clap::ArgMatches) {
 
     let new_game = move |seed: u64| game::new_game(seed, dice);
 
-    let game_logs = tournament::tournament(new_game, &evaluators, &configs, num_games, &mut rng);
+    let game_logs = tournament::tournament(
+        new_game,
+        &evaluators,
+        &opts.configs,
+        opts.num_games,
+        &mut rng,
+    );
 
-    if let Some(log_dir) = log_dir {
-        std::fs::create_dir_all(&log_dir).expect("failed to create log directory");
-        for (i, log) in game_logs.iter().enumerate() {
-            let log_path = log_dir.join(format!("game_{i}.log"));
-            log.write(&log_path);
-            println!("Wrote {}", log_path.display());
-        }
+    if let Some(dir) = &opts.log_dir {
+        tournament::save_game_logs(&game_logs, dir);
     }
 }
 

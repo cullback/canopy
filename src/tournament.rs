@@ -125,3 +125,13 @@ pub fn tournament<G: Game>(
 
     game_logs
 }
+
+/// Write game logs to a directory, one file per game.
+pub fn save_game_logs(logs: &[GameLog], dir: &std::path::Path) {
+    std::fs::create_dir_all(dir).expect("failed to create log directory");
+    for (i, log) in logs.iter().enumerate() {
+        let path = dir.join(format!("game_{i}.log"));
+        log.write(&path);
+        println!("Wrote {}", path.display());
+    }
+}

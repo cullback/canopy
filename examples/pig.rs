@@ -7,7 +7,7 @@
 //! cargo run --example pig -- --p1-simulations 1000 --p2-simulations 5000
 //! ```
 
-use clap::{Arg, Command};
+use clap::Command;
 
 use canopy2::cli;
 use canopy2::eval::{Evaluator, RolloutEvaluator};
@@ -19,15 +19,8 @@ const ROLL: usize = 0;
 const HOLD: usize = 1;
 
 fn app() -> Command {
-    let mut cmd = Command::new("pig")
-        .about("Pig dice game tournament between two MCTS bots")
-        .arg(
-            Arg::new("num-games")
-                .short('n')
-                .long("num-games")
-                .default_value("20"),
-        );
-    for arg in cli::config_args() {
+    let mut cmd = Command::new("pig").about("Pig dice game tournament between two MCTS bots");
+    for arg in cli::tournament_args() {
         cmd = cmd.arg(arg);
     }
     cmd
@@ -135,13 +128,7 @@ impl Game for PigGame {
 
 fn main() {
     let matches = app().get_matches();
-    let num_games: u32 = matches
-        .get_one::<String>("num-games")
-        .unwrap()
-        .parse()
-        .unwrap();
-
-    let configs = cli::parse_configs(&matches);
+    let opts = cli::parse_tournament(&matches);
 
     let mut rng = fastrand::Rng::new();
     let eval = RolloutEvaluator { num_rollouts: 1 };
@@ -149,14 +136,18 @@ fn main() {
 
     println!(
         "=== Pig Tournament: {} vs {} simulations, {} games ===\n",
-        configs[0].num_simulations, configs[1].num_simulations, num_games,
+        opts.configs[0].num_simulations, opts.configs[1].num_simulations, opts.num_games,
     );
 
-    tournament::tournament(
+    let game_logs = tournament::tournament(
         |_seed| PigGame::new(100),
         &evaluators,
-        &configs,
-        num_games,
+        &opts.configs,
+        opts.num_games,
         &mut rng,
     );
+
+    if let Some(dir) = &opts.log_dir {
+        tournament::save_game_logs(&game_logs, dir);
+    }
 }

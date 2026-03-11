@@ -48,6 +48,41 @@ pub fn parse_configs(matches: &ArgMatches) -> [Config; 2] {
     PREFIXES.map(|p| parse_one(matches, p))
 }
 
+/// Standard tournament args: `--num-games`, `--log-dir`, plus per-player MCTS config.
+pub fn tournament_args() -> Vec<Arg> {
+    let mut args = vec![
+        Arg::new("num-games")
+            .short('n')
+            .long("num-games")
+            .default_value("20"),
+        Arg::new("log-dir")
+            .long("log-dir")
+            .help("Directory to write game logs"),
+    ];
+    args.extend(config_args());
+    args
+}
+
+/// Parsed tournament settings.
+pub struct TournamentOptions {
+    pub num_games: u32,
+    pub configs: [Config; 2],
+    pub log_dir: Option<PathBuf>,
+}
+
+/// Parse standard tournament options from clap [`ArgMatches`].
+pub fn parse_tournament(matches: &ArgMatches) -> TournamentOptions {
+    TournamentOptions {
+        num_games: matches
+            .get_one::<String>("num-games")
+            .unwrap()
+            .parse()
+            .unwrap(),
+        configs: parse_configs(matches),
+        log_dir: matches.get_one::<String>("log-dir").map(PathBuf::from),
+    }
+}
+
 /// Returns a `train` subcommand with all game-agnostic args.
 ///
 /// The caller can append game-specific args via `.arg()`.
