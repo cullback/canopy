@@ -17,6 +17,8 @@ pub struct Config {
     /// heuristic evaluators that encode a fixed strategy).
     pub num_simulations: u32,
     /// Number of actions sampled via Gumbel-Top-k at the root (m).
+    /// Automatically clamped to the number of legal actions, so values
+    /// larger than `NUM_ACTIONS` are safe and behave identically.
     pub num_sampled_actions: u32,
     /// σ scaling parameter (controls Q influence on improved policy).
     pub c_visit: f32,

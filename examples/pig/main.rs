@@ -87,17 +87,17 @@ fn train_config() -> canopy2::train::TrainConfig {
 
     TrainConfig {
         iterations: 200,
-        games_per_iter: 100,
+        games_per_iter: 300,
         mcts_sims: 200,
         mcts_sims_start: 50,
         epochs: 3,
         batch_size: 128,
-        replay_window: 5,
-        warmup_iters: 50,
-        bench_games: 20,
-        bench_interval: 10,
+        replay_window: 10,
+        warmup_iters: 20,
+        bench_games: 100,
+        bench_interval: 5,
         bench_baseline_sims: 200,
-        gumbel_m: 2,
+        concurrent_games: 10,
         leaf_batch_size: 1,
         explore_moves: 10,
         ..TrainConfig::default()

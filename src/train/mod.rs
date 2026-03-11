@@ -106,7 +106,8 @@ pub struct TrainConfig {
     /// Starting MCTS simulations for progressive ramp (ramps linearly to `mcts_sims`).
     /// Set equal to `mcts_sims` for no ramp.
     pub mcts_sims_start: u32,
-    /// Gumbel-Top-k sampled actions at root.
+    /// Gumbel-Top-k sampled actions at root. Clamped to the number of
+    /// legal actions, so values larger than `NUM_ACTIONS` are safe.
     pub gumbel_m: u32,
     /// Sigma scaling parameter for completed-Q transform.
     pub c_visit: f32,
@@ -143,7 +144,7 @@ impl Default for TrainConfig {
             warmup_iters: 100,
 
             // Self-play
-            games_per_iter: 500,
+            games_per_iter: 150,
             concurrent_games: 256,
             max_batch_size: 1024,
             explore_moves: 30,
