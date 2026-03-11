@@ -186,6 +186,20 @@ impl<G: Game> Search<G> {
         }
     }
 
+    /// Reset for a new game, reusing internal allocations.
+    pub fn reset(&mut self, root_state: G) {
+        self.tree.clear();
+        self.root = None;
+        self.root_state = root_state;
+        self.gumbel = None;
+        self.vanilla_budget_remaining = 0;
+        self.vanilla_q_bounds = (0.0, 0.0);
+        self.root_network_value = 0.0;
+        self.search_active = false;
+        self.pending_states.clear();
+        self.pending_contexts.clear();
+    }
+
     /// Read access to the internal game state.
     pub fn state(&self) -> &G {
         &self.root_state

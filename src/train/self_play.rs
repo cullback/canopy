@@ -3,6 +3,7 @@ use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
 use crate::eval::Evaluator;
 use crate::game::Game;
+use crate::mcts::Search;
 use crate::nn::StateEncoder;
 use crate::player::Player;
 
@@ -33,14 +34,68 @@ impl IterGameResults {
             self.total_evals as f64 / self.total_batches as f64
         }
     }
+
+    fn aggregate(games: Vec<GameResult>, stats: &BatcherStats, num_tasks: usize) -> Self {
+        let mut samples = Vec::new();
+        let mut p1_wins = 0u32;
+        let mut p2_wins = 0u32;
+        let mut draws = 0u32;
+        let mut total_turns = 0u32;
+        let mut sum_turns_sq = 0u64;
+        let mut min_game_length: Option<u32> = None;
+        let mut max_game_length = 0u32;
+
+        for game in games {
+            let game_len = game.samples.last().map_or(0, |s| s.game_length);
+            total_turns += game_len;
+            sum_turns_sq += (game_len as u64) * (game_len as u64);
+            min_game_length = Some(min_game_length.map_or(game_len, |m: u32| m.min(game_len)));
+            max_game_length = max_game_length.max(game_len);
+            match game.winner {
+                Some(Player::One) => p1_wins += 1,
+                Some(Player::Two) => p2_wins += 1,
+                None => draws += 1,
+            }
+            samples.extend(game.samples);
+        }
+
+        let num_games = p1_wins + p2_wins + draws;
+        let game_length_stddev = if num_games > 0 {
+            let mean = total_turns as f64 / num_games as f64;
+            let var = sum_turns_sq as f64 / num_games as f64 - mean * mean;
+            var.max(0.0).sqrt()
+        } else {
+            0.0
+        };
+
+        Self {
+            samples,
+            p1_wins,
+            p2_wins,
+            draws,
+            total_turns,
+            min_game_length,
+            max_game_length,
+            game_length_stddev,
+            num_tasks,
+            total_batches: stats.batches.load(Relaxed),
+            total_evals: stats.evals.load(Relaxed),
+        }
+    }
+}
+
+/// Shared state cloned once into each actor task.
+struct TaskContext<G: Game> {
+    request_tx: tokio::sync::mpsc::Sender<InferRequest>,
+    games_remaining: Arc<AtomicU32>,
+    completed: Arc<AtomicU32>,
+    pb: Arc<indicatif::ProgressBar>,
+    batcher_stats: Arc<BatcherStats>,
+    new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
+    actor_config: Arc<ActorConfig>,
 }
 
 /// Run self-play games using async actor tasks with batched multi-GPU inference.
-///
-/// Architecture:
-/// - N async actor tasks play games, sending `InferRequest`s via tokio mpsc
-/// - 1 batcher thread collects requests into batches, dispatches via crossbeam SPMC
-/// - M GPU worker threads receive batches and run forward passes
 ///
 /// Shutdown: actors finish → drop mpsc sender → batcher exits → drops crossbeam
 /// sender → workers exit.
@@ -71,7 +126,7 @@ where
         effective_sims,
     ));
 
-    let base_config = crate::mcts::Config {
+    let mcts_config = crate::mcts::Config {
         num_simulations: effective_sims,
         num_sampled_actions: config.gumbel_m,
         c_visit: config.c_visit,
@@ -81,23 +136,29 @@ where
     };
     let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
-    let actor_config = Arc::new(ActorConfig {
-        explore_moves: config.explore_moves,
-        playout_cap_full_prob: config.playout_cap_full_prob,
-        playout_cap_fast_sims: fast_sims,
-        effective_sims,
-    });
-
     let concurrent_games = config.concurrent_games;
     let max_batch_size = config.max_batch_size;
     let num_actions = G::NUM_ACTIONS;
-    let games_remaining = Arc::new(AtomicU32::new(config.games_per_iter as u32));
-    let completed = Arc::new(AtomicU32::new(0));
-    let batcher_stats = Arc::new(BatcherStats::new());
-    let pb = Arc::new(pb);
 
     // Actor → Batcher channel (tokio mpsc)
     let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * max_batch_size);
+
+    let pb = Arc::new(pb);
+    let batcher_stats = Arc::new(BatcherStats::new());
+    let ctx = Arc::new(TaskContext {
+        request_tx,
+        games_remaining: Arc::new(AtomicU32::new(config.games_per_iter as u32)),
+        completed: Arc::new(AtomicU32::new(0)),
+        pb: pb.clone(),
+        batcher_stats: batcher_stats.clone(),
+        new_state: new_state.clone(),
+        actor_config: Arc::new(ActorConfig {
+            explore_moves: config.explore_moves,
+            playout_cap_full_prob: config.playout_cap_full_prob,
+            playout_cap_fast_sims: fast_sims,
+            effective_sims,
+        }),
+    });
 
     // Batcher → GPU workers channel (crossbeam SPMC, bounded to limit memory)
     // Currently 1 worker; multi-GPU: clone evaluator per worker + spawn more.
@@ -113,7 +174,6 @@ where
         );
     });
 
-    // Spawn batcher thread
     let batcher_stats_ref = batcher_stats.clone();
     let batcher_handle = std::thread::spawn(move || {
         batcher_loop(
@@ -135,33 +195,27 @@ where
 
         for _ in 0..concurrent_games {
             let seed = rng.u64(..);
-            let request_tx = request_tx.clone();
-            let games_remaining = games_remaining.clone();
-            let completed = completed.clone();
-            let pb = pb.clone();
-            let batcher_stats = batcher_stats.clone();
-            let new_state = new_state.clone();
-            let base_config = base_config.clone();
-            let actor_config = actor_config.clone();
+            let ctx = ctx.clone();
+            let mcts_config = mcts_config.clone();
 
             join_set.spawn(async move {
                 let mut rng = fastrand::Rng::with_seed(seed);
                 let mut results = Vec::new();
+                let mut search = Search::new((ctx.new_state)(&mut rng), mcts_config);
 
                 loop {
-                    // Claim a game via atomic decrement
-                    let claimed = games_remaining
+                    let claimed = ctx
+                        .games_remaining
                         .fetch_update(Relaxed, Relaxed, |n| if n > 0 { Some(n - 1) } else { None });
                     if claimed.is_err() {
                         break;
                     }
 
-                    let state = new_state(&mut rng);
-                    let tx = request_tx.clone();
+                    search.reset((ctx.new_state)(&mut rng));
+                    let tx = ctx.request_tx.clone();
                     let game = play_game::<G, E, _, _>(
-                        state,
-                        base_config.clone(),
-                        &actor_config,
+                        &mut search,
+                        &ctx.actor_config,
                         |features| {
                             let tx = tx.clone();
                             async move {
@@ -182,17 +236,17 @@ where
 
                     results.push(game);
 
-                    let done = completed.fetch_add(1, Relaxed) + 1;
-                    pb.set_position(done as u64);
-                    let avg_batch = batcher_stats.avg_batch_size();
-                    let elapsed = pb.elapsed().as_secs_f64();
-                    let evals = batcher_stats.evals.load(Relaxed);
+                    let done = ctx.completed.fetch_add(1, Relaxed) + 1;
+                    ctx.pb.set_position(done as u64);
+                    let avg_batch = ctx.batcher_stats.avg_batch_size();
+                    let evals = ctx.batcher_stats.evals.load(Relaxed);
+                    let elapsed = ctx.pb.elapsed().as_secs_f64();
                     let evals_per_sec = if elapsed > 0.0 {
                         evals as f64 / elapsed
                     } else {
                         0.0
                     };
-                    pb.set_message(format!(
+                    ctx.pb.set_message(format!(
                         "avg_batch={avg_batch:.1}, evals/s={evals_per_sec:.0}"
                     ));
                 }
@@ -201,8 +255,8 @@ where
             });
         }
 
-        // Drop our sender so batcher sees disconnect when all tasks finish
-        drop(request_tx);
+        // Drop our copy so batcher sees disconnect when all tasks finish
+        drop(ctx);
 
         let mut all_results = Vec::new();
         while let Some(result) = join_set.join_next().await {
@@ -211,57 +265,10 @@ where
         all_results
     });
 
-    // Batcher + worker threads exit once all senders are dropped
     batcher_handle.join().unwrap();
     worker_handle.join().unwrap();
 
     pb.finish();
 
-    // Aggregate results
-    let mut samples = Vec::new();
-    let mut p1_wins = 0u32;
-    let mut p2_wins = 0u32;
-    let mut draws = 0u32;
-    let mut total_turns = 0u32;
-    let mut sum_turns_sq = 0u64;
-    let mut min_game_length: Option<u32> = None;
-    let mut max_game_length = 0u32;
-    let mut num_games = 0u32;
-
-    for game in game_results {
-        let game_len = game.samples.last().map_or(0, |s| s.game_length);
-        total_turns += game_len;
-        sum_turns_sq += (game_len as u64) * (game_len as u64);
-        num_games += 1;
-        min_game_length = Some(min_game_length.map_or(game_len, |m: u32| m.min(game_len)));
-        max_game_length = max_game_length.max(game_len);
-        match game.winner {
-            Some(Player::One) => p1_wins += 1,
-            Some(Player::Two) => p2_wins += 1,
-            None => draws += 1,
-        }
-        samples.extend(game.samples);
-    }
-
-    let game_length_stddev = if num_games > 0 {
-        let mean = total_turns as f64 / num_games as f64;
-        let var = sum_turns_sq as f64 / num_games as f64 - mean * mean;
-        var.max(0.0).sqrt()
-    } else {
-        0.0
-    };
-
-    IterGameResults {
-        samples,
-        p1_wins,
-        p2_wins,
-        draws,
-        total_turns,
-        min_game_length,
-        max_game_length,
-        game_length_stddev,
-        num_tasks: concurrent_games,
-        total_batches: batcher_stats.batches.load(Relaxed),
-        total_evals: batcher_stats.evals.load(Relaxed),
-    }
+    IterGameResults::aggregate(game_results, &batcher_stats, concurrent_games)
 }

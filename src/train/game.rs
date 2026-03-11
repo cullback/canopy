@@ -2,7 +2,7 @@ use std::future::Future;
 
 use crate::eval::Evaluation;
 use crate::game::{Game, Status};
-use crate::mcts::{Config, Search, Step};
+use crate::mcts::{Search, Step};
 use crate::nn::StateEncoder;
 use crate::player::Player;
 
@@ -28,8 +28,7 @@ pub(super) struct GameResult {
 /// Leaf evaluation is delegated to the caller-provided `infer` closure, keeping
 /// this function free of any channel, batching, or GPU knowledge.
 pub(super) async fn play_game<G, E, F, Fut>(
-    state: G,
-    mcts_config: Config,
+    search: &mut Search<G>,
     actor_config: &ActorConfig,
     infer: F,
     rng: &mut fastrand::Rng,
@@ -40,7 +39,6 @@ where
     F: Fn(Vec<f32>) -> Fut,
     Fut: Future<Output = (Vec<f32>, f32)>,
 {
-    let mut search = Search::new(state, mcts_config);
     let mut samples: Vec<Sample> = Vec::new();
     let mut turn_count: u32 = 0;
     let mut last_player: Option<Player> = None;
