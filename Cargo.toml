@@ -35,3 +35,7 @@ path = "examples/pig/main.rs"
 [[example]]
 name = "catan"
 path = "examples/catan/main.rs"
+
+[[example]]
+name = "twenty48"
+path = "examples/twenty48/main.rs"
