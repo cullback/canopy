@@ -8,10 +8,6 @@ use crate::encoder::BasicEncoder;
 use crate::game::state::GameState;
 
 const NUM_ACTIONS: usize = GameState::NUM_ACTIONS;
-const NODES_F: usize = BasicEncoder::NODES_F;
-const EDGES_F: usize = BasicEncoder::EDGES_F;
-const TILES_F: usize = BasicEncoder::TILES_F;
-const PORTS_F: usize = BasicEncoder::PORTS_F;
 const TRUNK_DIM: usize = 384;
 
 #[derive(Module, Debug)]
@@ -59,31 +55,13 @@ pub struct CatanResModel<B: Backend> {
 }
 
 pub fn init_resnet<B: Backend>(device: &B::Device) -> CatanResModel<B> {
-    init_resnet_with(NODES_F, EDGES_F, TILES_F, PORTS_F, device)
-}
-
-pub fn init_resnet_with<B: Backend>(
-    nodes_f: usize,
-    edges_f: usize,
-    tiles_f: usize,
-    ports_f: usize,
-    device: &B::Device,
-) -> CatanResModel<B> {
-    let sdim = stream_dim(tiles_f, ports_f);
+    let sdim = stream_dim(BasicEncoder::TILES_F, BasicEncoder::PORTS_F);
     CatanResModel {
         proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
-        proj_tiles: if tiles_f > 0 {
-            Some(LinearConfig::new(tiles_f, TILES_OUT).init(device))
-        } else {
-            None
-        },
-        proj_nodes: LinearConfig::new(nodes_f, NODES_OUT).init(device),
-        proj_edges: LinearConfig::new(edges_f, EDGES_OUT).init(device),
-        proj_ports: if ports_f > 0 {
-            Some(LinearConfig::new(ports_f, PORTS_OUT).init(device))
-        } else {
-            None
-        },
+        proj_tiles: Some(LinearConfig::new(BasicEncoder::TILES_F, TILES_OUT).init(device)),
+        proj_nodes: LinearConfig::new(BasicEncoder::NODES_F, NODES_OUT).init(device),
+        proj_edges: LinearConfig::new(BasicEncoder::EDGES_F, EDGES_OUT).init(device),
+        proj_ports: Some(LinearConfig::new(BasicEncoder::PORTS_F, PORTS_OUT).init(device)),
         input_linear: LinearConfig::new(sdim, TRUNK_DIM).init(device),
         input_norm: LayerNormConfig::new(TRUNK_DIM).init(device),
         blocks: (0..6).map(|_| res_block(TRUNK_DIM, device)).collect(),

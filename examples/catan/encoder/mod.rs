@@ -109,13 +109,7 @@ pub fn load_evaluator(
             Arc::new(
                 NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
                     encoder,
-                    crate::model::init_simple_with(
-                        RichNodeEncoder::NODES_F,
-                        RichNodeEncoder::EDGES_F,
-                        RichNodeEncoder::TILES_F,
-                        RichNodeEncoder::PORTS_F,
-                        device,
-                    ),
+                    crate::model::init_simple_rich(device),
                     path,
                     device.clone(),
                 ),

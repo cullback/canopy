@@ -4,14 +4,10 @@ use canopy2::game::Game;
 use canopy2::nn::PolicyValueNet;
 
 use super::*;
-use crate::encoder::BasicEncoder;
+use crate::encoder::{BasicEncoder, RichNodeEncoder};
 use crate::game::state::GameState;
 
 const NUM_ACTIONS: usize = GameState::NUM_ACTIONS;
-const NODES_F: usize = BasicEncoder::NODES_F;
-const EDGES_F: usize = BasicEncoder::EDGES_F;
-const TILES_F: usize = BasicEncoder::TILES_F;
-const PORTS_F: usize = BasicEncoder::PORTS_F;
 
 #[derive(Module, Debug)]
 pub struct CatanModel<B: Backend> {
@@ -28,31 +24,29 @@ pub struct CatanModel<B: Backend> {
 }
 
 pub fn init_simple<B: Backend>(device: &B::Device) -> CatanModel<B> {
-    init_simple_with(NODES_F, EDGES_F, TILES_F, PORTS_F, device)
-}
-
-pub fn init_simple_with<B: Backend>(
-    nodes_f: usize,
-    edges_f: usize,
-    tiles_f: usize,
-    ports_f: usize,
-    device: &B::Device,
-) -> CatanModel<B> {
-    let sdim = stream_dim(tiles_f, ports_f);
+    let sdim = stream_dim(BasicEncoder::TILES_F, BasicEncoder::PORTS_F);
     CatanModel {
         proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
-        proj_tiles: if tiles_f > 0 {
-            Some(LinearConfig::new(tiles_f, TILES_OUT).init(device))
-        } else {
-            None
-        },
-        proj_nodes: LinearConfig::new(nodes_f, NODES_OUT).init(device),
-        proj_edges: LinearConfig::new(edges_f, EDGES_OUT).init(device),
-        proj_ports: if ports_f > 0 {
-            Some(LinearConfig::new(ports_f, PORTS_OUT).init(device))
-        } else {
-            None
-        },
+        proj_tiles: Some(LinearConfig::new(BasicEncoder::TILES_F, TILES_OUT).init(device)),
+        proj_nodes: LinearConfig::new(BasicEncoder::NODES_F, NODES_OUT).init(device),
+        proj_edges: LinearConfig::new(BasicEncoder::EDGES_F, EDGES_OUT).init(device),
+        proj_ports: Some(LinearConfig::new(BasicEncoder::PORTS_F, PORTS_OUT).init(device)),
+        trunk1: LinearConfig::new(sdim, 256).init(device),
+        trunk2: LinearConfig::new(256, 256).init(device),
+        policy_head: LinearConfig::new(256, NUM_ACTIONS).init(device),
+        value_head1: LinearConfig::new(256, 64).init(device),
+        value_head2: LinearConfig::new(64, 1).init(device),
+    }
+}
+
+pub fn init_simple_rich<B: Backend>(device: &B::Device) -> CatanModel<B> {
+    let sdim = stream_dim(RichNodeEncoder::TILES_F, RichNodeEncoder::PORTS_F);
+    CatanModel {
+        proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
+        proj_tiles: None,
+        proj_nodes: LinearConfig::new(RichNodeEncoder::NODES_F, NODES_OUT).init(device),
+        proj_edges: LinearConfig::new(RichNodeEncoder::EDGES_F, EDGES_OUT).init(device),
+        proj_ports: None,
         trunk1: LinearConfig::new(sdim, 256).init(device),
         trunk2: LinearConfig::new(256, 256).init(device),
         policy_head: LinearConfig::new(256, NUM_ACTIONS).init(device),

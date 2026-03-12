@@ -4,7 +4,7 @@ mod simple;
 
 pub use gnn::{init_gnn, init_gnn_with};
 pub use resnet::init_resnet;
-pub use simple::{init_simple, init_simple_with};
+pub use simple::{init_simple, init_simple_rich};
 
 use burn::nn::Linear;
 use burn::prelude::*;
