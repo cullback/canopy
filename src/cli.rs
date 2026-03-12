@@ -121,8 +121,8 @@ pub fn train_command() -> Command {
                 .help("Self-play games per iteration"),
         )
         .arg(
-            Arg::new("train-mcts")
-                .long("train-mcts")
+            Arg::new("simulations")
+                .long("simulations")
                 .default_value(d.mcts_sims.to_string())
                 .help("MCTS simulations per move during self-play"),
         )
@@ -217,22 +217,22 @@ pub fn train_command() -> Command {
                 .help("Simulations for fast (non-full) search moves"),
         )
         .arg(
-            Arg::new("mcts-sims-start")
-                .long("mcts-sims-start")
+            Arg::new("simulations-start")
+                .long("simulations-start")
                 .default_value(d.mcts_sims_start.to_string())
-                .help("Starting MCTS sims for progressive ramp (ramps linearly to --train-mcts)"),
+                .help("Starting MCTS sims for progressive ramp (ramps linearly to --simulations)"),
         )
         .arg(
-            Arg::new("bench-baseline-sims")
-                .long("bench-baseline-sims")
-                .default_value(d.bench_baseline_sims.to_string())
-                .help("MCTS simulations for benchmark baseline opponent"),
+            Arg::new("bench-sims")
+                .long("bench-sims")
+                .default_value(d.bench_sims.to_string())
+                .help("MCTS simulations for benchmark opponent"),
         )
         .arg(
-            Arg::new("bench-baseline")
-                .long("bench-baseline")
+            Arg::new("bench-eval")
+                .long("bench-eval")
                 .default_value("rollout")
-                .help("Evaluator name for benchmark baseline opponent"),
+                .help("Evaluator name for benchmark opponent"),
         )
 }
 
@@ -454,8 +454,8 @@ pub fn parse_train_config(
     if set("games") {
         config.games_per_iter = val("games").parse().unwrap();
     }
-    if set("train-mcts") {
-        config.mcts_sims = val("train-mcts").parse().unwrap();
+    if set("simulations") {
+        config.mcts_sims = val("simulations").parse().unwrap();
     }
     if set("epochs") {
         config.epochs = val("epochs").parse().unwrap();
@@ -512,14 +512,14 @@ pub fn parse_train_config(
     if set("playout-cap-fast-sims") {
         config.playout_cap_fast_sims = val("playout-cap-fast-sims").parse().unwrap();
     }
-    if set("mcts-sims-start") {
-        config.mcts_sims_start = val("mcts-sims-start").parse().unwrap();
+    if set("simulations-start") {
+        config.mcts_sims_start = val("simulations-start").parse().unwrap();
     }
-    if set("bench-baseline-sims") {
-        config.bench_baseline_sims = val("bench-baseline-sims").parse().unwrap();
+    if set("bench-sims") {
+        config.bench_sims = val("bench-sims").parse().unwrap();
     }
-    if set("bench-baseline") {
-        config.bench_baseline_name = val("bench-baseline");
+    if set("bench-eval") {
+        config.bench_eval = val("bench-eval");
     }
 
     config

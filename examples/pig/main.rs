@@ -74,6 +74,7 @@ fn main() {
     let mut setup = GameSetup::new("pig", "Pig dice game tournament between two MCTS bots");
     setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("hold-at-20", strategy::HoldAt(20));
+    setup.add_evaluator("erkp", strategy::EndRaceKeepPace);
 
     setup.add_encoder("default", Arc::new(encoder::PigEncoder));
     setup.add_model("default", model::init_pig);
@@ -89,8 +90,8 @@ fn main() {
             replay_window: 10,
             warmup_iters: 20,
             bench_games: 100,
-            bench_interval: 5,
-            bench_baseline_sims: 200,
+            bench_interval: 1,
+            bench_sims: 200,
             concurrent_games: 10,
             leaf_batch_size: 1,
             explore_moves: 10,

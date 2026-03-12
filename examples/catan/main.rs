@@ -54,7 +54,7 @@ fn main() {
             replay_window: 10,
             games_per_iter: 100,
             bench_interval: 30,
-            bench_baseline_sims: 50,
+            bench_sims: 50,
             ..TrainConfig::default()
         },
     );
@@ -71,7 +71,7 @@ fn main() {
             mcts_sims_start: 400,
             bench_games: 20,
             bench_interval: 10,
-            bench_baseline_sims: 800,
+            bench_sims: 800,
             ..TrainConfig::default()
         },
     );
@@ -88,7 +88,7 @@ fn main() {
             mcts_sims_start: 400,
             bench_games: 20,
             bench_interval: 20,
-            bench_baseline_sims: 800,
+            bench_sims: 800,
             ..TrainConfig::default()
         },
     );

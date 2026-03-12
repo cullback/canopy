@@ -121,11 +121,11 @@ pub struct TrainConfig {
     pub bench_games: u32,
     /// Run benchmark every N iterations (1 = every iteration).
     pub bench_interval: usize,
-    /// MCTS simulations for the benchmark baseline opponent.
-    pub bench_baseline_sims: u32,
-    /// Name of evaluator in the registry to use as benchmark baseline.
+    /// MCTS simulations for the benchmark opponent.
+    pub bench_sims: u32,
+    /// Name of evaluator in the registry to use as benchmark opponent.
     #[serde(skip)]
-    pub bench_baseline_name: String,
+    pub bench_eval: String,
 }
 
 impl Default for TrainConfig {
@@ -163,8 +163,8 @@ impl Default for TrainConfig {
             // Benchmark
             bench_games: 10,
             bench_interval: 10,
-            bench_baseline_sims: 200,
-            bench_baseline_name: "rollout".to_string(),
+            bench_sims: 200,
+            bench_eval: "rollout".to_string(),
         }
     }
 }
@@ -248,7 +248,7 @@ pub fn run_training<G>(
 ) where
     G: Game + 'static,
 {
-    let baseline = evaluators.get_arc(&config.bench_baseline_name);
+    let baseline = evaluators.get_arc(&config.bench_eval);
     let new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync> = Arc::new(new_state);
     let (mut rng, start_iteration) = checkpoint::resume_if_requested(&config, model);
     let run_dir = checkpoint::setup_run_dir(&config);

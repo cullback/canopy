@@ -23,7 +23,7 @@ impl Player {
         }
     }
 
-    fn index(self) -> usize {
+    pub fn index(self) -> usize {
         match self {
             Player::One => 0,
             Player::Two => 1,

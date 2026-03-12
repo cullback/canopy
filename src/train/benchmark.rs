@@ -184,7 +184,7 @@ where
         ..Default::default()
     };
     let baseline_config = Config {
-        num_simulations: config.bench_baseline_sims,
+        num_simulations: config.bench_sims,
         ..Default::default()
     };
 
