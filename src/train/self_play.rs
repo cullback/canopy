@@ -88,6 +88,7 @@ impl IterGameResults {
 /// Shared state cloned once into each actor task.
 struct TaskContext<G: Game> {
     request_tx: tokio::sync::mpsc::Sender<InferRequest>,
+    encoder: Arc<dyn StateEncoder<G>>,
     games_remaining: Arc<AtomicU32>,
     completed: Arc<AtomicU32>,
     pb: Arc<indicatif::ProgressBar>,
@@ -100,8 +101,9 @@ struct TaskContext<G: Game> {
 ///
 /// Shutdown: actors finish → drop mpsc sender → batcher exits → drops crossbeam
 /// sender → workers exit.
-pub(super) fn run_self_play_iteration<G, E, Ev>(
-    evaluator: Ev,
+pub(super) fn run_self_play_iteration<G>(
+    evaluator: Arc<dyn Evaluator<G> + Sync>,
+    encoder: Arc<dyn StateEncoder<G>>,
     config: &TrainConfig,
     effective_sims: u32,
     iteration: usize,
@@ -110,8 +112,6 @@ pub(super) fn run_self_play_iteration<G, E, Ev>(
 ) -> IterGameResults
 where
     G: Game + 'static,
-    E: StateEncoder<G> + 'static,
-    Ev: Evaluator<G> + 'static,
 {
     let pb = indicatif::ProgressBar::new(config.games_per_iter as u64);
     pb.set_style(
@@ -148,6 +148,7 @@ where
     let batcher_stats = Arc::new(BatcherStats::new());
     let ctx = Arc::new(TaskContext {
         request_tx,
+        encoder,
         games_remaining: Arc::new(AtomicU32::new(config.games_per_iter as u32)),
         completed: Arc::new(AtomicU32::new(0)),
         pb: pb.clone(),
@@ -214,9 +215,10 @@ where
 
                     search.reset((ctx.new_state)(&mut rng));
                     let tx = ctx.request_tx.clone();
-                    let game = play_game::<G, E, _, _>(
+                    let game = play_game(
                         &mut search,
                         &ctx.actor_config,
+                        &*ctx.encoder,
                         |features| {
                             let tx = tx.clone();
                             async move {

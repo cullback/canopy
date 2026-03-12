@@ -1,5 +1,5 @@
-use std::marker::PhantomData;
 use std::path::Path;
+use std::sync::Arc;
 
 use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
@@ -125,38 +125,41 @@ fn compute_batch_losses<B: Backend>(
     (loss, pl, vl)
 }
 
-pub struct BurnTrainableModel<G, E, M>
+pub struct BurnTrainableModel<G, M>
 where
     M: AutodiffModule<TrainBackend>,
 {
+    encoder: Arc<dyn StateEncoder<G>>,
     model: M,
     optimizer: OptimizerAdaptor<AdamW, M, TrainBackend>,
     device: Device,
     model_init: Box<dyn Fn(&Device) -> M + Send>,
-    _marker: PhantomData<fn() -> (G, E)>,
 }
 
-impl<G, E, M> BurnTrainableModel<G, E, M>
+impl<G, M> BurnTrainableModel<G, M>
 where
     M: AutodiffModule<TrainBackend>,
 {
-    pub fn new(model_init: impl Fn(&Device) -> M + Send + 'static, device: &Device) -> Self {
+    pub fn new(
+        encoder: Arc<dyn StateEncoder<G>>,
+        model_init: impl Fn(&Device) -> M + Send + 'static,
+        device: &Device,
+    ) -> Self {
         let model = model_init(device);
         let optimizer = AdamWConfig::new().with_weight_decay(0.0004).init();
         Self {
+            encoder,
             model,
             optimizer,
             device: device.clone(),
             model_init: Box::new(model_init),
-            _marker: PhantomData,
         }
     }
 }
 
-impl<G, E, M> BurnTrainableModel<G, E, M>
+impl<G, M> BurnTrainableModel<G, M>
 where
     G: Game,
-    E: StateEncoder<G>,
     M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend>,
     M::InnerModule: PolicyValueNet<InferBackend>,
 {
@@ -166,6 +169,7 @@ where
         cfg: &TrainStepConfig,
         pb: &indicatif::ProgressBar,
     ) -> (f32, f32, usize) {
+        let feature_size = self.encoder.feature_size();
         let mut model = std::mem::replace(&mut self.model, (self.model_init)(&self.device));
 
         let mut indices: Vec<usize> = (0..samples.len()).collect();
@@ -187,7 +191,7 @@ where
                 prepare_batch::<TrainBackend>(
                     &batch_samples,
                     cfg.q_weight,
-                    E::FEATURE_SIZE,
+                    feature_size,
                     G::NUM_ACTIONS,
                     &self.device,
                 );
@@ -228,6 +232,7 @@ where
     }
 
     fn validate(&self, samples: &[&Sample], cfg: &TrainStepConfig) -> (f32, f32) {
+        let feature_size = self.encoder.feature_size();
         let model = self.model.valid();
 
         let mut total_policy_loss = 0.0f32;
@@ -245,7 +250,7 @@ where
                 prepare_batch::<InferBackend>(
                     batch,
                     cfg.q_weight,
-                    E::FEATURE_SIZE,
+                    feature_size,
                     G::NUM_ACTIONS,
                     &self.device,
                 );
@@ -279,19 +284,23 @@ where
     }
 }
 
-impl<G, E, M> TrainableModel<G> for BurnTrainableModel<G, E, M>
+impl<G, M> TrainableModel<G> for BurnTrainableModel<G, M>
 where
-    G: Game,
-    E: StateEncoder<G> + Send + 'static,
+    G: Game + 'static,
     M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend> + Send + 'static,
     M::InnerModule: PolicyValueNet<InferBackend> + Send,
 {
-    type Encoder = E;
-    type Evaluator = NeuralEvaluator<InferBackend, E, M::InnerModule>;
+    fn encoder(&self) -> Arc<dyn StateEncoder<G>> {
+        self.encoder.clone()
+    }
 
-    fn evaluator(&self) -> Self::Evaluator {
+    fn evaluator(&self) -> Arc<dyn crate::eval::Evaluator<G> + Sync> {
         let infer_model = self.model.valid();
-        NeuralEvaluator::new(infer_model, self.device.clone())
+        Arc::new(NeuralEvaluator::new(
+            self.encoder.clone(),
+            infer_model,
+            self.device.clone(),
+        ))
     }
 
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics {

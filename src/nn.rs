@@ -1,4 +1,4 @@
-use std::marker::PhantomData;
+use std::sync::Arc;
 
 use burn::prelude::*;
 
@@ -12,9 +12,9 @@ use crate::game::{Game, Status};
 ///
 /// The `out` buffer is cleared before encoding. Callers reuse the same `Vec` to
 /// avoid allocating on every evaluation.
-pub trait StateEncoder<G: Game> {
-    const FEATURE_SIZE: usize;
-    fn encode(state: &G, out: &mut Vec<f32>);
+pub trait StateEncoder<G: Game>: Send + Sync {
+    fn feature_size(&self) -> usize;
+    fn encode(&self, state: &G, out: &mut Vec<f32>);
 }
 
 /// A neural network with policy and value heads.
@@ -29,46 +29,69 @@ pub trait PolicyValueNet<B: Backend> {
 
 /// Wraps a [`PolicyValueNet`] for use as an [`Evaluator`].
 ///
-/// Encodes the state using `E`, runs a forward pass, and returns raw policy
-/// logits plus a value mapped to P1's perspective. MCTS handles softmax
-/// masking in `complete_expand`.
+/// Encodes the state using the stored encoder, runs a forward pass, and returns
+/// raw policy logits plus a value mapped to P1's perspective. MCTS handles
+/// softmax masking in `complete_expand`.
 ///
 /// `Clone` is shallow: burn model tensors are refcounted, so cloning
 /// only increments Arc counts.
-pub struct NeuralEvaluator<B: Backend, E, M> {
+pub struct NeuralEvaluator<G, B: Backend, M> {
+    encoder: Arc<dyn StateEncoder<G>>,
     model: M,
     device: B::Device,
-    _marker: PhantomData<fn() -> (B, E)>,
 }
 
-impl<B: Backend, E, M: Clone> Clone for NeuralEvaluator<B, E, M>
+impl<G, B: Backend, M: Clone> Clone for NeuralEvaluator<G, B, M>
 where
     B::Device: Clone,
 {
     fn clone(&self) -> Self {
         Self {
+            encoder: self.encoder.clone(),
             model: self.model.clone(),
             device: self.device.clone(),
-            _marker: PhantomData,
         }
     }
 }
 
-impl<B: Backend, E, M> NeuralEvaluator<B, E, M> {
-    pub fn new(model: M, device: B::Device) -> Self {
+impl<G, B: Backend, M> NeuralEvaluator<G, B, M> {
+    pub fn new(encoder: Arc<dyn StateEncoder<G>>, model: M, device: B::Device) -> Self {
         Self {
+            encoder,
             model,
             device,
-            _marker: PhantomData,
         }
+    }
+
+    /// Load a model checkpoint and wrap it as an evaluator.
+    pub fn from_checkpoint(
+        encoder: Arc<dyn StateEncoder<G>>,
+        model: M,
+        path: impl Into<std::path::PathBuf>,
+        device: B::Device,
+    ) -> Self
+    where
+        M: burn::module::Module<B>,
+    {
+        use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder};
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let model = model
+            .load_file(path, &recorder, &device)
+            .expect("failed to load nn checkpoint");
+        Self::new(encoder, model, device)
     }
 }
 
-impl<G, B, E, M> Evaluator<G> for NeuralEvaluator<B, E, M>
+// SAFETY: NeuralEvaluator only performs read-only inference (forward pass)
+// through shared references.  Burn's Param<Tensor> is !Sync due to cubecl
+// stub primitives, but after model loading all parameters are fully
+// initialized and never mutated during inference.
+unsafe impl<G, B: Backend, M: Send> Sync for NeuralEvaluator<G, B, M> {}
+
+impl<G, B, M> Evaluator<G> for NeuralEvaluator<G, B, M>
 where
     G: Game,
     B: Backend,
-    E: StateEncoder<G>,
     M: PolicyValueNet<B> + Send,
 {
     fn evaluate(&self, state: &G, _rng: &mut fastrand::Rng) -> Evaluation {
@@ -77,13 +100,12 @@ where
             Status::Terminal(reward) => return Evaluation::uniform(G::NUM_ACTIONS, reward),
         };
 
-        let mut features = Vec::with_capacity(E::FEATURE_SIZE);
-        E::encode(state, &mut features);
+        let feature_size = self.encoder.feature_size();
+        let mut features = Vec::with_capacity(feature_size);
+        self.encoder.encode(state, &mut features);
 
-        let input = Tensor::<B, 2>::from_data(
-            TensorData::new(features, [1, E::FEATURE_SIZE]),
-            &self.device,
-        );
+        let input =
+            Tensor::<B, 2>::from_data(TensorData::new(features, [1, feature_size]), &self.device);
 
         let (policy_logits_tensor, value_tensor) = self.model.forward(input);
 
@@ -113,6 +135,8 @@ where
             return states.iter().map(|s| self.evaluate(s, rng)).collect();
         }
 
+        let feature_size = self.encoder.feature_size();
+
         // Determine which states are terminal vs ongoing; collect signs for ongoing
         let mut signs = Vec::with_capacity(states.len());
         let mut nn_indices = Vec::new();
@@ -136,15 +160,15 @@ where
 
         // Encode ongoing states and run inference
         let n = nn_indices.len();
-        let mut features = Vec::with_capacity(n * E::FEATURE_SIZE);
-        let mut buf = Vec::with_capacity(E::FEATURE_SIZE);
+        let mut features = Vec::with_capacity(n * feature_size);
+        let mut buf = Vec::with_capacity(feature_size);
         for &i in &nn_indices {
             buf.clear();
-            E::encode(states[i], &mut buf);
+            self.encoder.encode(states[i], &mut buf);
             features.extend_from_slice(&buf);
         }
 
-        let (all_logits, all_values) = self.infer_features(features, n, E::FEATURE_SIZE);
+        let (all_logits, all_values) = self.infer_features(features, n, feature_size);
 
         // Split outputs per state and apply sign correction
         for (j, &i) in nn_indices.iter().enumerate() {

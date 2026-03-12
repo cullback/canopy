@@ -13,7 +13,7 @@ use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 
-use crate::eval::Evaluator;
+use crate::eval::{Evaluator, Evaluators};
 use crate::game::Game;
 use crate::nn::StateEncoder;
 use crate::utils::HumanDuration;
@@ -123,8 +123,9 @@ pub struct TrainConfig {
     pub bench_interval: usize,
     /// MCTS simulations for the benchmark baseline opponent.
     pub bench_baseline_sims: u32,
-    /// Rollouts per evaluation for the benchmark baseline opponent.
-    pub bench_baseline_rollouts: u32,
+    /// Name of evaluator in the registry to use as benchmark baseline.
+    #[serde(skip)]
+    pub bench_baseline_name: String,
 }
 
 impl Default for TrainConfig {
@@ -163,7 +164,7 @@ impl Default for TrainConfig {
             bench_games: 10,
             bench_interval: 10,
             bench_baseline_sims: 200,
-            bench_baseline_rollouts: 1,
+            bench_baseline_name: "rollout".to_string(),
         }
     }
 }
@@ -198,10 +199,8 @@ pub struct CheckpointMeta {
 // ---------------------------------------------------------------------------
 
 pub trait TrainableModel<G: Game>: Send {
-    type Encoder: StateEncoder<G> + 'static;
-    type Evaluator: Evaluator<G> + 'static;
-
-    fn evaluator(&self) -> Self::Evaluator;
+    fn encoder(&self) -> Arc<dyn StateEncoder<G>>;
+    fn evaluator(&self) -> Arc<dyn Evaluator<G> + Sync>;
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics;
     fn save(&self, dir: &Path, iteration: usize);
     fn load(&mut self, dir: &Path, iteration: usize);
@@ -241,14 +240,15 @@ fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
 // Public entry point
 // ---------------------------------------------------------------------------
 
-pub fn run_training<G, M>(
+pub fn run_training<G>(
     config: TrainConfig,
-    model: &mut M,
+    model: &mut dyn TrainableModel<G>,
     new_state: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
+    evaluators: &Evaluators<G>,
 ) where
     G: Game + 'static,
-    M: TrainableModel<G>,
 {
+    let baseline = evaluators.get_arc(&config.bench_baseline_name);
     let new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync> = Arc::new(new_state);
     let (mut rng, start_iteration) = checkpoint::resume_if_requested(&config, model);
     let run_dir = checkpoint::setup_run_dir(&config);
@@ -263,11 +263,13 @@ pub fn run_training<G, M>(
         let iter_start = Instant::now();
         let effective_lr = cosine_lr(&config, iteration);
         let effective_sims = progressive_sims(&config, iteration);
+        let encoder = model.encoder();
         let evaluator = model.evaluator();
 
         // Self-play
-        let sp = self_play::run_self_play_iteration::<G, M::Encoder, M::Evaluator>(
+        let sp = self_play::run_self_play_iteration(
             evaluator,
+            encoder.clone(),
             &config,
             effective_sims,
             iteration,
@@ -312,8 +314,13 @@ pub fn run_training<G, M>(
         let (bench_wins, bench_losses, bench_draws, bench_elapsed) = if run_bench {
             let bench_start = Instant::now();
             let eval = model.evaluator();
-            let result = benchmark::run_benchmark::<G, M::Encoder, M::Evaluator>(
-                eval, &config, &mut rng, &new_state,
+            let result = benchmark::run_benchmark(
+                eval,
+                encoder,
+                &config,
+                &mut rng,
+                &new_state,
+                baseline.clone(),
             );
             (result.0, result.1, result.2, bench_start.elapsed())
         } else {

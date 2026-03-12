@@ -21,9 +21,11 @@ impl StateEncoder<GameState> for BasicEncoder {
     // Edge stream: 72 x 2 = 144  (current road + opponent road)
     // Port stream: 9 x 5 = 45
     // Total: 7 + 42 + 133 + 108 + 144 + 45 = 479
-    const FEATURE_SIZE: usize = 479;
+    fn feature_size(&self) -> usize {
+        479
+    }
 
-    fn encode(state: &GameState, out: &mut Vec<f32>) {
+    fn encode(&self, state: &GameState, out: &mut Vec<f32>) {
         out.clear();
         let current = state.current_player;
         let opp = current.opponent();
@@ -54,9 +56,9 @@ impl StateEncoder<GameState> for BasicEncoder {
 
         debug_assert_eq!(
             out.len(),
-            Self::FEATURE_SIZE,
+            self.feature_size(),
             "feature vector length mismatch: expected {}, got {}",
-            Self::FEATURE_SIZE,
+            self.feature_size(),
             out.len()
         );
     }
@@ -88,12 +90,16 @@ mod tests {
         }
     }
 
+    fn enc() -> BasicEncoder {
+        BasicEncoder
+    }
+
     #[test]
     fn feature_vector_length() {
         let state = make_state();
         let mut features = Vec::new();
-        BasicEncoder::encode(&state, &mut features);
-        assert_eq!(features.len(), BasicEncoder::FEATURE_SIZE);
+        enc().encode(&state, &mut features);
+        assert_eq!(features.len(), enc().feature_size());
     }
 
     #[test]
@@ -101,8 +107,8 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        BasicEncoder::encode(&state, &mut features);
-        assert_eq!(features.len(), BasicEncoder::FEATURE_SIZE);
+        enc().encode(&state, &mut features);
+        assert_eq!(features.len(), enc().feature_size());
     }
 
     #[test]
@@ -110,10 +116,10 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        BasicEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         let p1_features = features.clone();
         state.current_player = state.current_player.opponent();
-        BasicEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         assert_ne!(p1_features, features);
         assert_eq!(p1_features.len(), features.len());
     }
@@ -123,7 +129,7 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        BasicEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -136,7 +142,7 @@ mod tests {
     fn opponent_expected_dev_cards_initial() {
         let state = make_state();
         let mut features = Vec::new();
-        BasicEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // Opponent dev card features start at offset:
         // 7 (phase) + 21 (self) + 5 (opp resources) = 33

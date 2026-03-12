@@ -164,9 +164,11 @@ impl StateEncoder<GameState> for Gnn2Encoder {
     // Global: 7 + 42 + 52 + 12 = 113
     // Node stream: 54 × 34 = 1836
     // Total: 1949
-    const FEATURE_SIZE: usize = 1949;
+    fn feature_size(&self) -> usize {
+        1949
+    }
 
-    fn encode(state: &GameState, out: &mut Vec<f32>) {
+    fn encode(&self, state: &GameState, out: &mut Vec<f32>) {
         out.clear();
         let current = state.current_player;
         let opp = current.opponent();
@@ -273,9 +275,9 @@ impl StateEncoder<GameState> for Gnn2Encoder {
 
         debug_assert_eq!(
             out.len(),
-            Self::FEATURE_SIZE,
+            self.feature_size(),
             "feature vector length mismatch: expected {}, got {}",
-            Self::FEATURE_SIZE,
+            self.feature_size(),
             out.len()
         );
     }
@@ -314,8 +316,8 @@ mod tests {
     fn feature_vector_length() {
         let state = make_state();
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
-        assert_eq!(features.len(), Gnn2Encoder::FEATURE_SIZE);
+        Gnn2Encoder.encode(&state, &mut features);
+        assert_eq!(features.len(), Gnn2Encoder.feature_size());
     }
 
     #[test]
@@ -323,8 +325,8 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
-        assert_eq!(features.len(), Gnn2Encoder::FEATURE_SIZE);
+        Gnn2Encoder.encode(&state, &mut features);
+        assert_eq!(features.len(), Gnn2Encoder.feature_size());
     }
 
     #[test]
@@ -332,7 +334,7 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -345,7 +347,7 @@ mod tests {
     fn values_in_range_before_setup() {
         let state = make_state();
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -359,10 +361,10 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
         let p1_features = features.clone();
         state.current_player = state.current_player.opponent();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
         assert_ne!(p1_features, features);
         assert_eq!(p1_features.len(), features.len());
     }
@@ -398,7 +400,7 @@ mod tests {
         }
 
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
 
         for n in 0..54 {
             let node = &topo.nodes[n];
@@ -455,7 +457,7 @@ mod tests {
         let state = make_main_state();
         let topo = &state.topology;
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
 
         for n in 0..54 {
             let node = &topo.nodes[n];
@@ -505,7 +507,7 @@ mod tests {
         state.players[Player::Two].trade_ratios = [4, 4, 4, 4, 4];
 
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
 
         // Global layout: phase(7) + player_std(21×2=42) + player_ext(26×2=52)
         // Current player extended starts at offset 49
@@ -537,7 +539,7 @@ mod tests {
         state.boards[Player::Two].settlements = 1u64 << opp_node;
 
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
 
         assert_eq!(features[node_feat(s_node, 0)], 0.5, "settlement = 0.5");
         assert_eq!(features[node_feat(c_node, 0)], 1.0, "city = 1.0");
@@ -560,7 +562,7 @@ mod tests {
         state.boards[Player::Two].road_network.roads = 1u128 << opp_edge.0;
 
         let mut features = Vec::new();
-        Gnn2Encoder::encode(&state, &mut features);
+        Gnn2Encoder.encode(&state, &mut features);
 
         // Road slots start at per-node offset 28 (2 + 21 + 5)
         assert_eq!(features[node_feat(n, 28)], 1.0, "slot 0 cur road");

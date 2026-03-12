@@ -7,9 +7,9 @@ use crate::game::Game;
 
 /// Resume from a checkpoint if `config.resume` is set.
 /// Returns (rng, start_iteration).
-pub(super) fn resume_if_requested<G: Game, M: TrainableModel<G>>(
+pub(super) fn resume_if_requested<G: Game>(
     config: &TrainConfig,
-    model: &mut M,
+    model: &mut dyn TrainableModel<G>,
 ) -> (fastrand::Rng, usize) {
     let mut rng = fastrand::Rng::new();
     let mut start_iteration = 0usize;
@@ -75,8 +75,8 @@ pub(super) fn save_config(run_dir: &PathBuf, config: &impl Serialize) {
 }
 
 /// Save model checkpoint and metadata.
-pub(super) fn save_checkpoint<G: Game, M: TrainableModel<G>>(
-    model: &M,
+pub(super) fn save_checkpoint<G: Game>(
+    model: &dyn TrainableModel<G>,
     run_dir: &PathBuf,
     iter_num: usize,
     rng: &mut fastrand::Rng,

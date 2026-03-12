@@ -1,7 +1,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
-use crate::eval::{Evaluation, Evaluator, RolloutEvaluator};
+use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
 use crate::mcts::{Config, Search, Step};
 use crate::nn::StateEncoder;
@@ -11,13 +11,14 @@ use super::inference::{BatcherStats, InferRequest, InferSender, batcher_loop, gp
 
 /// Async bench game task: plays games alternating NN (batched) and baseline (local) turns.
 #[allow(clippy::too_many_arguments)]
-async fn bench_game_task<G: Game, E: StateEncoder<G>>(
+async fn bench_game_task<G: Game>(
     request_tx: InferSender,
+    encoder: Arc<dyn StateEncoder<G>>,
     game_counter: Arc<AtomicU32>,
     bench_games: u32,
     nn_config: Config,
     baseline_config: Config,
-    baseline_eval: RolloutEvaluator,
+    baseline_eval: Arc<dyn Evaluator<G> + Sync>,
     nn_wins: Arc<AtomicU32>,
     nn_losses: Arc<AtomicU32>,
     draws: Arc<AtomicU32>,
@@ -37,12 +38,13 @@ async fn bench_game_task<G: Game, E: StateEncoder<G>>(
         let nn_sign = if i % 2 == 0 { 1.0f32 } else { -1.0 };
         let mut state = new_state(&mut rng);
 
-        let reward = play_bench_game::<G, E>(
+        let reward = play_bench_game(
             &mut state,
             nn_sign,
             &nn_config,
             &baseline_config,
-            &baseline_eval,
+            &*baseline_eval,
+            &*encoder,
             &request_tx,
             &mut rng,
         )
@@ -72,7 +74,7 @@ async fn bench_game_task<G: Game, E: StateEncoder<G>>(
 /// Drive a search to completion using a local evaluator.
 fn run_to_completion<G: Game>(
     search: &mut Search<G>,
-    evaluator: &RolloutEvaluator,
+    evaluator: &(dyn Evaluator<G> + Sync),
     rng: &mut fastrand::Rng,
 ) -> crate::mcts::SearchResult {
     let mut evals = vec![];
@@ -89,16 +91,18 @@ fn run_to_completion<G: Game>(
 
 /// Play a single benchmark game. NN turns use async eval via batcher;
 /// baseline turns use run_to_completion locally.
-async fn play_bench_game<G: Game, E: StateEncoder<G>>(
+async fn play_bench_game<G: Game>(
     state: &mut G,
     nn_sign: f32,
     nn_config: &Config,
     baseline_config: &Config,
-    baseline_eval: &RolloutEvaluator,
+    baseline_eval: &(dyn Evaluator<G> + Sync),
+    encoder: &dyn StateEncoder<G>,
     request_tx: &InferSender,
     rng: &mut fastrand::Rng,
 ) -> f32 {
-    let mut encode_buf = Vec::with_capacity(E::FEATURE_SIZE);
+    let feature_size = encoder.feature_size();
+    let mut encode_buf = Vec::with_capacity(feature_size);
 
     loop {
         if let Some(action) = state.sample_chance(rng) {
@@ -122,7 +126,7 @@ async fn play_bench_game<G: Game, E: StateEncoder<G>>(
                                         Status::Terminal(_) => 1.0,
                                     };
                                     encode_buf.clear();
-                                    E::encode(pending_state, &mut encode_buf);
+                                    encoder.encode(pending_state, &mut encode_buf);
                                     let (tx, rx) = tokio::sync::oneshot::channel();
                                     request_tx
                                         .send(InferRequest {
@@ -161,18 +165,18 @@ async fn play_bench_game<G: Game, E: StateEncoder<G>>(
     }
 }
 
-/// Play benchmark games: NN evaluator vs RolloutEvaluator, alternating seats.
+/// Play benchmark games: NN evaluator vs baseline, alternating seats.
 /// Returns (nn_wins, nn_losses, draws).
-pub(super) fn run_benchmark<G, E, Ev>(
-    evaluator: Ev,
+pub(super) fn run_benchmark<G>(
+    evaluator: Arc<dyn Evaluator<G> + Sync>,
+    encoder: Arc<dyn StateEncoder<G>>,
     config: &TrainConfig,
     rng: &mut fastrand::Rng,
     new_state: &Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
+    baseline: Arc<dyn Evaluator<G> + Sync>,
 ) -> (u32, u32, u32)
 where
     G: Game + 'static,
-    E: StateEncoder<G> + 'static,
-    Ev: Evaluator<G> + 'static,
 {
     let nn_config = Config {
         num_simulations: config.mcts_sims,
@@ -182,9 +186,6 @@ where
     let baseline_config = Config {
         num_simulations: config.bench_baseline_sims,
         ..Default::default()
-    };
-    let baseline_eval = RolloutEvaluator {
-        num_rollouts: config.bench_baseline_rollouts,
     };
 
     let nn_wins = Arc::new(AtomicU32::new(0));
@@ -239,13 +240,14 @@ where
 
         for _ in 0..concurrent_games {
             let seed = rng.u64(..);
-            join_set.spawn(bench_game_task::<G, E>(
+            join_set.spawn(bench_game_task(
                 request_tx.clone(),
+                encoder.clone(),
                 game_counter.clone(),
                 config.bench_games,
                 nn_config.clone(),
                 baseline_config.clone(),
-                baseline_eval.clone(),
+                baseline.clone(),
                 nn_wins.clone(),
                 nn_losses.clone(),
                 draws.clone(),

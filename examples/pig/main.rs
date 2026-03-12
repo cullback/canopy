@@ -5,20 +5,17 @@
 //!
 //! ```text
 //! cargo run --example pig -- --p1-simulations 1000 --p2-simulations 5000
-//! cargo run --example pig --features nn -- train --iterations 5 --games 20
+//! cargo run --example pig -- train --iterations 5 --games 20
 //! ```
 
-use canopy2::cli;
-use canopy2::eval::{Evaluators, RolloutEvaluator};
+use canopy2::cli::GameSetup;
+use canopy2::eval::RolloutEvaluator;
 use canopy2::game::{Game, Status};
 
-mod game;
-mod strategy;
-
-#[cfg(feature = "nn")]
 mod encoder;
-#[cfg(feature = "nn")]
+mod game;
 mod model;
+mod strategy;
 
 use game::{PigGame, Player};
 
@@ -70,71 +67,46 @@ impl Game for PigGame {
     }
 }
 
-fn app() -> clap::Command {
-    let mut cmd = cli::tournament_command("pig", "Pig dice game tournament between two MCTS bots");
-
-    #[cfg(feature = "nn")]
-    {
-        cmd = cmd.subcommand(cli::train_command());
-    }
-
-    cmd
-}
-
-#[cfg(feature = "nn")]
-fn train_config() -> canopy2::train::TrainConfig {
-    use canopy2::train::TrainConfig;
-
-    TrainConfig {
-        iterations: 200,
-        games_per_iter: 300,
-        mcts_sims: 200,
-        mcts_sims_start: 50,
-        epochs: 3,
-        batch_size: 128,
-        replay_window: 10,
-        warmup_iters: 20,
-        bench_games: 100,
-        bench_interval: 5,
-        bench_baseline_sims: 200,
-        concurrent_games: 10,
-        leaf_batch_size: 1,
-        explore_moves: 10,
-        ..TrainConfig::default()
-    }
-}
-
-#[cfg(feature = "nn")]
-fn run_train(matches: &clap::ArgMatches) {
-    use canopy2::game::Game;
-    use canopy2::nn::StateEncoder;
-    use canopy2::train::{BurnTrainableModel, default_device};
-
-    let config = cli::parse_train_config(matches, train_config());
-    let device = default_device();
-
-    let new_state = |_rng: &mut fastrand::Rng| PigGame::new(100);
-
-    let mc = model::PigModelConfig::new(PigGame::NUM_ACTIONS, encoder::PigEncoder::FEATURE_SIZE);
-    let mut trainable = BurnTrainableModel::<PigGame, encoder::PigEncoder, _>::new(
-        move |dev| mc.init(dev),
-        &device,
-    );
-    canopy2::train::run_training::<PigGame, _>(config, &mut trainable, new_state);
-}
-
 fn main() {
-    let matches = app().get_matches();
+    use canopy2::train::{BurnTrainableModel, TrainConfig};
+    use std::sync::Arc;
 
-    #[cfg(feature = "nn")]
+    let mut setup = GameSetup::new("pig", "Pig dice game tournament between two MCTS bots");
+    setup.add_evaluator("rollout", RolloutEvaluator::default());
+    setup.add_evaluator("hold-at-20", strategy::HoldAt(20));
+
+    setup.add_encoder("default", Arc::new(encoder::PigEncoder));
+    setup.add_model("default", |enc, dev| {
+        let fs = enc.feature_size();
+        let mc = model::PigModelConfig::new(PigGame::NUM_ACTIONS, fs);
+        Box::new(BurnTrainableModel::new(enc, move |d| mc.init(d), dev))
+    });
+    setup.add_config(
+        "default",
+        TrainConfig {
+            iterations: 200,
+            games_per_iter: 300,
+            mcts_sims: 200,
+            mcts_sims_start: 50,
+            epochs: 3,
+            batch_size: 128,
+            replay_window: 10,
+            warmup_iters: 20,
+            bench_games: 100,
+            bench_interval: 5,
+            bench_baseline_sims: 200,
+            concurrent_games: 10,
+            leaf_batch_size: 1,
+            explore_moves: 10,
+            ..TrainConfig::default()
+        },
+    );
+
+    let matches = setup.command().get_matches();
+
     if let Some(sub) = matches.subcommand_matches("train") {
-        run_train(sub);
-        return;
+        setup.run_train(sub, |_rng| PigGame::new(100));
+    } else {
+        setup.run_tournament(&matches, |_| PigGame::new(100));
     }
-
-    let opts = cli::parse_tournament(&matches);
-    let mut evals = Evaluators::new();
-    evals.add("rollout", RolloutEvaluator { num_rollouts: 1 });
-    evals.add("hold-at-20", strategy::HoldAt(20));
-    opts.run(|_| PigGame::new(100), &evals);
 }

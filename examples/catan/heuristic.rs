@@ -20,6 +20,7 @@ use crate::game::state::GameState;
 /// - Knight: boosted if robber blocks own field
 /// - Other dev card plays: moderate
 /// - Everything else: baseline
+#[derive(Default)]
 pub struct HeuristicEvaluator {
     pub rollout: canopy2::eval::RolloutEvaluator,
 }
@@ -113,7 +114,7 @@ mod tests {
     fn heuristic_returns_bounded_value() {
         let state = game::new_game(42, Dice::default());
         let eval = HeuristicEvaluator {
-            rollout: canopy2::eval::RolloutEvaluator { num_rollouts: 1 },
+            rollout: canopy2::eval::RolloutEvaluator::default(),
         };
         let mut rng = fastrand::Rng::with_seed(0);
         let out = eval.evaluate(&state, &mut rng);

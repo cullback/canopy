@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 use clap::{Arg, ArgMatches, Command};
 
+use crate::game::Game;
 use crate::mcts::Config;
 pub use crate::tournament::TournamentOptions;
 
@@ -228,11 +229,203 @@ pub fn train_command() -> Command {
                 .help("MCTS simulations for benchmark baseline opponent"),
         )
         .arg(
-            Arg::new("bench-baseline-rollouts")
-                .long("bench-baseline-rollouts")
-                .default_value(d.bench_baseline_rollouts.to_string())
-                .help("Rollouts per evaluation for benchmark baseline opponent"),
+            Arg::new("bench-baseline")
+                .long("bench-baseline")
+                .default_value("rollout")
+                .help("Evaluator name for benchmark baseline opponent"),
         )
+}
+
+// ---------------------------------------------------------------------------
+// GameSetup — independent registries for evaluators, encoders, models, configs
+// ---------------------------------------------------------------------------
+
+#[cfg(feature = "nn")]
+type ModelFactory<G> = Box<
+    dyn Fn(
+            std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
+            &crate::train::Device,
+        ) -> Box<dyn crate::train::TrainableModel<G>>
+        + Send,
+>;
+
+#[cfg(feature = "nn")]
+pub struct GameSetup<G: Game> {
+    name: String,
+    about: String,
+    evaluators: crate::eval::Evaluators<G>,
+    encoders: Vec<(String, std::sync::Arc<dyn crate::nn::StateEncoder<G>>)>,
+    models: Vec<(String, ModelFactory<G>)>,
+    configs: Vec<(String, crate::train::TrainConfig)>,
+}
+
+#[cfg(feature = "nn")]
+impl<G: Game + 'static> GameSetup<G> {
+    pub fn new(name: impl Into<String>, about: impl Into<String>) -> Self {
+        Self {
+            name: name.into(),
+            about: about.into(),
+            evaluators: crate::eval::Evaluators::new(),
+            encoders: Vec::new(),
+            models: Vec::new(),
+            configs: Vec::new(),
+        }
+    }
+
+    pub fn add_evaluator(
+        &mut self,
+        name: impl Into<String>,
+        eval: impl crate::eval::Evaluator<G> + Sync + 'static,
+    ) {
+        self.evaluators.add(name, eval);
+    }
+
+    pub fn add_evaluator_arc(
+        &mut self,
+        name: impl Into<String>,
+        eval: std::sync::Arc<dyn crate::eval::Evaluator<G> + Sync>,
+    ) {
+        self.evaluators.add_arc(name, eval);
+    }
+
+    pub fn evaluators(&self) -> &crate::eval::Evaluators<G> {
+        &self.evaluators
+    }
+
+    pub fn evaluators_mut(&mut self) -> &mut crate::eval::Evaluators<G> {
+        &mut self.evaluators
+    }
+
+    pub fn add_encoder(
+        &mut self,
+        name: impl Into<String>,
+        encoder: std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
+    ) {
+        self.encoders.push((name.into(), encoder));
+    }
+
+    pub fn add_model(
+        &mut self,
+        name: impl Into<String>,
+        factory: impl Fn(
+            std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
+            &crate::train::Device,
+        ) -> Box<dyn crate::train::TrainableModel<G>>
+        + Send
+        + 'static,
+    ) {
+        self.models.push((name.into(), Box::new(factory)));
+    }
+
+    pub fn add_config(&mut self, name: impl Into<String>, config: crate::train::TrainConfig) {
+        self.configs.push((name.into(), config));
+    }
+
+    /// Returns a `train` subcommand with `--model`, `--encoder`, `--config`
+    /// args populated from registered names (first registered = default).
+    pub fn train_command(&self) -> Command {
+        let mut cmd = train_command();
+
+        fn registry_arg(
+            cmd: Command,
+            id: &'static str,
+            help: &'static str,
+            names: &[String],
+        ) -> Command {
+            if names.is_empty() {
+                return cmd;
+            }
+            cmd.arg(
+                Arg::new(id)
+                    .long(id)
+                    .default_value(names[0].clone())
+                    .value_parser(names.to_vec())
+                    .help(help),
+            )
+        }
+
+        let model_names: Vec<String> = self.models.iter().map(|(n, _)| n.clone()).collect();
+        cmd = registry_arg(cmd, "model", "Model architecture", &model_names);
+
+        let encoder_names: Vec<String> = self.encoders.iter().map(|(n, _)| n.clone()).collect();
+        cmd = registry_arg(cmd, "encoder", "State encoder", &encoder_names);
+
+        let config_names: Vec<String> = self.configs.iter().map(|(n, _)| n.clone()).collect();
+        cmd = registry_arg(cmd, "config", "Training config preset", &config_names);
+
+        cmd
+    }
+
+    /// Returns the full CLI command: tournament args + train subcommand.
+    pub fn command(&self) -> Command {
+        tournament_command(&self.name, &self.about).subcommand(self.train_command())
+    }
+
+    /// Look up the selected `--config`, `--encoder`, `--model`, merge CLI
+    /// overrides, build the model, and run training.
+    pub fn run_train(
+        &self,
+        matches: &ArgMatches,
+        new_state: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
+    ) {
+        // Look up config
+        let config_name = matches
+            .get_one::<String>("config")
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.configs[0].0.as_str());
+        let base_config = self
+            .configs
+            .iter()
+            .find(|(n, _)| n == config_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.configs.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown config '{config_name}', available: {names:?}");
+            })
+            .1
+            .clone();
+        let config = parse_train_config(matches, base_config);
+
+        // Look up encoder
+        let encoder_name = matches
+            .get_one::<String>("encoder")
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.encoders[0].0.as_str());
+        let encoder = self
+            .encoders
+            .iter()
+            .find(|(n, _)| n == encoder_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.encoders.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown encoder '{encoder_name}', available: {names:?}");
+            })
+            .1
+            .clone();
+
+        // Look up model factory and build
+        let model_name = matches
+            .get_one::<String>("model")
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.models[0].0.as_str());
+        let factory = &self
+            .models
+            .iter()
+            .find(|(n, _)| n == model_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.models.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown model '{model_name}', available: {names:?}");
+            })
+            .1;
+
+        let device = crate::train::default_device();
+        let mut trainable = factory(encoder, &device);
+        crate::train::run_training(config, trainable.as_mut(), new_state, &self.evaluators);
+    }
+
+    /// Parse tournament options and run.
+    pub fn run_tournament(&self, matches: &ArgMatches, new_game: impl Fn(u64) -> G) {
+        let opts = parse_tournament(matches);
+        opts.run(new_game, &self.evaluators);
+    }
 }
 
 /// Parse CLI overrides on top of a base [`TrainConfig`].
@@ -319,8 +512,8 @@ pub fn parse_train_config(
     if set("bench-baseline-sims") {
         config.bench_baseline_sims = val("bench-baseline-sims").parse().unwrap();
     }
-    if set("bench-baseline-rollouts") {
-        config.bench_baseline_rollouts = val("bench-baseline-rollouts").parse().unwrap();
+    if set("bench-baseline") {
+        config.bench_baseline_name = val("bench-baseline");
     }
 
     config

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+
 use crate::game::{Game, Status};
 
 /// Policy logits and value estimate produced by any [`Evaluator`].
@@ -54,6 +56,12 @@ pub struct RolloutEvaluator {
     pub num_rollouts: u32,
 }
 
+impl Default for RolloutEvaluator {
+    fn default() -> Self {
+        Self { num_rollouts: 1 }
+    }
+}
+
 impl<G: Game> Evaluator<G> for RolloutEvaluator {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation {
         assert!(self.num_rollouts > 0, "num_rollouts must be at least 1");
@@ -67,9 +75,9 @@ impl<G: Game> Evaluator<G> for RolloutEvaluator {
     }
 }
 
-/// Named registry of evaluators for tournament CLI dispatch.
+/// Named registry of evaluators for tournament and benchmark dispatch.
 pub struct Evaluators<G: Game> {
-    entries: Vec<(String, Box<dyn Evaluator<G>>)>,
+    entries: Vec<(String, Arc<dyn Evaluator<G> + Sync>)>,
 }
 
 impl<G: Game> Default for Evaluators<G> {
@@ -85,11 +93,11 @@ impl<G: Game> Evaluators<G> {
         }
     }
 
-    pub fn add(&mut self, name: impl Into<String>, eval: impl Evaluator<G> + 'static) {
-        self.entries.push((name.into(), Box::new(eval)));
+    pub fn add(&mut self, name: impl Into<String>, eval: impl Evaluator<G> + Sync + 'static) {
+        self.entries.push((name.into(), Arc::new(eval)));
     }
 
-    pub fn add_boxed(&mut self, name: impl Into<String>, eval: Box<dyn Evaluator<G>>) {
+    pub fn add_arc(&mut self, name: impl Into<String>, eval: Arc<dyn Evaluator<G> + Sync>) {
         self.entries.push((name.into(), eval));
     }
 
@@ -98,6 +106,17 @@ impl<G: Game> Evaluators<G> {
         for (n, e) in &self.entries {
             if n == name {
                 return &**e;
+            }
+        }
+        let names: Vec<&str> = self.entries.iter().map(|(n, _)| n.as_str()).collect();
+        panic!("unknown evaluator '{name}', available: {names:?}");
+    }
+
+    /// Look up an evaluator by name and clone the `Arc`. Panics on miss.
+    pub fn get_arc(&self, name: &str) -> Arc<dyn Evaluator<G> + Sync> {
+        for (n, e) in &self.entries {
+            if n == name {
+                return Arc::clone(e);
             }
         }
         let names: Vec<&str> = self.entries.iter().map(|(n, _)| n.as_str()).collect();

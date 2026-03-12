@@ -5,9 +5,11 @@ use crate::game::{PigGame, Player};
 pub struct PigEncoder;
 
 impl StateEncoder<PigGame> for PigEncoder {
-    const FEATURE_SIZE: usize = 3;
+    fn feature_size(&self) -> usize {
+        3
+    }
 
-    fn encode(state: &PigGame, out: &mut Vec<f32>) {
+    fn encode(&self, state: &PigGame, out: &mut Vec<f32>) {
         out.clear();
         let scores = state.scores();
         let (my, opp) = match state.current_player() {
@@ -18,6 +20,6 @@ impl StateEncoder<PigGame> for PigEncoder {
         out.push(opp as f32 / 100.0);
         out.push(state.turn_total() as f32 / 100.0);
 
-        debug_assert_eq!(out.len(), Self::FEATURE_SIZE);
+        debug_assert_eq!(out.len(), self.feature_size());
     }
 }

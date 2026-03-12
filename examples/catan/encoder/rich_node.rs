@@ -64,9 +64,11 @@ impl StateEncoder<GameState> for RichNodeEncoder {
     // Node stream: 54 x 24 = 1296
     // Edge stream: 72 x 2 = 144
     // Total: 7 + 42 + 1296 + 144 = 1489
-    const FEATURE_SIZE: usize = 1489;
+    fn feature_size(&self) -> usize {
+        1489
+    }
 
-    fn encode(state: &GameState, out: &mut Vec<f32>) {
+    fn encode(&self, state: &GameState, out: &mut Vec<f32>) {
         out.clear();
         let current = state.current_player;
         let opp = current.opponent();
@@ -218,9 +220,9 @@ impl StateEncoder<GameState> for RichNodeEncoder {
 
         debug_assert_eq!(
             out.len(),
-            Self::FEATURE_SIZE,
+            self.feature_size(),
             "feature vector length mismatch: expected {}, got {}",
-            Self::FEATURE_SIZE,
+            self.feature_size(),
             out.len()
         );
     }
@@ -254,12 +256,16 @@ mod tests {
         }
     }
 
+    fn enc() -> RichNodeEncoder {
+        RichNodeEncoder
+    }
+
     #[test]
     fn feature_vector_length() {
         let state = make_state();
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
-        assert_eq!(features.len(), RichNodeEncoder::FEATURE_SIZE);
+        enc().encode(&state, &mut features);
+        assert_eq!(features.len(), enc().feature_size());
     }
 
     #[test]
@@ -267,8 +273,8 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
-        assert_eq!(features.len(), RichNodeEncoder::FEATURE_SIZE);
+        enc().encode(&state, &mut features);
+        assert_eq!(features.len(), enc().feature_size());
     }
 
     #[test]
@@ -276,7 +282,7 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -290,10 +296,10 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         let p1_features = features.clone();
         state.current_player = state.current_player.opponent();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         assert_ne!(p1_features, features);
         assert_eq!(p1_features.len(), features.len());
     }
@@ -332,7 +338,7 @@ mod tests {
         // produce values in [0, 1] — hop_distance returns cap, not 0.
         let state = make_state();
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -372,7 +378,7 @@ mod tests {
         let state = make_main_state();
         let topo = &state.topology;
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // For each node, manually compute expected production pips per resource
         // and verify against the encoded features.
@@ -419,7 +425,7 @@ mod tests {
         state.robber = robber_tile;
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // Nodes adjacent to the robber tile should have nonzero robbed_production.
         let tile = &topo.tiles[robber_tile.0 as usize];
@@ -468,7 +474,7 @@ mod tests {
         let state = make_main_state();
         let topo = &state.topology;
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         for n in 0..54 {
             let node = &topo.nodes[n];
@@ -519,7 +525,7 @@ mod tests {
         state.boards[Player::Two].settlements = 1u64 << opp_node;
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // building_cur = 0.5 for settlement, 1.0 for city
         assert_eq!(features[node_feat(s_node, 0)], 0.5, "settlement = 0.5");
@@ -571,7 +577,7 @@ mod tests {
         state.boards[Player::Two].road_network.roads = 1u128 << opp_edge.0;
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         let road_cur = features[node_feat(n, 18)];
         let road_opp = features[node_feat(n, 19)];
@@ -594,7 +600,7 @@ mod tests {
         state.boards[Player::One].settlements = 1u64 << 0;
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // All neighbors of node 0 should have adj_buildings_cur = 1/3.
         for &adj in &topo.nodes[0].adjacent_nodes {
@@ -633,7 +639,7 @@ mod tests {
         let expected_opp = super::super::compute_hop_distances(topo, opp_buildings, 5);
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         for n in 0..54 {
             let hop_cur = features[node_feat(n, 22)];
@@ -685,7 +691,7 @@ mod tests {
         state.boards[Player::One].settlements = 1u64 << endpoint_node;
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // Check the other endpoint: if it has adj buildings (our settlement is
         // adjacent via the edge), it should also be zeroed.
@@ -734,7 +740,7 @@ mod tests {
         let hop_dist = super::super::compute_hop_distances(topo, 1u64 << 0, 5);
 
         let mut features = Vec::new();
-        RichNodeEncoder::encode(&state, &mut features);
+        enc().encode(&state, &mut features);
 
         // For each edge, best_endpoint_hop_distance = min hop_cur of endpoints.
         for e in 0..72 {
@@ -766,11 +772,11 @@ mod tests {
         state.boards[Player::Two].settlements = 1u64 << opp_node;
 
         let mut f1 = Vec::new();
-        RichNodeEncoder::encode(&state, &mut f1);
+        enc().encode(&state, &mut f1);
 
         state.current_player = Player::Two;
         let mut f2 = Vec::new();
-        RichNodeEncoder::encode(&state, &mut f2);
+        enc().encode(&state, &mut f2);
 
         // P1's building_cur should become P2's building_opp and vice versa.
         assert_eq!(f1[node_feat(cur_node, 0)], 0.5, "P1 view: cur settlement");

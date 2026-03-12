@@ -26,23 +26,24 @@ pub(super) struct GameResult {
 /// Pure game logic: chance nodes → forced moves → MCTS search → sample → apply.
 /// Leaf evaluation is delegated to the caller-provided `infer` closure, keeping
 /// this function free of any channel, batching, or GPU knowledge.
-pub(super) async fn play_game<G, E, F, Fut>(
+pub(super) async fn play_game<G, F, Fut>(
     search: &mut Search<G>,
     actor_config: &ActorConfig,
+    encoder: &dyn StateEncoder<G>,
     infer: F,
     rng: &mut fastrand::Rng,
 ) -> GameResult
 where
     G: Game,
-    E: StateEncoder<G>,
     F: Fn(Vec<f32>) -> Fut,
     Fut: Future<Output = (Vec<f32>, f32)>,
 {
+    let feature_size = encoder.feature_size();
     let mut samples: Vec<Sample> = Vec::new();
     let mut turn_count: u32 = 0;
     let mut last_sign: Option<f32> = None;
     let mut actions_buf = Vec::new();
-    let mut encode_buf = Vec::with_capacity(E::FEATURE_SIZE);
+    let mut encode_buf = Vec::with_capacity(feature_size);
 
     loop {
         // Resolve chance nodes
@@ -85,8 +86,8 @@ where
         });
 
         // Encode features before search (for training sample)
-        let mut features_buf = Vec::with_capacity(E::FEATURE_SIZE);
-        E::encode(search.state(), &mut features_buf);
+        let mut features_buf = Vec::with_capacity(feature_size);
+        encoder.encode(search.state(), &mut features_buf);
 
         // MCTS search with eval requests sent via infer closure
         let mut evals: Vec<Evaluation> = vec![];
@@ -100,7 +101,7 @@ where
                             Status::Terminal(_) => 1.0,
                         };
                         encode_buf.clear();
-                        E::encode(pending_state, &mut encode_buf);
+                        encoder.encode(pending_state, &mut encode_buf);
                         let (policy_logits, value) = infer(encode_buf.clone()).await;
                         evals.push(Evaluation {
                             policy_logits,

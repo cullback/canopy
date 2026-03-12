@@ -64,7 +64,9 @@
 //! |    5/36 | max single-tile dice probability  |
 
 use std::collections::VecDeque;
+use std::sync::Arc;
 
+use canopy2::nn::StateEncoder;
 use canopy2::player::Player;
 
 use crate::game::resource::ALL_RESOURCES;
@@ -80,6 +82,86 @@ pub use basic::BasicEncoder;
 pub use gnn::GnnEncoder;
 pub use gnn2::Gnn2Encoder;
 pub use rich_node::RichNodeEncoder;
+
+/// Load a neural evaluator from a checkpoint, dispatching on encoder name.
+pub fn load_evaluator(
+    name: &str,
+    path: &str,
+    device: &canopy2::train::Device,
+) -> Arc<dyn canopy2::eval::Evaluator<GameState> + Sync> {
+    use canopy2::game::Game;
+    use canopy2::nn::NeuralEvaluator;
+    use canopy2::train::InferBackend;
+
+    let na = GameState::NUM_ACTIONS;
+
+    match name {
+        "basic" => {
+            let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(BasicEncoder);
+            let mc = crate::model::CatanModelConfig::new(
+                na,
+                BasicEncoder::NODES_F,
+                BasicEncoder::EDGES_F,
+                BasicEncoder::TILES_F,
+                BasicEncoder::PORTS_F,
+            );
+            Arc::new(
+                NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
+                    encoder,
+                    mc.init(device),
+                    path,
+                    device.clone(),
+                ),
+            )
+        }
+        "rich" => {
+            let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(RichNodeEncoder);
+            let mc = crate::model::CatanModelConfig::new(
+                na,
+                RichNodeEncoder::NODES_F,
+                RichNodeEncoder::EDGES_F,
+                RichNodeEncoder::TILES_F,
+                RichNodeEncoder::PORTS_F,
+            );
+            Arc::new(
+                NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
+                    encoder,
+                    mc.init(device),
+                    path,
+                    device.clone(),
+                ),
+            )
+        }
+        "gnn" => {
+            let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(GnnEncoder);
+            let mc = crate::model::CatanGnnModelConfig::new(na);
+            Arc::new(
+                NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
+                    encoder,
+                    mc.init(device),
+                    path,
+                    device.clone(),
+                ),
+            )
+        }
+        "gnn2" => {
+            let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(Gnn2Encoder);
+            let mc = crate::model::CatanGnnModelConfig::new(na);
+            Arc::new(
+                NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
+                    encoder,
+                    mc.init_with::<_, 101, 34>(device),
+                    path,
+                    device.clone(),
+                ),
+            )
+        }
+        other => {
+            let known = ["basic", "rich", "gnn", "gnn2"];
+            panic!("unknown encoder '{other}', available: {known:?}");
+        }
+    }
+}
 
 /// Dice probability for each sum (indices 2..=12, 0 and 1 unused).
 pub(crate) const DICE_PROB: [f32; 13] = [

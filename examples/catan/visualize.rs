@@ -485,8 +485,8 @@ fn is_encodable_phase(state: &GameState) -> bool {
 }
 
 /// Render a game log with per-frame encoder features embedded in the HTML.
-#[cfg(feature = "nn")]
-pub fn render_with_encoder<E: canopy2::nn::StateEncoder<GameState>>(
+pub fn render_with_encoder(
+    encoder: &dyn canopy2::nn::StateEncoder<GameState>,
     log: &GameLog,
     output: &Path,
     global_labels: Vec<String>,
@@ -497,7 +497,7 @@ pub fn render_with_encoder<E: canopy2::nn::StateEncoder<GameState>>(
 
     let global_len = global_labels.len();
     let nodes_f = node_labels.len();
-    let feature_size = E::FEATURE_SIZE;
+    let feature_size = encoder.feature_size();
 
     let mut buf = Vec::with_capacity(feature_size);
     let mut feature_frames = Vec::new();
@@ -505,7 +505,7 @@ pub fn render_with_encoder<E: canopy2::nn::StateEncoder<GameState>>(
 
     let encode_frame = |state: &GameState, buf: &mut Vec<f32>| -> Vec<f32> {
         if is_encodable_phase(state) {
-            E::encode(state, buf);
+            encoder.encode(state, buf);
             // Round to 3 decimals to reduce JSON size
             buf.iter().map(|v| (v * 1000.0).round() / 1000.0).collect()
         } else {
@@ -611,4 +611,136 @@ pub fn render_with_encoder<E: canopy2::nn::StateEncoder<GameState>>(
     let json = serde_json::to_string(&data).expect("failed to serialize replay data");
     let html = include_str!("visualize_template.html").replace("\"__REPLAY_DATA__\"", &json);
     std::fs::write(output, html).expect("failed to write HTML file");
+}
+
+/// Render a game log with encoder features, dispatching on encoder name.
+pub fn render_with_encoder_dispatch(encoder_type: &str, log: &GameLog, output: &Path) {
+    let res = ["lumber", "brick", "wool", "grain", "ore"];
+
+    // Phase labels (7)
+    let phase_labels: Vec<String> = [
+        "phase_settlement",
+        "phase_road",
+        "phase_pre_roll",
+        "phase_discard",
+        "phase_robber",
+        "phase_main",
+        "phase_road_building",
+    ]
+    .into_iter()
+    .map(String::from)
+    .collect();
+
+    // Per-player standard labels (21)
+    let player_std = |prefix: &str| -> Vec<String> {
+        let mut v = Vec::new();
+        for r in &res {
+            v.push(format!("{prefix}_{r}"));
+        }
+        for d in ["dev_knight", "dev_vp", "dev_rb", "dev_yop", "dev_monopoly"] {
+            v.push(format!("{prefix}_{d}"));
+        }
+        for d in [
+            "played_knight",
+            "played_vp",
+            "played_rb",
+            "played_yop",
+            "played_monopoly",
+        ] {
+            v.push(format!("{prefix}_{d}"));
+        }
+        v.push(format!("{prefix}_settlements_left"));
+        v.push(format!("{prefix}_cities_left"));
+        v.push(format!("{prefix}_roads_left"));
+        v.push(format!("{prefix}_longest_road"));
+        v.push(format!("{prefix}_largest_army"));
+        v.push(format!("{prefix}_road_length"));
+        v
+    };
+
+    match encoder_type {
+        "gnn" => {
+            // Global: phase(7) + player_std(21×2) = 49
+            let mut global_labels = phase_labels.clone();
+            global_labels.extend(player_std("cur"));
+            global_labels.extend(player_std("opp"));
+
+            // Per-node (24): building(2) + prod(5) + robbed(5) + port(6) + road(6)
+            let mut node_labels = vec!["building_cur".into(), "building_opp".into()];
+            for r in &res {
+                node_labels.push(format!("prod_{r}"));
+            }
+            for r in &res {
+                node_labels.push(format!("robbed_{r}"));
+            }
+            for r in &res {
+                node_labels.push(format!("port_{r}"));
+            }
+            node_labels.push("port_generic".into());
+            for i in 0..3 {
+                node_labels.push(format!("road{i}_cur"));
+                node_labels.push(format!("road{i}_opp"));
+            }
+
+            render_with_encoder(
+                &crate::encoder::GnnEncoder,
+                log,
+                output,
+                global_labels,
+                node_labels,
+            );
+        }
+        "gnn2" => {
+            // Global: phase(7) + player_std(21×2) + player_ext(26×2) = 101
+            let mut global_labels = phase_labels;
+            global_labels.extend(player_std("cur"));
+            global_labels.extend(player_std("opp"));
+
+            // Extended per-player labels (26)
+            let player_ext = |prefix: &str| -> Vec<String> {
+                let mut v = Vec::new();
+                for r in &res {
+                    v.push(format!("{prefix}_trade_{r}"));
+                }
+                for r in &res {
+                    v.push(format!("{prefix}_prod_{r}"));
+                }
+                for r in &res {
+                    v.push(format!("{prefix}_robbed_{r}"));
+                }
+                for n in 2..=12u8 {
+                    v.push(format!("{prefix}_num_{n}"));
+                }
+                v
+            };
+            global_labels.extend(player_ext("cur"));
+            global_labels.extend(player_ext("opp"));
+
+            // Per-node (34): building(2) + tile_slot×3(21) + port(5) + road(6)
+            let mut node_labels: Vec<String> = vec!["building_cur".into(), "building_opp".into()];
+            for i in 0..3 {
+                for r in &res {
+                    node_labels.push(format!("t{i}_{r}"));
+                }
+                node_labels.push(format!("t{i}_number"));
+                node_labels.push(format!("t{i}_robber"));
+            }
+            for r in &res {
+                node_labels.push(format!("port_{r}"));
+            }
+            for i in 0..3 {
+                node_labels.push(format!("road{i}_cur"));
+                node_labels.push(format!("road{i}_opp"));
+            }
+
+            render_with_encoder(
+                &crate::encoder::Gnn2Encoder,
+                log,
+                output,
+                global_labels,
+                node_labels,
+            );
+        }
+        other => panic!("unknown encoder '{other}', expected 'gnn' or 'gnn2'"),
+    }
 }

@@ -999,7 +999,7 @@ mod tests {
 
     #[test]
     fn mcts_finds_winning_action() {
-        let evaluator = RolloutEvaluator { num_rollouts: 1 };
+        let evaluator = RolloutEvaluator::default();
         let config = Config {
             num_simulations: 500,
             ..Default::default()
@@ -1074,7 +1074,7 @@ mod tests {
 
     #[test]
     fn tree_reuse_works() {
-        let evaluator = RolloutEvaluator { num_rollouts: 1 };
+        let evaluator = RolloutEvaluator::default();
         let config = Config {
             num_simulations: 200,
             ..Default::default()
@@ -1125,7 +1125,7 @@ mod tests {
 
     #[test]
     fn improved_policy_sums_to_one() {
-        let evaluator = RolloutEvaluator { num_rollouts: 1 };
+        let evaluator = RolloutEvaluator::default();
         let config = Config {
             num_simulations: 100,
             ..Default::default()
@@ -1145,7 +1145,7 @@ mod tests {
     #[test]
     fn sequential_halving_halves_candidates() {
         // With 4 candidates, after one phase we should have 2
-        let evaluator = RolloutEvaluator { num_rollouts: 1 };
+        let evaluator = RolloutEvaluator::default();
         let config = Config {
             num_simulations: 100,
             num_sampled_actions: 4, // but TrivialGame only has 2 actions
