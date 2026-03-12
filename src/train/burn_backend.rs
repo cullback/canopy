@@ -18,7 +18,7 @@ use super::{Sample, TrainMetrics, TrainStepConfig, TrainableModel};
 #[cfg(feature = "cuda")]
 use burn::backend::{Autodiff, Cuda};
 #[cfg(feature = "cuda")]
-type TrainBackend = Autodiff<Cuda>;
+pub type TrainBackend = Autodiff<Cuda>;
 #[cfg(feature = "cuda")]
 pub type InferBackend = Cuda;
 #[cfg(feature = "cuda")]
@@ -27,7 +27,7 @@ pub type Device = burn::backend::cuda::CudaDevice;
 #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
 use burn::backend::{Autodiff, Wgpu};
 #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
-type TrainBackend = Autodiff<Wgpu>;
+pub type TrainBackend = Autodiff<Wgpu>;
 #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
 pub type InferBackend = Wgpu;
 #[cfg(all(feature = "wgpu", not(feature = "cuda")))]
@@ -36,7 +36,7 @@ pub type Device = burn::backend::wgpu::WgpuDevice;
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 use burn::backend::{Autodiff, NdArray};
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
-type TrainBackend = Autodiff<NdArray>;
+pub type TrainBackend = Autodiff<NdArray>;
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
 pub type InferBackend = NdArray;
 #[cfg(not(any(feature = "cuda", feature = "wgpu")))]
@@ -129,30 +129,27 @@ pub struct BurnTrainableModel<G, M>
 where
     M: AutodiffModule<TrainBackend>,
 {
-    encoder: Arc<dyn StateEncoder<G>>,
     model: M,
     optimizer: OptimizerAdaptor<AdamW, M, TrainBackend>,
     device: Device,
     model_init: Box<dyn Fn(&Device) -> M + Send>,
+    _game: std::marker::PhantomData<G>,
 }
 
 impl<G, M> BurnTrainableModel<G, M>
 where
     M: AutodiffModule<TrainBackend>,
 {
-    pub fn new(
-        encoder: Arc<dyn StateEncoder<G>>,
-        model_init: impl Fn(&Device) -> M + Send + 'static,
-        device: &Device,
-    ) -> Self {
-        let model = model_init(device);
+    pub fn new(model_init: impl Fn(&Device) -> M + Send + 'static) -> Self {
+        let device = default_device();
+        let model = model_init(&device);
         let optimizer = AdamWConfig::new().with_weight_decay(0.0004).init();
         Self {
-            encoder,
             model,
             optimizer,
-            device: device.clone(),
+            device,
             model_init: Box::new(model_init),
+            _game: std::marker::PhantomData,
         }
     }
 }
@@ -169,7 +166,7 @@ where
         cfg: &TrainStepConfig,
         pb: &indicatif::ProgressBar,
     ) -> (f32, f32, usize) {
-        let feature_size = self.encoder.feature_size();
+        let feature_size = samples[0].features.len();
         let mut model = std::mem::replace(&mut self.model, (self.model_init)(&self.device));
 
         let mut indices: Vec<usize> = (0..samples.len()).collect();
@@ -232,7 +229,7 @@ where
     }
 
     fn validate(&self, samples: &[&Sample], cfg: &TrainStepConfig) -> (f32, f32) {
-        let feature_size = self.encoder.feature_size();
+        let feature_size = samples[0].features.len();
         let model = self.model.valid();
 
         let mut total_policy_loss = 0.0f32;
@@ -290,14 +287,13 @@ where
     M: AutodiffModule<TrainBackend> + PolicyValueNet<TrainBackend> + Send + 'static,
     M::InnerModule: PolicyValueNet<InferBackend> + Send,
 {
-    fn encoder(&self) -> Arc<dyn StateEncoder<G>> {
-        self.encoder.clone()
-    }
-
-    fn evaluator(&self) -> Arc<dyn crate::eval::Evaluator<G> + Sync> {
+    fn evaluator(
+        &self,
+        encoder: Arc<dyn StateEncoder<G>>,
+    ) -> Arc<dyn crate::eval::Evaluator<G> + Sync> {
         let infer_model = self.model.valid();
         Arc::new(NeuralEvaluator::new(
-            self.encoder.clone(),
+            encoder,
             infer_model,
             self.device.clone(),
         ))

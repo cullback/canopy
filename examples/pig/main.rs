@@ -68,7 +68,7 @@ impl Game for PigGame {
 }
 
 fn main() {
-    use canopy2::train::{BurnTrainableModel, TrainConfig};
+    use canopy2::train::TrainConfig;
     use std::sync::Arc;
 
     let mut setup = GameSetup::new("pig", "Pig dice game tournament between two MCTS bots");
@@ -76,11 +76,7 @@ fn main() {
     setup.add_evaluator("hold-at-20", strategy::HoldAt(20));
 
     setup.add_encoder("default", Arc::new(encoder::PigEncoder));
-    setup.add_model("default", |enc, dev| {
-        let fs = enc.feature_size();
-        let mc = model::PigModelConfig::new(PigGame::NUM_ACTIONS, fs);
-        Box::new(BurnTrainableModel::new(enc, move |d| mc.init(d), dev))
-    });
+    setup.add_model("default", model::init_pig);
     setup.add_config(
         "default",
         TrainConfig {

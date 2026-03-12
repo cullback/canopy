@@ -38,6 +38,7 @@ use super::{MAX_NODE_PIPS, PIPS, compute_hop_distances, encode_phase, encode_pla
 pub struct RichNodeEncoder;
 
 impl RichNodeEncoder {
+    pub const FEATURE_SIZE: usize = 1489;
     /// Per-node feature count for this encoder.
     pub const NODES_F: usize = 24;
     /// Per-edge feature count for this encoder.
@@ -65,7 +66,7 @@ impl StateEncoder<GameState> for RichNodeEncoder {
     // Edge stream: 72 x 2 = 144
     // Total: 7 + 42 + 1296 + 144 = 1489
     fn feature_size(&self) -> usize {
-        1489
+        Self::FEATURE_SIZE
     }
 
     fn encode(&self, state: &GameState, out: &mut Vec<f32>) {

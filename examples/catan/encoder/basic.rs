@@ -7,6 +7,7 @@ use super::{encode_edges, encode_phase, encode_player, encode_ports, encode_tile
 pub struct BasicEncoder;
 
 impl BasicEncoder {
+    pub const FEATURE_SIZE: usize = 479;
     pub const NODES_F: usize = 2;
     pub const EDGES_F: usize = 2;
     pub const TILES_F: usize = 7;
@@ -22,7 +23,7 @@ impl StateEncoder<GameState> for BasicEncoder {
     // Port stream: 9 x 5 = 45
     // Total: 7 + 42 + 133 + 108 + 144 + 45 = 479
     fn feature_size(&self) -> usize {
-        479
+        Self::FEATURE_SIZE
     }
 
     fn encode(&self, state: &GameState, out: &mut Vec<f32>) {

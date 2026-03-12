@@ -4,9 +4,13 @@ use crate::game::{PigGame, Player};
 
 pub struct PigEncoder;
 
+impl PigEncoder {
+    pub const FEATURE_SIZE: usize = 3;
+}
+
 impl StateEncoder<PigGame> for PigEncoder {
     fn feature_size(&self) -> usize {
-        3
+        Self::FEATURE_SIZE
     }
 
     fn encode(&self, state: &PigGame, out: &mut Vec<f32>) {

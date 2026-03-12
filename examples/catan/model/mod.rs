@@ -2,9 +2,9 @@ mod gnn;
 mod resnet;
 mod simple;
 
-pub use gnn::{CatanGnnModel, CatanGnnModelConfig};
-pub use resnet::CatanResModelConfig;
-pub use simple::{CatanModel, CatanModelConfig};
+pub use gnn::{init_gnn, init_gnn_with};
+pub use resnet::init_resnet;
+pub use simple::{init_simple, init_simple_with};
 
 use burn::nn::Linear;
 use burn::prelude::*;

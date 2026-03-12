@@ -9,9 +9,13 @@ use std::sync::OnceLock;
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::{relu, tanh};
+use canopy2::game::Game;
 use canopy2::nn::PolicyValueNet;
 
+use crate::game::state::GameState;
 use crate::game::topology::Topology;
+
+const NA: usize = GameState::NUM_ACTIONS;
 
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
@@ -149,64 +153,56 @@ pub struct CatanGnnModel<B: Backend, const GLOBAL_LEN: usize = 49, const NODES_F
     value3: Linear<B>,
 }
 
-#[derive(Config, Debug)]
-pub struct CatanGnnModelConfig {
-    num_actions: usize,
+pub fn init_gnn<B: Backend>(device: &B::Device) -> CatanGnnModel<B> {
+    init_gnn_with(device)
 }
 
-impl CatanGnnModelConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CatanGnnModel<B> {
-        self.init_with(device)
-    }
+pub fn init_gnn_with<B: Backend, const GL: usize, const NF: usize>(
+    device: &B::Device,
+) -> CatanGnnModel<B, GL, NF> {
+    let num_other = NA - NUM_NODES - NUM_EDGES - NUM_NODES;
+    let graph = graph_data();
 
-    pub fn init_with<B: Backend, const GL: usize, const NF: usize>(
-        &self,
-        device: &B::Device,
-    ) -> CatanGnnModel<B, GL, NF> {
-        let num_other = self.num_actions - NUM_NODES - NUM_EDGES - NUM_NODES;
-        let graph = graph_data();
+    // Build constant graph tensors once
+    let adj = Tensor::<B, 2>::from_data(
+        burn::tensor::TensorData::new(graph.adj_flat.clone(), [NUM_NODES, NUM_NODES]),
+        device,
+    )
+    .unsqueeze::<3>(); // [1, 54, 54]
 
-        // Build constant graph tensors once
-        let adj = Tensor::<B, 2>::from_data(
-            burn::tensor::TensorData::new(graph.adj_flat.clone(), [NUM_NODES, NUM_NODES]),
-            device,
-        )
-        .unsqueeze::<3>(); // [1, 54, 54]
+    let src_ints: Vec<i32> = graph.edge_src.iter().map(|&x| x as i32).collect();
+    let dst_ints: Vec<i32> = graph.edge_dst.iter().map(|&x| x as i32).collect();
+    let edge_src = Tensor::<B, 1, Int>::from_data(
+        burn::tensor::TensorData::new(src_ints, [NUM_EDGES]),
+        device,
+    );
+    let edge_dst = Tensor::<B, 1, Int>::from_data(
+        burn::tensor::TensorData::new(dst_ints, [NUM_EDGES]),
+        device,
+    );
 
-        let src_ints: Vec<i32> = graph.edge_src.iter().map(|&x| x as i32).collect();
-        let dst_ints: Vec<i32> = graph.edge_dst.iter().map(|&x| x as i32).collect();
-        let edge_src = Tensor::<B, 1, Int>::from_data(
-            burn::tensor::TensorData::new(src_ints, [NUM_EDGES]),
-            device,
-        );
-        let edge_dst = Tensor::<B, 1, Int>::from_data(
-            burn::tensor::TensorData::new(dst_ints, [NUM_EDGES]),
-            device,
-        );
+    CatanGnnModel {
+        global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
+        node_proj: LinearConfig::new(NF, HIDDEN).init(device),
+        inject_proj: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
+        inject_norm: LayerNormConfig::new(HIDDEN).init(device),
 
-        CatanGnnModel {
-            global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
-            node_proj: LinearConfig::new(NF, HIDDEN).init(device),
-            inject_proj: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
-            inject_norm: LayerNormConfig::new(HIDDEN).init(device),
+        gnn_layers: (0..NUM_LAYERS).map(|_| gnn_layer(device)).collect(),
 
-            gnn_layers: (0..NUM_LAYERS).map(|_| gnn_layer(device)).collect(),
+        adj,
+        edge_src,
+        edge_dst,
 
-            adj,
-            edge_src,
-            edge_dst,
+        policy_settlement: LinearConfig::new(HIDDEN, 1).init(device),
+        policy_road1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
+        policy_city: LinearConfig::new(HIDDEN, 1).init(device),
+        policy_other1: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
+        policy_other2: LinearConfig::new(HIDDEN, num_other).init(device),
 
-            policy_settlement: LinearConfig::new(HIDDEN, 1).init(device),
-            policy_road1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
-            policy_city: LinearConfig::new(HIDDEN, 1).init(device),
-            policy_other1: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
-            policy_other2: LinearConfig::new(HIDDEN, num_other).init(device),
-
-            value1: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
-            value2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            value3: LinearConfig::new(HIDDEN, 1).init(device),
-        }
+        value1: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
+        value2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        value3: LinearConfig::new(HIDDEN, 1).init(device),
     }
 }
 

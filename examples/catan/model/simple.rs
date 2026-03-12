@@ -1,8 +1,17 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
+use canopy2::game::Game;
 use canopy2::nn::PolicyValueNet;
 
 use super::*;
+use crate::encoder::BasicEncoder;
+use crate::game::state::GameState;
+
+const NUM_ACTIONS: usize = GameState::NUM_ACTIONS;
+const NODES_F: usize = BasicEncoder::NODES_F;
+const EDGES_F: usize = BasicEncoder::EDGES_F;
+const TILES_F: usize = BasicEncoder::TILES_F;
+const PORTS_F: usize = BasicEncoder::PORTS_F;
 
 #[derive(Module, Debug)]
 pub struct CatanModel<B: Backend> {
@@ -18,38 +27,37 @@ pub struct CatanModel<B: Backend> {
     value_head2: Linear<B>,
 }
 
-#[derive(Config, Debug)]
-pub struct CatanModelConfig {
-    num_actions: usize,
+pub fn init_simple<B: Backend>(device: &B::Device) -> CatanModel<B> {
+    init_simple_with(NODES_F, EDGES_F, TILES_F, PORTS_F, device)
+}
+
+pub fn init_simple_with<B: Backend>(
     nodes_f: usize,
     edges_f: usize,
     tiles_f: usize,
     ports_f: usize,
-}
-
-impl CatanModelConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CatanModel<B> {
-        let sdim = stream_dim(self.tiles_f, self.ports_f);
-        CatanModel {
-            proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
-            proj_tiles: if self.tiles_f > 0 {
-                Some(LinearConfig::new(self.tiles_f, TILES_OUT).init(device))
-            } else {
-                None
-            },
-            proj_nodes: LinearConfig::new(self.nodes_f, NODES_OUT).init(device),
-            proj_edges: LinearConfig::new(self.edges_f, EDGES_OUT).init(device),
-            proj_ports: if self.ports_f > 0 {
-                Some(LinearConfig::new(self.ports_f, PORTS_OUT).init(device))
-            } else {
-                None
-            },
-            trunk1: LinearConfig::new(sdim, 256).init(device),
-            trunk2: LinearConfig::new(256, 256).init(device),
-            policy_head: LinearConfig::new(256, self.num_actions).init(device),
-            value_head1: LinearConfig::new(256, 64).init(device),
-            value_head2: LinearConfig::new(64, 1).init(device),
-        }
+    device: &B::Device,
+) -> CatanModel<B> {
+    let sdim = stream_dim(tiles_f, ports_f);
+    CatanModel {
+        proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
+        proj_tiles: if tiles_f > 0 {
+            Some(LinearConfig::new(tiles_f, TILES_OUT).init(device))
+        } else {
+            None
+        },
+        proj_nodes: LinearConfig::new(nodes_f, NODES_OUT).init(device),
+        proj_edges: LinearConfig::new(edges_f, EDGES_OUT).init(device),
+        proj_ports: if ports_f > 0 {
+            Some(LinearConfig::new(ports_f, PORTS_OUT).init(device))
+        } else {
+            None
+        },
+        trunk1: LinearConfig::new(sdim, 256).init(device),
+        trunk2: LinearConfig::new(256, 256).init(device),
+        policy_head: LinearConfig::new(256, NUM_ACTIONS).init(device),
+        value_head1: LinearConfig::new(256, 64).init(device),
+        value_head2: LinearConfig::new(64, 1).init(device),
     }
 }
 

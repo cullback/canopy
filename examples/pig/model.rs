@@ -1,6 +1,13 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
+use canopy2::game::Game;
 use canopy2::nn::PolicyValueNet;
+
+use crate::encoder::PigEncoder;
+use crate::game::PigGame;
+
+const NUM_ACTIONS: usize = PigGame::NUM_ACTIONS;
+const FEATURE_SIZE: usize = PigEncoder::FEATURE_SIZE;
 
 #[derive(Module, Debug)]
 pub struct PigModel<B: Backend> {
@@ -9,19 +16,11 @@ pub struct PigModel<B: Backend> {
     value_head: Linear<B>,
 }
 
-#[derive(Config, Debug)]
-pub struct PigModelConfig {
-    num_actions: usize,
-    feature_size: usize,
-}
-
-impl PigModelConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> PigModel<B> {
-        PigModel {
-            fc1: LinearConfig::new(self.feature_size, 32).init(device),
-            policy_head: LinearConfig::new(32, self.num_actions).init(device),
-            value_head: LinearConfig::new(32, 1).init(device),
-        }
+pub fn init_pig<B: Backend>(device: &B::Device) -> PigModel<B> {
+    PigModel {
+        fc1: LinearConfig::new(FEATURE_SIZE, 32).init(device),
+        policy_head: LinearConfig::new(32, NUM_ACTIONS).init(device),
+        value_head: LinearConfig::new(32, 1).init(device),
     }
 }
 

@@ -89,26 +89,16 @@ pub fn load_evaluator(
     path: &str,
     device: &canopy2::train::Device,
 ) -> Arc<dyn canopy2::eval::Evaluator<GameState> + Sync> {
-    use canopy2::game::Game;
     use canopy2::nn::NeuralEvaluator;
     use canopy2::train::InferBackend;
-
-    let na = GameState::NUM_ACTIONS;
 
     match name {
         "basic" => {
             let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(BasicEncoder);
-            let mc = crate::model::CatanModelConfig::new(
-                na,
-                BasicEncoder::NODES_F,
-                BasicEncoder::EDGES_F,
-                BasicEncoder::TILES_F,
-                BasicEncoder::PORTS_F,
-            );
             Arc::new(
                 NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
                     encoder,
-                    mc.init(device),
+                    crate::model::init_simple(device),
                     path,
                     device.clone(),
                 ),
@@ -116,17 +106,16 @@ pub fn load_evaluator(
         }
         "rich" => {
             let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(RichNodeEncoder);
-            let mc = crate::model::CatanModelConfig::new(
-                na,
-                RichNodeEncoder::NODES_F,
-                RichNodeEncoder::EDGES_F,
-                RichNodeEncoder::TILES_F,
-                RichNodeEncoder::PORTS_F,
-            );
             Arc::new(
                 NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
                     encoder,
-                    mc.init(device),
+                    crate::model::init_simple_with(
+                        RichNodeEncoder::NODES_F,
+                        RichNodeEncoder::EDGES_F,
+                        RichNodeEncoder::TILES_F,
+                        RichNodeEncoder::PORTS_F,
+                        device,
+                    ),
                     path,
                     device.clone(),
                 ),
@@ -134,11 +123,10 @@ pub fn load_evaluator(
         }
         "gnn" => {
             let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(GnnEncoder);
-            let mc = crate::model::CatanGnnModelConfig::new(na);
             Arc::new(
                 NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
                     encoder,
-                    mc.init(device),
+                    crate::model::init_gnn(device),
                     path,
                     device.clone(),
                 ),
@@ -146,11 +134,10 @@ pub fn load_evaluator(
         }
         "gnn2" => {
             let encoder: Arc<dyn StateEncoder<GameState>> = Arc::new(Gnn2Encoder);
-            let mc = crate::model::CatanGnnModelConfig::new(na);
             Arc::new(
                 NeuralEvaluator::<GameState, InferBackend, _>::from_checkpoint(
                     encoder,
-                    mc.init_with::<_, 101, 34>(device),
+                    crate::model::init_gnn_with::<_, 101, 34>(device),
                     path,
                     device.clone(),
                 ),

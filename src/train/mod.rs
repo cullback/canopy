@@ -18,7 +18,7 @@ use crate::game::Game;
 use crate::nn::StateEncoder;
 use crate::utils::HumanDuration;
 
-pub use burn_backend::{BurnTrainableModel, Device, InferBackend, default_device};
+pub use burn_backend::{BurnTrainableModel, Device, InferBackend, TrainBackend, default_device};
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -199,8 +199,7 @@ pub struct CheckpointMeta {
 // ---------------------------------------------------------------------------
 
 pub trait TrainableModel<G: Game>: Send {
-    fn encoder(&self) -> Arc<dyn StateEncoder<G>>;
-    fn evaluator(&self) -> Arc<dyn Evaluator<G> + Sync>;
+    fn evaluator(&self, encoder: Arc<dyn StateEncoder<G>>) -> Arc<dyn Evaluator<G> + Sync>;
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics;
     fn save(&self, dir: &Path, iteration: usize);
     fn load(&mut self, dir: &Path, iteration: usize);
@@ -243,6 +242,7 @@ fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
 pub fn run_training<G>(
     config: TrainConfig,
     model: &mut dyn TrainableModel<G>,
+    encoder: Arc<dyn StateEncoder<G>>,
     new_state: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
     evaluators: &Evaluators<G>,
 ) where
@@ -263,8 +263,7 @@ pub fn run_training<G>(
         let iter_start = Instant::now();
         let effective_lr = cosine_lr(&config, iteration);
         let effective_sims = progressive_sims(&config, iteration);
-        let encoder = model.encoder();
-        let evaluator = model.evaluator();
+        let evaluator = model.evaluator(encoder.clone());
 
         // Self-play
         let sp = self_play::run_self_play_iteration(
@@ -313,10 +312,10 @@ pub fn run_training<G>(
             && iter_num % config.bench_interval == 0;
         let (bench_wins, bench_losses, bench_draws, bench_elapsed) = if run_bench {
             let bench_start = Instant::now();
-            let eval = model.evaluator();
+            let eval = model.evaluator(encoder.clone());
             let result = benchmark::run_benchmark(
                 eval,
-                encoder,
+                encoder.clone(),
                 &config,
                 &mut rng,
                 &new_state,

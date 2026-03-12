@@ -241,13 +241,7 @@ pub fn train_command() -> Command {
 // ---------------------------------------------------------------------------
 
 #[cfg(feature = "nn")]
-type ModelFactory<G> = Box<
-    dyn Fn(
-            std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
-            &crate::train::Device,
-        ) -> Box<dyn crate::train::TrainableModel<G>>
-        + Send,
->;
+type ModelFactory<G> = Box<dyn Fn() -> Box<dyn crate::train::TrainableModel<G>> + Send>;
 
 #[cfg(feature = "nn")]
 pub struct GameSetup<G: Game> {
@@ -304,17 +298,24 @@ impl<G: Game + 'static> GameSetup<G> {
         self.encoders.push((name.into(), encoder));
     }
 
-    pub fn add_model(
+    pub fn add_model<M>(
         &mut self,
         name: impl Into<String>,
-        factory: impl Fn(
-            std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
-            &crate::train::Device,
-        ) -> Box<dyn crate::train::TrainableModel<G>>
-        + Send
-        + 'static,
-    ) {
-        self.models.push((name.into(), Box::new(factory)));
+        model_init: impl Fn(&crate::train::Device) -> M + Send + Sync + 'static,
+    ) where
+        M: burn::module::AutodiffModule<crate::train::TrainBackend>
+            + crate::nn::PolicyValueNet<crate::train::TrainBackend>
+            + 'static,
+        M::InnerModule: crate::nn::PolicyValueNet<crate::train::InferBackend>,
+    {
+        let init = std::sync::Arc::new(model_init);
+        self.models.push((
+            name.into(),
+            Box::new(move || {
+                let init = init.clone();
+                Box::new(crate::train::BurnTrainableModel::new(move |d| init(d)))
+            }),
+        ));
     }
 
     pub fn add_config(&mut self, name: impl Into<String>, config: crate::train::TrainConfig) {
@@ -416,9 +417,14 @@ impl<G: Game + 'static> GameSetup<G> {
             })
             .1;
 
-        let device = crate::train::default_device();
-        let mut trainable = factory(encoder, &device);
-        crate::train::run_training(config, trainable.as_mut(), new_state, &self.evaluators);
+        let mut trainable = factory();
+        crate::train::run_training(
+            config,
+            trainable.as_mut(),
+            encoder,
+            new_state,
+            &self.evaluators,
+        );
     }
 
     /// Parse tournament options and run.

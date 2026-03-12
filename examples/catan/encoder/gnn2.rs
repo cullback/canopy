@@ -63,6 +63,7 @@ pub struct Gnn2Encoder;
 
 #[allow(dead_code)]
 impl Gnn2Encoder {
+    pub const FEATURE_SIZE: usize = 1949;
     pub const NODES_F: usize = 34;
     pub const EDGES_F: usize = 0;
     pub const TILES_F: usize = 0;
@@ -165,7 +166,7 @@ impl StateEncoder<GameState> for Gnn2Encoder {
     // Node stream: 54 × 34 = 1836
     // Total: 1949
     fn feature_size(&self) -> usize {
-        1949
+        Self::FEATURE_SIZE
     }
 
     fn encode(&self, state: &GameState, out: &mut Vec<f32>) {

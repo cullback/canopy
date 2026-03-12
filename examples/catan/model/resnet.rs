@@ -1,9 +1,17 @@
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
+use canopy2::game::Game;
 use canopy2::nn::PolicyValueNet;
 
 use super::*;
+use crate::encoder::BasicEncoder;
+use crate::game::state::GameState;
 
+const NUM_ACTIONS: usize = GameState::NUM_ACTIONS;
+const NODES_F: usize = BasicEncoder::NODES_F;
+const EDGES_F: usize = BasicEncoder::EDGES_F;
+const TILES_F: usize = BasicEncoder::TILES_F;
+const PORTS_F: usize = BasicEncoder::PORTS_F;
 const TRUNK_DIM: usize = 384;
 
 #[derive(Module, Debug)]
@@ -50,42 +58,41 @@ pub struct CatanResModel<B: Backend> {
     value_head3: Linear<B>,
 }
 
-#[derive(Config, Debug)]
-pub struct CatanResModelConfig {
-    num_actions: usize,
+pub fn init_resnet<B: Backend>(device: &B::Device) -> CatanResModel<B> {
+    init_resnet_with(NODES_F, EDGES_F, TILES_F, PORTS_F, device)
+}
+
+pub fn init_resnet_with<B: Backend>(
     nodes_f: usize,
     edges_f: usize,
     tiles_f: usize,
     ports_f: usize,
-}
-
-impl CatanResModelConfig {
-    pub fn init<B: Backend>(&self, device: &B::Device) -> CatanResModel<B> {
-        let sdim = stream_dim(self.tiles_f, self.ports_f);
-        CatanResModel {
-            proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
-            proj_tiles: if self.tiles_f > 0 {
-                Some(LinearConfig::new(self.tiles_f, TILES_OUT).init(device))
-            } else {
-                None
-            },
-            proj_nodes: LinearConfig::new(self.nodes_f, NODES_OUT).init(device),
-            proj_edges: LinearConfig::new(self.edges_f, EDGES_OUT).init(device),
-            proj_ports: if self.ports_f > 0 {
-                Some(LinearConfig::new(self.ports_f, PORTS_OUT).init(device))
-            } else {
-                None
-            },
-            input_linear: LinearConfig::new(sdim, TRUNK_DIM).init(device),
-            input_norm: LayerNormConfig::new(TRUNK_DIM).init(device),
-            blocks: (0..6).map(|_| res_block(TRUNK_DIM, device)).collect(),
-            policy_head1: LinearConfig::new(TRUNK_DIM, TRUNK_DIM).init(device),
-            policy_head2: LinearConfig::new(TRUNK_DIM, self.num_actions).init(device),
-            value_block: res_block(TRUNK_DIM, device),
-            value_head1: LinearConfig::new(TRUNK_DIM, 128).init(device),
-            value_head2: LinearConfig::new(128, 128).init(device),
-            value_head3: LinearConfig::new(128, 1).init(device),
-        }
+    device: &B::Device,
+) -> CatanResModel<B> {
+    let sdim = stream_dim(tiles_f, ports_f);
+    CatanResModel {
+        proj_global: LinearConfig::new(GLOBAL_LEN, GLOBAL_OUT).init(device),
+        proj_tiles: if tiles_f > 0 {
+            Some(LinearConfig::new(tiles_f, TILES_OUT).init(device))
+        } else {
+            None
+        },
+        proj_nodes: LinearConfig::new(nodes_f, NODES_OUT).init(device),
+        proj_edges: LinearConfig::new(edges_f, EDGES_OUT).init(device),
+        proj_ports: if ports_f > 0 {
+            Some(LinearConfig::new(ports_f, PORTS_OUT).init(device))
+        } else {
+            None
+        },
+        input_linear: LinearConfig::new(sdim, TRUNK_DIM).init(device),
+        input_norm: LayerNormConfig::new(TRUNK_DIM).init(device),
+        blocks: (0..6).map(|_| res_block(TRUNK_DIM, device)).collect(),
+        policy_head1: LinearConfig::new(TRUNK_DIM, TRUNK_DIM).init(device),
+        policy_head2: LinearConfig::new(TRUNK_DIM, NUM_ACTIONS).init(device),
+        value_block: res_block(TRUNK_DIM, device),
+        value_head1: LinearConfig::new(TRUNK_DIM, 128).init(device),
+        value_head2: LinearConfig::new(128, 128).init(device),
+        value_head3: LinearConfig::new(128, 1).init(device),
     }
 }
 

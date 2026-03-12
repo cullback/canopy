@@ -14,9 +14,8 @@ use clap::{Arg, Command};
 
 use canopy2::cli::GameSetup;
 use canopy2::eval::RolloutEvaluator;
-use canopy2::game::Game;
 use canopy2::game_log::GameLog;
-use canopy2::train::{BurnTrainableModel, TrainConfig};
+use canopy2::train::TrainConfig;
 
 mod encoder;
 mod game;
@@ -26,12 +25,9 @@ mod visualize;
 
 use encoder::{BasicEncoder, Gnn2Encoder, GnnEncoder, RichNodeEncoder};
 use game::dice::Dice;
-use game::state::GameState;
-use model::{CatanGnnModelConfig, CatanModelConfig, CatanResModelConfig};
+use model::{init_gnn, init_gnn_with, init_resnet, init_simple};
 
 fn main() {
-    let na = GameState::NUM_ACTIONS;
-
     let mut setup = GameSetup::new("catan", "Catan tournament between two MCTS bots");
     setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("heuristic", heuristic::HeuristicEvaluator::default());
@@ -42,39 +38,11 @@ fn main() {
     setup.add_encoder("gnn", Arc::new(GnnEncoder));
     setup.add_encoder("gnn2", Arc::new(Gnn2Encoder));
 
-    // Models — hardcode expected encoder dims, invalid combos fail at runtime
-    setup.add_model("simple", move |enc, dev| {
-        let mc = CatanModelConfig::new(
-            na,
-            BasicEncoder::NODES_F,
-            BasicEncoder::EDGES_F,
-            BasicEncoder::TILES_F,
-            BasicEncoder::PORTS_F,
-        );
-        Box::new(BurnTrainableModel::new(enc, move |d| mc.init(d), dev))
-    });
-    setup.add_model("resnet", move |enc, dev| {
-        let mc = CatanResModelConfig::new(
-            na,
-            BasicEncoder::NODES_F,
-            BasicEncoder::EDGES_F,
-            BasicEncoder::TILES_F,
-            BasicEncoder::PORTS_F,
-        );
-        Box::new(BurnTrainableModel::new(enc, move |d| mc.init(d), dev))
-    });
-    setup.add_model("gnn", move |enc, dev| {
-        let mc = CatanGnnModelConfig::new(na);
-        Box::new(BurnTrainableModel::new(enc, move |d| mc.init(d), dev))
-    });
-    setup.add_model("gnn2", move |enc, dev| {
-        let mc = CatanGnnModelConfig::new(na);
-        Box::new(BurnTrainableModel::new(
-            enc,
-            move |d| mc.init_with::<_, 101, 34>(d),
-            dev,
-        ))
-    });
+    // Models
+    setup.add_model("simple", init_simple);
+    setup.add_model("resnet", init_resnet);
+    setup.add_model("gnn", init_gnn);
+    setup.add_model("gnn2", init_gnn_with::<_, 101, 34>);
 
     // Configs
     setup.add_config(

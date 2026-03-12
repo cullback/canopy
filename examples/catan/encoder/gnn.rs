@@ -30,6 +30,7 @@ pub struct GnnEncoder;
 
 #[allow(dead_code)]
 impl GnnEncoder {
+    pub const FEATURE_SIZE: usize = 1345;
     /// Per-node feature count for this encoder.
     pub const NODES_F: usize = 24;
     /// No edge stream (GNN uses graph structure directly).
@@ -45,7 +46,7 @@ impl StateEncoder<GameState> for GnnEncoder {
     // Node stream: 54 × 24 = 1296
     // Total: 1345
     fn feature_size(&self) -> usize {
-        1345
+        Self::FEATURE_SIZE
     }
 
     fn encode(&self, state: &GameState, out: &mut Vec<f32>) {
