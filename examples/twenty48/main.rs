@@ -31,69 +31,67 @@ impl Game for Board {
     const NUM_ACTIONS: usize = game::NUM_ACTIONS;
 
     fn status(&self) -> Status {
-        if self.awaiting_spawn {
-            // Chance node — not terminal, but no legal *player* actions.
-            // If there are empty cells, game continues after spawn.
+        if self.awaiting_spawn() {
             return Status::Ongoing;
         }
-        if game::has_legal_move(self.tiles) {
+        if game::has_legal_move(self.tiles()) {
             Status::Ongoing
         } else {
-            // No legal moves and no pending spawn → game over.
-            let score = game::board_score(self.tiles) as f32;
+            let score = game::board_score(self.tiles()) as f32;
             Status::Terminal((score / 1_000_000.0).min(1.0))
         }
     }
 
     fn legal_actions(&self, buf: &mut Vec<usize>) {
-        if self.awaiting_spawn {
-            return; // Chance node — no player actions
+        if self.awaiting_spawn() {
+            return;
         }
+        let tiles = self.tiles();
         for dir in 0..4 {
-            if game::execute_move(self.tiles, dir) != self.tiles {
+            if game::execute_move(tiles, dir) != tiles {
                 buf.push(dir);
             }
         }
     }
 
     fn apply_action(&mut self, action: usize) {
-        if self.awaiting_spawn {
+        if self.awaiting_spawn() {
             // Decode chance outcome: action = pos * 2 + tile_type
             let pos = (action / 2) as u32;
             let val: u8 = if action % 2 == 0 { 1 } else { 2 }; // 1 = "2", 2 = "4"
-            self.tiles = game::set_nibble(self.tiles, pos, val);
-            self.awaiting_spawn = false;
+            let tiles = game::set_nibble(self.tiles(), pos, val);
+            self.0 = tiles; // Decision: store directly
         } else {
-            self.tiles = game::execute_move(self.tiles, action);
-            self.awaiting_spawn = true;
+            let new_tiles = game::execute_move(self.tiles(), action);
+            self.0 = !new_tiles; // Chance: store complement
         }
     }
 
     fn chance_outcomes(&self, buf: &mut Vec<(usize, u32)>) {
-        if !self.awaiting_spawn {
+        if !self.awaiting_spawn() {
             return;
         }
-        for pos in game::empty_positions(self.tiles) {
+        for pos in game::empty_positions(self.tiles()) {
             buf.push(((pos as usize) * 2, 9)); // 90% chance of "2"
             buf.push(((pos as usize) * 2 + 1, 1)); // 10% chance of "4"
         }
     }
 
     fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
-        if !self.awaiting_spawn {
+        if !self.awaiting_spawn() {
             return None;
         }
-        let empties = game::empty_positions(self.tiles);
+        let empties = game::empty_positions(self.tiles());
         let pos = empties[rng.usize(..empties.len())];
         let tile_type = if rng.u32(0..10) == 0 { 1 } else { 0 }; // 0 = "2", 1 = "4"
         Some((pos as usize) * 2 + tile_type)
     }
 
     fn state_key(&self) -> Option<u64> {
-        if self.awaiting_spawn {
-            None // Chance nodes don't benefit from transposition caching
+        if self.awaiting_spawn() {
+            None
         } else {
-            Some(self.tiles)
+            Some(self.0)
         }
     }
 }
@@ -178,7 +176,7 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameSetup<Board>) {
             if let Some(action) = state.sample_chance(&mut rng) {
                 state.apply_action(action);
             } else {
-                let mut search = Search::new(state.clone(), config.clone());
+                let mut search = Search::new(state, config.clone());
                 let mut evals: Vec<Evaluation> = vec![];
                 let result = loop {
                     match search.step(&evals, &mut rng) {
@@ -193,8 +191,9 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameSetup<Board>) {
             }
         }
 
-        let score = game::board_score(state.tiles);
-        let mt = game::max_tile(state.tiles);
+        let tiles = state.tiles();
+        let score = game::board_score(tiles);
+        let mt = game::max_tile(tiles);
         scores.push(score);
         max_tiles.push(mt);
 

@@ -17,8 +17,9 @@ impl StateEncoder<Board> for Twenty48Encoder {
     fn encode(&self, state: &Board, out: &mut Vec<f32>) {
         out.clear();
         out.resize(Self::FEATURE_SIZE, 0.0);
+        let tiles = state.tiles();
         for cell in 0..16u32 {
-            let nibble = get_nibble(state.tiles, cell) as usize;
+            let nibble = get_nibble(tiles, cell) as usize;
             out[cell as usize * 16 + nibble] = 1.0;
         }
         debug_assert_eq!(out.len(), self.feature_size());

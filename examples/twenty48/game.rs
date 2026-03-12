@@ -6,6 +6,19 @@
 ///
 /// Bitboard representation: `u64` with 4 bits per cell (nibble value `n` =
 /// tile `2^n`, 0 = empty). Row-major: row 0 in bits 0-15, row 3 in bits 48-63.
+///
+/// ## Phase encoding
+///
+/// The game alternates between decision nodes (player picks direction) and
+/// chance nodes (random tile spawns). Instead of a separate `bool`, we encode
+/// the phase into the `u64` itself:
+///
+/// - **Decision node**: tiles stored directly (empty cells = `0x0`)
+/// - **Chance node**: bitwise complement `!tiles` stored (empty cells = `0xF`)
+///
+/// To distinguish: a real board has more `0x0` nibbles (empty cells) than
+/// `0xF` nibbles (tile 32768, practically unreachable). The complement has
+/// the reverse. So `count_f_nibbles > count_zero_nibbles` → chance node.
 use std::sync::OnceLock;
 
 pub const UP: usize = 0;
@@ -212,17 +225,19 @@ pub fn execute_move(board: u64, dir: usize) -> u64 {
     }
 }
 
-/// Count empty cells (nibbles == 0).
-#[allow(dead_code)]
-pub fn count_empty(board: u64) -> u32 {
-    // A nibble is empty if all 4 bits are 0. We OR adjacent bit pairs,
-    // then OR the two resulting bits, giving one "occupied" bit per nibble.
-    let b = board | (board >> 1);
-    let b = b | (b >> 2);
-    // Now bit 0 of each nibble is 1 if occupied, 0 if empty.
-    // Mask those bits and count zeros.
-    let occupied = b & 0x1111_1111_1111_1111_u64;
+/// Count nibbles equal to `0x0`.
+pub fn count_zero_nibbles(b: u64) -> u32 {
+    let x = b | (b >> 1);
+    let x = x | (x >> 2);
+    let occupied = x & 0x1111_1111_1111_1111_u64;
     16 - occupied.count_ones()
+}
+
+/// Count nibbles equal to `0xF`.
+pub fn count_f_nibbles(b: u64) -> u32 {
+    let x = b & (b >> 1);
+    let x = x & (x >> 2);
+    (x & 0x1111_1111_1111_1111_u64).count_ones()
 }
 
 /// Sum of tile values on the board (path-independent score).
@@ -286,56 +301,67 @@ pub fn has_legal_move(board: u64) -> bool {
     false
 }
 
-// ── Board struct ───────────────────────────────────────────────────────
-
-#[derive(Clone, Debug)]
-pub struct Board {
-    pub tiles: u64,
-    /// True when a tile spawn is pending (chance node).
-    pub awaiting_spawn: bool,
+/// Place a random tile (90% "2", 10% "4") in a random empty cell.
+fn spawn_on(tiles: u64, rng: &mut fastrand::Rng) -> u64 {
+    let empties = empty_positions(tiles);
+    debug_assert!(!empties.is_empty());
+    let pos = empties[rng.usize(..empties.len())];
+    let val: u8 = if rng.u32(0..10) == 0 { 2 } else { 1 };
+    set_nibble(tiles, pos, val)
 }
 
+// ── Board struct ───────────────────────────────────────────────────────
+
+/// Packed board state. A single `u64` encodes both the tile data and the
+/// game phase (decision vs chance). See module docs for the encoding scheme.
+#[derive(Clone, Copy, Debug)]
+pub struct Board(pub u64);
+
 impl Board {
-    /// Create a new board with two random starting tiles.
+    /// Create a new board with two random starting tiles (decision node).
     pub fn new(rng: &mut fastrand::Rng) -> Self {
-        let mut board = Board {
-            tiles: 0,
-            awaiting_spawn: false,
-        };
-        board.spawn_tile(rng);
-        board.spawn_tile(rng);
-        board
+        Board(spawn_on(spawn_on(0, rng), rng))
     }
 
-    /// Place a random tile (90% "2", 10% "4") in a random empty cell.
-    pub fn spawn_tile(&mut self, rng: &mut fastrand::Rng) {
-        let empties = empty_positions(self.tiles);
-        debug_assert!(!empties.is_empty());
-        let pos = empties[rng.usize(..empties.len())];
-        let val: u8 = if rng.u32(0..10) == 0 { 2 } else { 1 };
-        self.tiles = set_nibble(self.tiles, pos, val);
+    /// Recover the real tile data, regardless of phase.
+    pub fn tiles(self) -> u64 {
+        if self.awaiting_spawn() {
+            !self.0
+        } else {
+            self.0
+        }
+    }
+
+    /// True when a tile spawn is pending (chance node).
+    ///
+    /// A complemented board (chance) has more `0xF` nibbles than `0x0`
+    /// nibbles. A real board (decision) has the reverse. Ties (both zero
+    /// on a full board) correctly fall to decision — that state is terminal.
+    pub fn awaiting_spawn(self) -> bool {
+        count_f_nibbles(self.0) > count_zero_nibbles(self.0)
     }
 
     /// Score: sum of all tile face values.
     #[allow(dead_code)]
-    pub fn score(&self) -> u32 {
-        board_score(self.tiles)
+    pub fn score(self) -> u32 {
+        board_score(self.tiles())
     }
 
     /// Largest tile on the board (e.g. 2048).
     #[allow(dead_code)]
-    pub fn max_tile(&self) -> u32 {
-        max_tile(self.tiles)
+    pub fn max_tile(self) -> u32 {
+        max_tile(self.tiles())
     }
 
     /// Pretty-print the board grid.
     #[allow(dead_code)]
-    pub fn display(&self) -> String {
+    pub fn display(self) -> String {
+        let tiles = self.tiles();
         let mut s = String::new();
         for row in 0..4 {
             for col in 0..4 {
                 let pos = row * 4 + col;
-                let nib = get_nibble(self.tiles, pos as u32);
+                let nib = get_nibble(tiles, pos as u32);
                 if nib == 0 {
                     s.push_str("    .");
                 } else {
@@ -356,43 +382,33 @@ mod tests {
 
     #[test]
     fn test_reverse_row() {
-        // Row: [1, 2, 3, 4] nibbles
         let row: u16 = 0x4321;
         assert_eq!(reverse_row(row), 0x1234);
     }
 
     #[test]
     fn test_compute_row_left_simple() {
-        // [2, 2, 0, 0] → [3, 0, 0, 0] (merge 2+2 → 4, encoded as 2+2→3)
-        // Wait, nibble 2 = tile 4. Two "4" tiles merge → tile 8 = nibble 3.
-        // Actually nibble values: 1=2, 2=4. [1,1,0,0] → [2,0,0,0]
+        // [1,1,0,0] → [2,0,0,0]
         let row: u16 = 0x0011;
-        let result = compute_row_left(row);
-        assert_eq!(result, 0x0002);
+        assert_eq!(compute_row_left(row), 0x0002);
     }
 
     #[test]
     fn test_compute_row_left_no_merge() {
         // [1, 2, 0, 0] → [1, 2, 0, 0]
-        let row: u16 = 0x0021;
-        let result = compute_row_left(row);
-        assert_eq!(result, 0x0021);
+        assert_eq!(compute_row_left(0x0021), 0x0021);
     }
 
     #[test]
     fn test_compute_row_left_slide() {
         // [0, 0, 1, 2] → [1, 2, 0, 0]
-        let row: u16 = 0x2100;
-        let result = compute_row_left(row);
-        assert_eq!(result, 0x0021);
+        assert_eq!(compute_row_left(0x2100), 0x0021);
     }
 
     #[test]
     fn test_compute_row_left_double_merge() {
         // [1, 1, 1, 1] → [2, 2, 0, 0]
-        let row: u16 = 0x1111;
-        let result = compute_row_left(row);
-        assert_eq!(result, 0x0022);
+        assert_eq!(compute_row_left(0x1111), 0x0022);
     }
 
     #[test]
@@ -403,7 +419,6 @@ mod tests {
 
     #[test]
     fn test_transpose_identity() {
-        // All same nibbles → transpose is identity
         let board: u64 = 0x1111_1111_1111_1111;
         assert_eq!(transpose(board), board);
     }
@@ -411,31 +426,33 @@ mod tests {
     #[test]
     fn test_move_left() {
         // Row 0: [1, 1, 0, 0] → [2, 0, 0, 0]
-        let board: u64 = 0x0011;
-        let result = move_left(board);
-        assert_eq!(result & 0xFFFF, 0x0002);
+        assert_eq!(move_left(0x0011) & 0xFFFF, 0x0002);
     }
 
     #[test]
     fn test_move_right() {
         // Row 0: [1, 1, 0, 0] → [0, 0, 0, 2]
-        let board: u64 = 0x0011;
-        let result = move_right(board);
-        assert_eq!(result & 0xFFFF, 0x2000);
+        assert_eq!(move_right(0x0011) & 0xFFFF, 0x2000);
     }
 
     #[test]
-    fn test_count_empty() {
-        assert_eq!(count_empty(0), 16);
-        assert_eq!(count_empty(0x1), 15);
-        assert_eq!(count_empty(0xFFFF_FFFF_FFFF_FFFF), 0);
+    fn test_count_zero_nibbles() {
+        assert_eq!(count_zero_nibbles(0), 16);
+        assert_eq!(count_zero_nibbles(0x1), 15);
+        assert_eq!(count_zero_nibbles(0xFFFF_FFFF_FFFF_FFFF), 0);
+    }
+
+    #[test]
+    fn test_count_f_nibbles() {
+        assert_eq!(count_f_nibbles(0), 0);
+        assert_eq!(count_f_nibbles(0xF), 1);
+        assert_eq!(count_f_nibbles(0xFFFF_FFFF_FFFF_FFFF), 16);
+        assert_eq!(count_f_nibbles(0xF00F_000F), 3);
     }
 
     #[test]
     fn test_board_score() {
-        // One tile: nibble 1 = tile 2 → score 2
         assert_eq!(board_score(0x1), 2);
-        // nibble 10 (0xA) = tile 1024 → score 1024
         assert_eq!(board_score(0xA), 1024);
     }
 
@@ -455,7 +472,6 @@ mod tests {
 
     #[test]
     fn test_has_legal_move_empty_board() {
-        // Empty board with one tile — can always move
         assert!(has_legal_move(0x1));
     }
 
@@ -463,7 +479,6 @@ mod tests {
     fn test_terminal_detection() {
         // Checkerboard pattern with no adjacent equal tiles
         let board: u64 = 0x2143_4312_2143_4312;
-        // Verify each move doesn't change the board
         if execute_move(board, UP) == board
             && execute_move(board, DOWN) == board
             && execute_move(board, LEFT) == board
@@ -471,38 +486,86 @@ mod tests {
         {
             assert!(!has_legal_move(board));
         }
-        // If the pattern does allow a move, that's OK — just verifying the function works
     }
 
     #[test]
     fn test_spawn_encoding() {
-        // chance_outcomes encoding: position p → (p*2, 9) for "2", (p*2+1, 1) for "4"
         let pos: u32 = 5;
         let action_2 = (pos as usize) * 2;
         let action_4 = (pos as usize) * 2 + 1;
         assert_eq!(action_2, 10);
         assert_eq!(action_4, 11);
-        // Decode
-        assert_eq!(action_2 / 2, pos as usize); // position
-        assert_eq!(action_2 % 2, 0); // tile type: "2"
-        assert_eq!(action_4 / 2, pos as usize); // position
-        assert_eq!(action_4 % 2, 1); // tile type: "4"
+        assert_eq!(action_2 / 2, pos as usize);
+        assert_eq!(action_2 % 2, 0);
+        assert_eq!(action_4 / 2, pos as usize);
+        assert_eq!(action_4 % 2, 1);
     }
 
     #[test]
     fn test_new_board_has_two_tiles() {
         let mut rng = fastrand::Rng::with_seed(42);
         let board = Board::new(&mut rng);
-        let occupied = 16 - count_empty(board.tiles);
+        let tiles = board.tiles();
+        let occupied = 16 - count_zero_nibbles(tiles);
         assert_eq!(occupied, 2);
-        assert!(!board.awaiting_spawn);
+        assert!(!board.awaiting_spawn());
     }
 
     #[test]
     fn test_score_calculation() {
-        // Two "2" tiles (nibble 1) and one "4" tile (nibble 2):
-        // score = 2 + 2 + 4 = 8
+        // Two "2" tiles (nibble 1) and one "4" tile (nibble 2): score = 2 + 2 + 4 = 8
         let board = set_nibble(set_nibble(set_nibble(0, 0, 1), 1, 1), 2, 2);
         assert_eq!(board_score(board), 8);
+    }
+
+    #[test]
+    fn test_phase_encoding_decision() {
+        // A board with some tiles and empty cells → decision node
+        let tiles: u64 = 0x0000_0000_0000_0321;
+        let board = Board(tiles);
+        assert!(!board.awaiting_spawn());
+        assert_eq!(board.tiles(), tiles);
+    }
+
+    #[test]
+    fn test_phase_encoding_chance() {
+        // Complement of a board with empty cells → chance node
+        let tiles: u64 = 0x0000_0000_0000_0321;
+        let board = Board(!tiles);
+        assert!(board.awaiting_spawn());
+        assert_eq!(board.tiles(), tiles);
+    }
+
+    #[test]
+    fn test_phase_roundtrip() {
+        // Simulate: decision → apply direction → chance → apply spawn → decision
+        let mut rng = fastrand::Rng::with_seed(42);
+        let mut board = Board::new(&mut rng);
+        assert!(!board.awaiting_spawn());
+
+        // Apply a direction move → becomes chance node
+        let tiles = board.tiles();
+        let new_tiles = execute_move(tiles, LEFT);
+        assert_ne!(new_tiles, tiles); // move must change board
+        board = Board(!new_tiles); // store as chance
+        assert!(board.awaiting_spawn());
+        assert_eq!(board.tiles(), new_tiles);
+
+        // Apply a spawn → becomes decision node
+        let empties = empty_positions(board.tiles());
+        let pos = empties[0];
+        let spawned = set_nibble(board.tiles(), pos, 1);
+        board = Board(spawned); // store as decision
+        assert!(!board.awaiting_spawn());
+        assert_eq!(board.tiles(), spawned);
+    }
+
+    #[test]
+    fn test_full_board_decision_is_not_chance() {
+        // Full board with no empty cells and no 0xF tiles → zeros == fs == 0 → decision
+        let board: u64 = 0x1234_5678_1234_5678;
+        assert_eq!(count_zero_nibbles(board), 0);
+        assert_eq!(count_f_nibbles(board), 0);
+        assert!(!Board(board).awaiting_spawn());
     }
 }
