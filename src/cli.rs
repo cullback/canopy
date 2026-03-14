@@ -237,14 +237,29 @@ pub fn train_command() -> Command {
 }
 
 // ---------------------------------------------------------------------------
-// GameSetup — independent registries for evaluators, encoders, models, configs
+// GameCli — independent registries for evaluators, encoders, models, configs
 // ---------------------------------------------------------------------------
+
+/// Add a clap arg that selects from a list of registered names.
+#[cfg(feature = "nn")]
+fn registry_arg(cmd: Command, id: &str, help: &str, names: &[String]) -> Command {
+    if names.is_empty() {
+        return cmd;
+    }
+    cmd.arg(
+        Arg::new(id.to_string())
+            .long(id.to_string())
+            .default_value(names[0].clone())
+            .value_parser(names.to_vec())
+            .help(help.to_string()),
+    )
+}
 
 #[cfg(feature = "nn")]
 type ModelFactory<G> = Box<dyn Fn() -> Box<dyn crate::train::TrainableModel<G>> + Send>;
 
 #[cfg(feature = "nn")]
-pub struct GameSetup<G: Game> {
+pub struct GameCli<G: Game> {
     name: String,
     about: String,
     evaluators: crate::eval::Evaluators<G>,
@@ -254,7 +269,7 @@ pub struct GameSetup<G: Game> {
 }
 
 #[cfg(feature = "nn")]
-impl<G: Game + 'static> GameSetup<G> {
+impl<G: Game + 'static> GameCli<G> {
     pub fn new(name: impl Into<String>, about: impl Into<String>) -> Self {
         Self {
             name: name.into(),
@@ -327,24 +342,6 @@ impl<G: Game + 'static> GameSetup<G> {
     pub fn train_command(&self) -> Command {
         let mut cmd = train_command();
 
-        fn registry_arg(
-            cmd: Command,
-            id: &'static str,
-            help: &'static str,
-            names: &[String],
-        ) -> Command {
-            if names.is_empty() {
-                return cmd;
-            }
-            cmd.arg(
-                Arg::new(id)
-                    .long(id)
-                    .default_value(names[0].clone())
-                    .value_parser(names.to_vec())
-                    .help(help),
-            )
-        }
-
         let model_names: Vec<String> = self.models.iter().map(|(n, _)| n.clone()).collect();
         cmd = registry_arg(cmd, "model", "Model architecture", &model_names);
 
@@ -358,8 +355,94 @@ impl<G: Game + 'static> GameSetup<G> {
     }
 
     /// Returns the full CLI command: tournament args + train subcommand.
+    ///
+    /// When encoders and models are registered, `--nn-model`, `--encoder`,
+    /// and `--model` args are added to the root (tournament) command so that
+    /// any game can load a trained checkpoint without custom boilerplate.
     pub fn command(&self) -> Command {
-        tournament_command(&self.name, &self.about).subcommand(self.train_command())
+        let mut cmd = tournament_command(&self.name, &self.about);
+
+        if !self.encoders.is_empty() && !self.models.is_empty() {
+            cmd = cmd.arg(
+                Arg::new("nn-model")
+                    .long("nn-model")
+                    .help("Path to neural network checkpoint (for nn evaluator)"),
+            );
+
+            let encoder_names: Vec<String> = self.encoders.iter().map(|(n, _)| n.clone()).collect();
+            cmd = registry_arg(
+                cmd,
+                "encoder",
+                "State encoder for nn evaluator",
+                &encoder_names,
+            );
+
+            let model_names: Vec<String> = self.models.iter().map(|(n, _)| n.clone()).collect();
+            cmd = registry_arg(
+                cmd,
+                "model",
+                "Model architecture for nn evaluator",
+                &model_names,
+            );
+        }
+
+        cmd.subcommand(self.train_command())
+    }
+
+    /// If `--nn-model` was provided, load the checkpoint and register an
+    /// `"nn"` evaluator. No-op if the flag was not given.
+    pub fn load_nn_evaluator(&mut self, matches: &ArgMatches) {
+        let Some(path) = matches.get_one::<String>("nn-model") else {
+            return;
+        };
+
+        let checkpoint_path = std::path::Path::new(path.as_str());
+        let stem = checkpoint_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("invalid checkpoint path");
+        let iteration = stem
+            .strip_prefix("model_iter_")
+            .expect("checkpoint filename must be model_iter_N")
+            .parse::<usize>()
+            .expect("failed to parse iteration from checkpoint filename");
+        let checkpoint_dir = checkpoint_path.parent().unwrap();
+
+        // Look up encoder
+        let encoder_name = matches
+            .get_one::<String>("encoder")
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.encoders[0].0.as_str());
+        let encoder = self
+            .encoders
+            .iter()
+            .find(|(n, _)| n == encoder_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.encoders.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown encoder '{encoder_name}', available: {names:?}");
+            })
+            .1
+            .clone();
+
+        // Look up model factory and build
+        let model_name = matches
+            .get_one::<String>("model")
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.models[0].0.as_str());
+        let factory = &self
+            .models
+            .iter()
+            .find(|(n, _)| n == model_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.models.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown model '{model_name}', available: {names:?}");
+            })
+            .1;
+
+        let mut trainable = factory();
+        trainable.load(checkpoint_dir, iteration);
+        let evaluator = trainable.evaluator(encoder);
+        self.evaluators.add_arc("nn", evaluator);
     }
 
     /// Look up the selected `--config`, `--encoder`, `--model`, merge CLI
@@ -425,6 +508,27 @@ impl<G: Game + 'static> GameSetup<G> {
             new_state,
             &self.evaluators,
         );
+    }
+
+    /// Dispatch to train or tournament based on subcommand.
+    ///
+    /// Accepts the train-form closure (`Fn(&mut Rng) -> G`) and adapts it
+    /// for tournament by constructing an Rng from the seed.
+    pub fn run(
+        &mut self,
+        matches: &ArgMatches,
+        new_game: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
+    ) {
+        if let Some(sub) = matches.subcommand_matches("train") {
+            self.run_train(sub, new_game);
+            return;
+        }
+        self.load_nn_evaluator(matches);
+        let new_game = std::sync::Arc::new(new_game);
+        self.run_tournament(matches, move |seed| {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            new_game(&mut rng)
+        });
     }
 
     /// Parse tournament options and run.

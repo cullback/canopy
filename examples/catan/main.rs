@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use clap::{Arg, Command};
 
-use canopy2::cli::GameSetup;
+use canopy2::cli::GameCli;
 use canopy2::eval::RolloutEvaluator;
 use canopy2::game_log::GameLog;
 use canopy2::train::TrainConfig;
@@ -25,10 +25,10 @@ mod visualize;
 
 use encoder::{BasicEncoder, Gnn2Encoder, GnnEncoder, RichNodeEncoder};
 use game::dice::Dice;
-use model::{init_gnn, init_gnn_with, init_resnet, init_simple};
+use model::{init_gnn, init_gnn_with, init_resnet, init_simple, init_simple_rich};
 
 fn main() {
-    let mut setup = GameSetup::new("catan", "Catan tournament between two MCTS bots");
+    let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
     setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("heuristic", heuristic::HeuristicEvaluator::default());
 
@@ -40,6 +40,7 @@ fn main() {
 
     // Models
     setup.add_model("simple", init_simple);
+    setup.add_model("simple-rich", init_simple_rich);
     setup.add_model("resnet", init_resnet);
     setup.add_model("gnn", init_gnn);
     setup.add_model("gnn2", init_gnn_with::<_, 101, 34>);
@@ -106,17 +107,6 @@ fn main() {
         .command()
         .subcommand(viz)
         .arg(
-            Arg::new("nn-model")
-                .long("nn-model")
-                .help("Path to neural network checkpoint (for nn evaluator)"),
-        )
-        .arg(
-            Arg::new("encoder")
-                .long("encoder")
-                .default_value("rich")
-                .help("Encoder used for nn evaluator: basic or rich"),
-        )
-        .arg(
             Arg::new("balanced")
                 .long("balanced")
                 .action(clap::ArgAction::SetTrue)
@@ -147,17 +137,5 @@ fn main() {
         Dice::Random
     };
 
-    // Train subcommand
-    if let Some(sub) = matches.subcommand_matches("train") {
-        setup.run_train(sub, move |rng| game::new_game(rng.u64(..), dice));
-        return;
-    }
-
-    // Tournament mode
-    if let Some(path) = matches.get_one::<String>("nn-model") {
-        let enc = matches.get_one::<String>("encoder").unwrap().as_str();
-        let device = canopy2::train::default_device();
-        setup.add_evaluator_arc("nn", encoder::load_evaluator(enc, path, &device));
-    }
-    setup.run_tournament(&matches, move |seed| game::new_game(seed, dice));
+    setup.run(&matches, move |rng| game::new_game(rng.u64(..), dice));
 }

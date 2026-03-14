@@ -15,7 +15,7 @@ use std::sync::Arc;
 use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use canopy2::cli::GameSetup;
+use canopy2::cli::GameCli;
 use canopy2::eval::{Evaluation, RolloutEvaluator};
 use canopy2::game::{Game, Status};
 use canopy2::mcts::{Config, Search, Step};
@@ -124,7 +124,7 @@ fn solo_command() -> Command {
         )
 }
 
-fn run_solo(matches: &clap::ArgMatches, setup: &GameSetup<Board>) {
+fn run_solo(matches: &clap::ArgMatches, setup: &GameCli<Board>) {
     let num_games: u32 = matches
         .get_one::<String>("num-games")
         .unwrap()
@@ -228,7 +228,7 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameSetup<Board>) {
 }
 
 fn main() {
-    let mut setup = GameSetup::new("twenty48", "2048 tile-sliding game");
+    let mut setup = GameCli::new("twenty48", "2048 tile-sliding game");
     setup.add_evaluator("rollout", RolloutEvaluator::default());
 
     setup.add_encoder("default", Arc::new(encoder::Twenty48Encoder));
@@ -261,14 +261,5 @@ fn main() {
         return;
     }
 
-    if let Some(sub) = matches.subcommand_matches("train") {
-        setup.run_train(sub, |rng| Board::new(rng));
-        return;
-    }
-
-    // Tournament mode (framework compatibility)
-    setup.run_tournament(&matches, |seed| {
-        let mut rng = fastrand::Rng::with_seed(seed);
-        Board::new(&mut rng)
-    });
+    setup.run(&matches, |rng| Board::new(rng));
 }

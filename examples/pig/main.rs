@@ -8,7 +8,7 @@
 //! cargo run --example pig -- train --iterations 5 --games 20
 //! ```
 
-use canopy2::cli::GameSetup;
+use canopy2::cli::GameCli;
 use canopy2::eval::RolloutEvaluator;
 use canopy2::game::{Game, Status};
 
@@ -71,7 +71,7 @@ fn main() {
     use canopy2::train::TrainConfig;
     use std::sync::Arc;
 
-    let mut setup = GameSetup::new("pig", "Pig dice game tournament between two MCTS bots");
+    let mut setup = GameCli::new("pig", "Pig dice game tournament between two MCTS bots");
     setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("hold-at-20", strategy::HoldAt(20));
     setup.add_evaluator("erkp", strategy::EndRaceKeepPace);
@@ -101,9 +101,5 @@ fn main() {
 
     let matches = setup.command().get_matches();
 
-    if let Some(sub) = matches.subcommand_matches("train") {
-        setup.run_train(sub, |_rng| PigGame::new(100));
-    } else {
-        setup.run_tournament(&matches, |_| PigGame::new(100));
-    }
+    setup.run(&matches, |_rng| PigGame::new(100));
 }
