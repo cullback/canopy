@@ -1,3 +1,19 @@
+/// Iterator that replays a [`GameLog`], yielding `(action, state_after)` pairs.
+pub struct Replay<'a, G> {
+    state: G,
+    actions: std::slice::Iter<'a, usize>,
+}
+
+impl<G: crate::game::Game> Iterator for Replay<'_, G> {
+    type Item = (usize, G);
+
+    fn next(&mut self) -> Option<(usize, G)> {
+        let &action = self.actions.next()?;
+        self.state.apply_action(action);
+        Some((action, self.state.clone()))
+    }
+}
+
 /// A complete record of a single game, sufficient for deterministic replay.
 ///
 /// The `seed` recreates the initial game state (board layout, deck order, etc.)
@@ -19,6 +35,14 @@ impl GameLog {
             writeln!(buf, "{action}").unwrap();
         }
         std::fs::write(path, buf).expect("failed to write game log");
+    }
+
+    /// Iterate over replay states, yielding `(action, state_after)` for each action.
+    pub fn replay<G: crate::game::Game>(&self, initial_state: G) -> Replay<'_, G> {
+        Replay {
+            state: initial_state,
+            actions: self.actions.iter(),
+        }
     }
 
     /// Read a game log from plain text (seed on first line, then one action per line).
