@@ -1,0 +1,375 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Tenure Game Replay</title>
+<style>
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+  background: #0f0f1a;
+  color: #e0e0e0;
+  padding: 24px;
+  min-height: 100vh;
+}
+.header {
+  text-align: center;
+  margin-bottom: 24px;
+}
+.header h1 { font-size: 1.4rem; color: #fff; margin-bottom: 4px; letter-spacing: 0.5px; }
+.header .result { font-size: 1.1rem; font-weight: 600; }
+.header .vstar { font-size: 0.85rem; color: #666; margin-top: 4px; }
+
+.container {
+  display: flex;
+  gap: 24px;
+  max-width: 1100px;
+  margin: 0 auto;
+  align-items: flex-start;
+}
+
+.ladder-panel {
+  flex: 1;
+  background: #1a1a2e;
+  border-radius: 12px;
+  padding: 20px;
+  border: 1px solid #2a2a4a;
+}
+
+.info-panel {
+  width: 300px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  flex-shrink: 0;
+}
+
+.card {
+  background: #1a1a2e;
+  border-radius: 10px;
+  padding: 14px;
+  border: 1px solid #2a2a4a;
+}
+
+.phase-box {
+  text-align: center;
+  font-size: 1.1rem;
+  font-weight: 600;
+  padding: 10px;
+  border-radius: 8px;
+  transition: background 0.15s;
+}
+.phase-attacker { color: #4fc3f7; background: rgba(79,195,247,0.08); border-color: rgba(79,195,247,0.25); }
+.phase-defender { color: #ef5350; background: rgba(239,83,80,0.08); border-color: rgba(239,83,80,0.25); }
+.phase-over { color: #ffd700; background: rgba(255,215,0,0.08); border-color: rgba(255,215,0,0.25); }
+
+.score-section { text-align: center; }
+.score-value { font-size: 2.2rem; font-weight: 700; color: #ffd700; line-height: 1.2; }
+.score-label { color: #666; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 1px; }
+
+.values { display: flex; gap: 10px; }
+.value-box {
+  flex: 1;
+  text-align: center;
+  padding: 8px 6px;
+  border-radius: 8px;
+  background: #16162a;
+}
+.value-box .label { font-size: 0.7rem; color: #666; text-transform: uppercase; letter-spacing: 0.5px; }
+.value-box .val { font-size: 1rem; font-weight: 600; margin-top: 2px; }
+.vb-color { color: #4fc3f7; }
+.vp-color { color: #ff9800; }
+
+.controls {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+}
+.controls button {
+  background: #252540;
+  border: 1px solid #3a3a5a;
+  color: #ccc;
+  padding: 7px 12px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.1s;
+}
+.controls button:hover { background: #3a3a5a; color: #fff; }
+.frame-counter { color: #888; font-size: 0.85rem; min-width: 70px; text-align: center; }
+
+.action-log {
+  max-height: 340px;
+  overflow-y: auto;
+  font-size: 0.8rem;
+  line-height: 1.5;
+}
+.action-log::-webkit-scrollbar { width: 6px; }
+.action-log::-webkit-scrollbar-track { background: transparent; }
+.action-log::-webkit-scrollbar-thumb { background: #3a3a5a; border-radius: 3px; }
+.entry {
+  padding: 3px 8px;
+  border-radius: 4px;
+  margin-bottom: 1px;
+  border-left: 3px solid transparent;
+}
+.entry.current { background: #252550; color: #fff; }
+.entry.a-act { border-left-color: #4fc3f7; }
+.entry.d-act { border-left-color: #ef5350; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Tenure Game Replay</h1>
+  <div class="result" id="result"></div>
+  <div class="vstar" id="vstar-line"></div>
+</div>
+
+<div class="container">
+  <div class="ladder-panel">
+    <svg id="ladder" width="100%" viewBox="0 0 600 610"></svg>
+  </div>
+
+  <div class="info-panel">
+    <div class="card phase-box" id="phase"></div>
+
+    <div class="card score-section">
+      <div class="score-label">Pieces Tenured</div>
+      <div class="score-value" id="score">0</div>
+    </div>
+
+    <div class="card">
+      <div class="values">
+        <div class="value-box">
+          <div class="label">v(Board)</div>
+          <div class="val vb-color" id="v-board">0</div>
+        </div>
+        <div class="value-box">
+          <div class="label">v(Partition)</div>
+          <div class="val vp-color" id="v-partition">0</div>
+        </div>
+      </div>
+    </div>
+
+    <div class="card controls">
+      <button onclick="goFirst()" title="First (Home)">&#x23EE;</button>
+      <button onclick="goPrev()" title="Previous (&larr;)">&#x25C0;</button>
+      <span class="frame-counter" id="frame-counter">0 / 0</span>
+      <button onclick="goNext()" title="Next (&rarr;)">&#x25B6;</button>
+      <button onclick="goLast()" title="Last (End)">&#x23ED;</button>
+    </div>
+
+    <div class="card action-log" id="action-log"></div>
+  </div>
+</div>
+
+<script>
+const DATA = "__REPLAY_DATA__";
+
+let cur = 0;
+const K = DATA.k;
+const frames = DATA.frames;
+
+const BOARD_CLR = '#4fc3f7';
+const PART_CLR  = '#ff9800';
+const SCORE_CLR = '#ffd700';
+
+// Layout
+const W = 600;
+const TENURE_H = 60;
+const HDR_H = 28;
+const ROW_H = 48;
+const LBL_W = 64;
+const COL_W = (W - LBL_W) / 2;
+const PR = 7;     // piece radius
+const PG = 18;    // piece gap
+
+const NS = 'http://www.w3.org/2000/svg';
+
+function el(tag, attrs) {
+  const e = document.createElementNS(NS, tag);
+  for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+}
+
+function init() {
+  document.getElementById('result').textContent = DATA.result;
+  document.getElementById('result').style.color =
+    DATA.result.includes('Attacker') ? BOARD_CLR :
+    DATA.result.includes('Defender') ? '#ef5350' : SCORE_CLR;
+  const threshold = Math.floor(DATA.initial_value);
+  document.getElementById('vstar-line').textContent =
+    'v* = ' + DATA.initial_value.toFixed(6) +
+    '  |  threshold: ' + threshold + ' (draw)  ' + (threshold+1) + '+ (attacker wins)';
+
+  updateFrame(0);
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowLeft')  goPrev();
+    if (e.key === 'ArrowRight') goNext();
+    if (e.key === 'Home')       goFirst();
+    if (e.key === 'End')        goLast();
+  });
+}
+
+function updateFrame(idx) {
+  cur = Math.max(0, Math.min(idx, frames.length - 1));
+  const f = frames[cur];
+  const terminal = cur === frames.length - 1 && DATA.result !== 'Game in progress';
+
+  // Phase
+  const pe = document.getElementById('phase');
+  if (terminal) {
+    pe.textContent = DATA.result;
+    pe.className = 'card phase-box phase-over';
+  } else {
+    pe.textContent = f.phase + '\u2019s Turn';
+    pe.className = 'card phase-box ' + (f.phase === 'Attacker' ? 'phase-attacker' : 'phase-defender');
+  }
+
+  // Score
+  document.getElementById('score').textContent = f.score;
+
+  // Values
+  document.getElementById('v-board').textContent = f.board_value.toFixed(4);
+  document.getElementById('v-partition').textContent = f.partition_value.toFixed(4);
+
+  // Counter
+  document.getElementById('frame-counter').textContent = cur + ' / ' + (frames.length - 1);
+
+  drawLadder(f);
+  drawLog();
+}
+
+function drawLadder(f) {
+  const svg = document.getElementById('ladder');
+  svg.innerHTML = '';
+
+  // Tenure zone background
+  svg.appendChild(el('rect', { x:0, y:0, width:W, height:TENURE_H, fill:'#1e1e3a', rx:8 }));
+  svg.appendChild(el('text', {
+    x: W/2, y: 18, fill: SCORE_CLR, 'font-size': '0.8rem',
+    'text-anchor': 'middle', 'font-weight': '600', 'letter-spacing': '1'
+  })).textContent = 'TENURED';
+
+  // Scored pieces
+  if (f.score > 0) {
+    const sx = (W - f.score * PG) / 2 + PR;
+    for (let i = 0; i < f.score; i++) {
+      svg.appendChild(el('circle', { cx: sx + i*PG, cy: 40, r: PR, fill: SCORE_CLR }));
+    }
+  } else {
+    svg.appendChild(el('text', {
+      x: W/2, y: 42, fill: '#444', 'font-size': '0.75rem',
+      'text-anchor': 'middle', 'dominant-baseline': 'middle'
+    })).textContent = 'none';
+  }
+
+  // Column headers
+  const hy = TENURE_H + 18;
+  svg.appendChild(el('text', {
+    x: LBL_W + COL_W/2, y: hy, fill: BOARD_CLR, 'font-size': '0.75rem',
+    'text-anchor': 'middle', 'font-weight': '600'
+  })).textContent = 'Board (A)';
+  svg.appendChild(el('text', {
+    x: LBL_W + COL_W + COL_W/2, y: hy, fill: PART_CLR, 'font-size': '0.75rem',
+    'text-anchor': 'middle', 'font-weight': '600'
+  })).textContent = 'Partition (B)';
+
+  // Center divider
+  svg.appendChild(el('line', {
+    x1: LBL_W + COL_W, y1: TENURE_H + HDR_H,
+    x2: LBL_W + COL_W, y2: TENURE_H + HDR_H + K*ROW_H,
+    stroke: '#2a2a4a', 'stroke-dasharray': '4,4'
+  }));
+
+  // Levels
+  for (let l = 0; l < K; l++) {
+    const y = TENURE_H + HDR_H + l * ROW_H;
+    const cy = y + ROW_H / 2;
+
+    // Alternating row background
+    if (l % 2 === 0)
+      svg.appendChild(el('rect', { x:0, y, width:W, height:ROW_H, fill:'#16162a' }));
+
+    // Level label + value
+    svg.appendChild(el('text', {
+      x: 10, y: cy - 7, fill: '#888', 'font-size': '0.75rem', 'dominant-baseline': 'middle'
+    })).textContent = 'Lvl ' + l;
+
+    const v = 1 / Math.pow(2, l + 1);
+    svg.appendChild(el('text', {
+      x: 10, y: cy + 9, fill: '#444', 'font-size': '0.6rem', 'dominant-baseline': 'middle'
+    })).textContent = v < 0.01 ? v.toExponential(0) : v.toFixed(3);
+
+    // Board pieces
+    drawPieces(svg, LBL_W + 14, cy, f.board[l], BOARD_CLR);
+
+    // Partition pieces
+    drawPieces(svg, LBL_W + COL_W + 14, cy, f.partition[l], PART_CLR);
+  }
+
+  // Value bars at bottom
+  const barY = TENURE_H + HDR_H + K * ROW_H + 8;
+  const totalV = f.board_value + f.partition_value;
+  if (totalV > 0) {
+    const bw = (W - 20) * (f.board_value / totalV);
+    const pw = (W - 20) * (f.partition_value / totalV);
+    svg.appendChild(el('rect', { x: 10, y: barY, width: bw, height: 6, fill: BOARD_CLR, rx: 3, opacity: 0.6 }));
+    svg.appendChild(el('rect', { x: 10 + bw, y: barY, width: pw, height: 6, fill: PART_CLR, rx: 3, opacity: 0.6 }));
+  }
+}
+
+function drawPieces(svg, sx, cy, count, color) {
+  if (count === 0) return;
+  // If many pieces, use compact layout
+  const maxInline = Math.floor((COL_W - 50) / PG);
+  if (count <= maxInline) {
+    for (let i = 0; i < count; i++)
+      svg.appendChild(el('circle', { cx: sx + i*PG, cy, r: PR, fill: color }));
+  } else {
+    // Two rows
+    const top = Math.ceil(count / 2);
+    const bot = count - top;
+    for (let i = 0; i < top; i++)
+      svg.appendChild(el('circle', { cx: sx + i*PG, cy: cy - 9, r: PR-1, fill: color }));
+    for (let i = 0; i < bot; i++)
+      svg.appendChild(el('circle', { cx: sx + i*PG, cy: cy + 9, r: PR-1, fill: color }));
+  }
+  // Count label
+  svg.appendChild(el('text', {
+    x: sx + Math.min(count, maxInline) * PG + 4, y: cy + 4,
+    fill: color, 'font-size': '0.7rem', opacity: 0.5
+  })).textContent = '\u00d7' + count;
+}
+
+function drawLog() {
+  const log = document.getElementById('action-log');
+  const start = Math.max(0, cur - 20);
+  const end = Math.min(frames.length, cur + 10);
+
+  let html = '';
+  for (let i = start; i < end; i++) {
+    const f = frames[i];
+    const cls = (i === cur ? 'current ' : '') +
+      (f.phase === 'Attacker' ? 'a-act' : 'd-act');
+    html += '<div class="entry ' + cls + '">' + i + '. ' + f.action + '</div>';
+  }
+  log.innerHTML = html;
+
+  const el = log.querySelector('.current');
+  if (el) el.scrollIntoView({ block: 'nearest' });
+}
+
+function goFirst() { updateFrame(0); }
+function goPrev()  { updateFrame(cur - 1); }
+function goNext()  { updateFrame(cur + 1); }
+function goLast()  { updateFrame(frames.length - 1); }
+
+window.onload = init;
+</script>
+</body>
+</html>

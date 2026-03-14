@@ -39,3 +39,7 @@ path = "examples/catan/main.rs"
 [[example]]
 name = "twenty48"
 path = "examples/twenty48/main.rs"
+
+[[example]]
+name = "tenure"
+path = "examples/tenure/main.rs"
