@@ -23,9 +23,9 @@ mod heuristic;
 mod model;
 mod visualize;
 
-use encoder::{BasicEncoder, Gnn2Encoder, GnnEncoder, RichNodeEncoder};
+use encoder::{BasicEncoder, Gnn2Encoder, GnnEncoder, NexusEncoder, RichNodeEncoder};
 use game::dice::Dice;
-use model::{init_gnn, init_gnn_with, init_resnet, init_simple, init_simple_rich};
+use model::{init_gnn, init_gnn_with, init_nexus_with, init_resnet, init_simple, init_simple_rich};
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
@@ -37,6 +37,7 @@ fn main() {
     setup.add_encoder("rich", Arc::new(RichNodeEncoder));
     setup.add_encoder("gnn", Arc::new(GnnEncoder));
     setup.add_encoder("gnn2", Arc::new(Gnn2Encoder));
+    setup.add_encoder("nexus", Arc::new(NexusEncoder));
 
     // Models
     setup.add_model("simple", init_simple);
@@ -44,6 +45,7 @@ fn main() {
     setup.add_model("resnet", init_resnet);
     setup.add_model("gnn", init_gnn);
     setup.add_model("gnn2", init_gnn_with::<_, 101, 34>);
+    setup.add_model("nexus", init_nexus_with::<_, 93, 7, 13>);
 
     // Configs
     setup.add_config(

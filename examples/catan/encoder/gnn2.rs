@@ -33,31 +33,15 @@
 use canopy2::nn::StateEncoder;
 
 use crate::game::board::Port;
-use crate::game::dice::Dice;
 use crate::game::state::GameState;
 
-use super::{PIPS, encode_phase, encode_player, node_value};
-
-/// Random dice weights (unnormalized): [1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1], total 36.
-const RANDOM_DICE_PROBS: [f32; 11] = [
-    1.0 / 36.0,
-    2.0 / 36.0,
-    3.0 / 36.0,
-    4.0 / 36.0,
-    5.0 / 36.0,
-    6.0 / 36.0,
-    5.0 / 36.0,
-    4.0 / 36.0,
-    3.0 / 36.0,
-    2.0 / 36.0,
-    1.0 / 36.0,
-];
+use super::{
+    MAX_NUMBER_PRODUCTION, PIPS, building_weight, encode_dice, encode_phase, encode_player,
+    node_value,
+};
 
 /// Maximum production normalization: MAX_NODE_PIPS (13) × city weight (2) = 26.
 const MAX_PRODUCTION: f32 = 26.0;
-
-/// Maximum building weight on tiles sharing a dice number (~10).
-const MAX_NUMBER_PRODUCTION: f32 = 10.0;
 
 pub struct Gnn2Encoder;
 
@@ -68,18 +52,6 @@ impl Gnn2Encoder {
     pub const EDGES_F: usize = 0;
     pub const TILES_F: usize = 0;
     pub const PORTS_F: usize = 0;
-}
-
-/// Building weight: 0 = empty, 1 = settlement, 2 = city.
-fn building_weight(boards: &crate::game::state::PlayerBoards, node: u8) -> f32 {
-    let mask = 1u64 << node;
-    if boards.cities & mask != 0 {
-        2.0
-    } else if boards.settlements & mask != 0 {
-        1.0
-    } else {
-        0.0
-    }
 }
 
 /// Push 26 extended per-player features: trade ratios (5), total production (5),
@@ -135,29 +107,6 @@ fn encode_player_extended(
     }
     for &v in &number_prod {
         out.push(v / MAX_NUMBER_PRODUCTION);
-    }
-}
-
-/// Push dice state features (12): roll probabilities (11) + deck fraction (1).
-fn encode_dice(state: &GameState, out: &mut Vec<f32>) {
-    match &state.dice {
-        Dice::Random => {
-            out.extend_from_slice(&RANDOM_DICE_PROBS);
-            out.push(1.0);
-        }
-        Dice::Balanced(b) => {
-            let ws = b.weights(state.current_player);
-            let total: u32 = ws.iter().map(|(_, w)| w).sum();
-            if total > 0 {
-                let inv = 1.0 / total as f32;
-                for &(_, w) in &ws {
-                    out.push(w as f32 * inv);
-                }
-            } else {
-                out.extend_from_slice(&RANDOM_DICE_PROBS);
-            }
-            out.push(b.cards_left() as f32 / 36.0);
-        }
     }
 }
 

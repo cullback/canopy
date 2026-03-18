@@ -1,8 +1,10 @@
 mod gnn;
+mod nexus;
 mod resnet;
 mod simple;
 
 pub use gnn::{init_gnn, init_gnn_with};
+pub use nexus::{init_nexus, init_nexus_with};
 pub use resnet::init_resnet;
 pub use simple::{init_simple, init_simple_rich};
 
