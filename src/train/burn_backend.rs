@@ -1,6 +1,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use burn::grad_clipping::GradientClippingConfig;
 use burn::module::AutodiffModule;
 use burn::optim::adaptor::OptimizerAdaptor;
 use burn::optim::{AdamW, AdamWConfig, GradientsParams, Optimizer};
@@ -131,6 +132,7 @@ where
 {
     model: M,
     optimizer: OptimizerAdaptor<AdamW, M, TrainBackend>,
+    optim_config: AdamWConfig,
     device: Device,
     model_init: Box<dyn Fn(&Device) -> M + Send>,
     _game: std::marker::PhantomData<G>,
@@ -143,10 +145,14 @@ where
     pub fn new(model_init: impl Fn(&Device) -> M + Send + 'static) -> Self {
         let device = default_device();
         let model = model_init(&device);
-        let optimizer = AdamWConfig::new().with_weight_decay(0.0004).init();
+        let optim_config = AdamWConfig::new()
+            .with_weight_decay(0.0004)
+            .with_grad_clipping(Some(GradientClippingConfig::Norm(1.0)));
+        let optimizer = optim_config.clone().init();
         Self {
             model,
             optimizer,
+            optim_config,
             device,
             model_init: Box::new(model_init),
             _game: std::marker::PhantomData,
@@ -382,10 +388,8 @@ where
         let optim_path = dir.join(format!("optim_iter_{iteration}"));
         match recorder.load(optim_path, &self.device) {
             Ok(optim_record) => {
-                let optimizer = std::mem::replace(
-                    &mut self.optimizer,
-                    AdamWConfig::new().with_weight_decay(0.0004).init(),
-                );
+                let optimizer =
+                    std::mem::replace(&mut self.optimizer, self.optim_config.clone().init());
                 self.optimizer = optimizer.load_record(optim_record);
                 eprintln!("restored optimizer state");
             }
