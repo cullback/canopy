@@ -24,7 +24,7 @@ use canopy2::nn::StateEncoder;
 use crate::game::board::Port;
 use crate::game::state::GameState;
 
-use super::{MAX_NODE_PIPS, PIPS, encode_phase, encode_player, node_value};
+use super::{MAX_NODE_PIPS, PIPS, encode_phase, encode_player, encode_road_slots, node_value};
 
 pub struct GnnEncoder;
 
@@ -134,17 +134,7 @@ impl StateEncoder<GameState> for GnnEncoder {
             }
 
             // 5. road_slot per neighbor (3 slots × 2 players = 6)
-            //    Slot order matches adjacent_edges; padded to 3 for degree-2 nodes.
-            for slot in 0..3 {
-                if slot < node.adjacent_edges.len() {
-                    let mask = 1u128 << node.adjacent_edges[slot].0;
-                    out.push(f32::from(cur_roads & mask != 0));
-                    out.push(f32::from(opp_roads & mask != 0));
-                } else {
-                    out.push(0.0);
-                    out.push(0.0);
-                }
-            }
+            encode_road_slots(node, cur_roads, opp_roads, out);
         }
 
         debug_assert_eq!(

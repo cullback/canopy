@@ -32,12 +32,11 @@
 
 use canopy2::nn::StateEncoder;
 
-use crate::game::board::Port;
 use crate::game::state::GameState;
 
 use super::{
-    MAX_NUMBER_PRODUCTION, PIPS, building_weight, encode_dice, encode_phase, encode_player,
-    node_value,
+    PIPS, building_weight, encode_dice, encode_per_number_production, encode_phase, encode_player,
+    encode_port_ratios, encode_road_slots, node_value, tile_numbers,
 };
 
 /// Maximum production normalization: MAX_NODE_PIPS (13) × city weight (2) = 26.
@@ -73,8 +72,6 @@ fn encode_player_extended(
     // Total production per resource (5) and robbed production per resource (5)
     let mut total_prod = [0.0f32; 5];
     let mut robbed_prod = [0.0f32; 5];
-    // Per-number production (indices 0-10 → dice values 2-12)
-    let mut number_prod = [0.0f32; 11];
 
     for (i, tile) in topo.tiles.iter().enumerate() {
         if let Some(resource) = tile.terrain.resource() {
@@ -84,7 +81,6 @@ fn encode_player_extended(
             }
             let pips = PIPS[number as usize] as f32;
 
-            // Sum building_weight × pips across all 6 nodes of this tile
             let mut tile_bw = 0.0f32;
             for &nid in &tile.nodes {
                 tile_bw += building_weight(boards, nid.0);
@@ -94,8 +90,6 @@ fn encode_player_extended(
             if tile.id == state.robber {
                 robbed_prod[resource as usize] += pips * tile_bw;
             }
-            // Per-number: index = number - 2
-            number_prod[(number - 2) as usize] += tile_bw;
         }
     }
 
@@ -105,9 +99,9 @@ fn encode_player_extended(
     for &v in &robbed_prod {
         out.push(v / MAX_PRODUCTION);
     }
-    for &v in &number_prod {
-        out.push(v / MAX_NUMBER_PRODUCTION);
-    }
+
+    // Per-number production (11)
+    encode_per_number_production(boards, topo, tile_numbers, out);
 }
 
 impl StateEncoder<GameState> for Gnn2Encoder {
@@ -124,13 +118,7 @@ impl StateEncoder<GameState> for Gnn2Encoder {
         let opp = current.opponent();
         let topo = &state.topology;
 
-        // === Precompute tile_numbers: dice number for each tile (0 if none) ===
-        let mut tile_numbers = [0u8; 19];
-        for roll in 2..=12u8 {
-            for &tid in &topo.dice_to_tiles[roll as usize] {
-                tile_numbers[tid.0 as usize] = roll;
-            }
-        }
+        let tile_numbers = tile_numbers(topo);
 
         // === Global features ===
 
@@ -185,42 +173,11 @@ impl StateEncoder<GameState> for Gnn2Encoder {
                 }
             }
 
-            // 3. port_ratios (5): per-resource trade improvement
-            //    (4 - ratio) / 4 for matching resources, 0 for no port
-            match node.port {
-                Some(Port::Specific(r)) => {
-                    for ri in 0..5 {
-                        if ri == r as usize {
-                            out.push(0.5); // (4 - 2) / 4
-                        } else {
-                            out.push(0.0);
-                        }
-                    }
-                }
-                Some(Port::Generic) => {
-                    // (4 - 3) / 4 = 0.25 for all resources
-                    for _ in 0..5 {
-                        out.push(0.25);
-                    }
-                }
-                None => {
-                    for _ in 0..5 {
-                        out.push(0.0);
-                    }
-                }
-            }
+            // 3. port_ratios (5)
+            encode_port_ratios(node, out);
 
             // 4. road_slot × 3 × 2 players (6)
-            for slot in 0..3 {
-                if slot < node.adjacent_edges.len() {
-                    let mask = 1u128 << node.adjacent_edges[slot].0;
-                    out.push(f32::from(cur_roads & mask != 0));
-                    out.push(f32::from(opp_roads & mask != 0));
-                } else {
-                    out.push(0.0);
-                    out.push(0.0);
-                }
-            }
+            encode_road_slots(node, cur_roads, opp_roads, out);
         }
 
         debug_assert_eq!(
@@ -340,14 +297,7 @@ mod tests {
     fn tile_slots_match_adjacent_tiles() {
         let state = make_main_state();
         let topo = &state.topology;
-
-        // Precompute tile_numbers
-        let mut tile_numbers = [0u8; 19];
-        for roll in 2..=12u8 {
-            for &tid in &topo.dice_to_tiles[roll as usize] {
-                tile_numbers[tid.0 as usize] = roll;
-            }
-        }
+        let tile_numbers = super::super::tile_numbers(topo);
 
         let mut features = Vec::new();
         Gnn2Encoder.encode(&state, &mut features);

@@ -67,6 +67,7 @@ use std::collections::VecDeque;
 
 use canopy2::player::Player;
 
+use crate::game::board::{Node, Port};
 use crate::game::dice::Dice;
 use crate::game::resource::ALL_RESOURCES;
 use crate::game::state::{GameState, Phase, PlayerBoards};
@@ -263,48 +264,76 @@ pub(crate) fn node_value(boards: &PlayerBoards, i: u8) -> f32 {
     }
 }
 
-/// Push tile stream (19 × 7 = 133 features).
-pub(crate) fn encode_tiles(state: &GameState, out: &mut Vec<f32>) {
-    let topo = &state.topology;
-    for tile in &topo.tiles {
-        // Resource one-hot (5)
-        let resource_idx = tile.terrain.resource().map(|r| r as usize);
-        for i in 0..5 {
-            out.push(f32::from(resource_idx == Some(i)));
+/// Precompute the dice number for each tile (0 if none, e.g. desert).
+pub(crate) fn tile_numbers(topo: &Topology) -> [u8; 19] {
+    let mut numbers = [0u8; 19];
+    for roll in 2..=12u8 {
+        for &tid in &topo.dice_to_tiles[roll as usize] {
+            numbers[tid.0 as usize] = roll;
         }
-        // Dice probability (1)
-        let mut prob = 0.0f32;
-        for roll in 2..=12u8 {
-            if topo.dice_to_tiles[roll as usize].contains(&tile.id) {
-                prob += DICE_PROB[roll as usize];
+    }
+    numbers
+}
+
+/// Push per-slot road features for a node (3 slots × 2 players = 6 features).
+/// Padded to 3 for degree-2 nodes.
+pub(crate) fn encode_road_slots(node: &Node, cur_roads: u128, opp_roads: u128, out: &mut Vec<f32>) {
+    for slot in 0..3 {
+        if slot < node.adjacent_edges.len() {
+            let mask = 1u128 << node.adjacent_edges[slot].0;
+            out.push(f32::from(cur_roads & mask != 0));
+            out.push(f32::from(opp_roads & mask != 0));
+        } else {
+            out.push(0.0);
+            out.push(0.0);
+        }
+    }
+}
+
+/// Push port ratio features (5): 0.5 for matching specific resource, 0.25 for generic, 0.0 otherwise.
+pub(crate) fn encode_port_ratios(node: &Node, out: &mut Vec<f32>) {
+    match node.port {
+        Some(Port::Specific(r)) => {
+            for ri in 0..5 {
+                out.push(if ri == r as usize { 0.5 } else { 0.0 });
             }
         }
-        out.push(prob / MAX_DICE_PROB);
-        // Robber (1)
-        out.push(f32::from(state.robber == tile.id));
-    }
-}
-
-/// Push edge stream (72 × 2 = 144 features).
-pub(crate) fn encode_edges(state: &GameState, out: &mut Vec<f32>) {
-    let current = state.current_player;
-    let opp = current.opponent();
-    let cur_board = &state.boards[current];
-    let opp_board = &state.boards[opp];
-    for i in 0..72u8 {
-        let mask = 1u128 << i;
-        out.push(f32::from(cur_board.road_network.roads & mask != 0));
-        out.push(f32::from(opp_board.road_network.roads & mask != 0));
-    }
-}
-
-/// Push port stream (9 × 5 = 45 features).
-pub(crate) fn encode_ports(state: &GameState, out: &mut Vec<f32>) {
-    for &port_type in &state.topology.port_types {
-        let resource_idx = port_type.map(|r| r as usize);
-        for i in 0..5 {
-            out.push(f32::from(resource_idx == Some(i)));
+        Some(Port::Generic) => {
+            for _ in 0..5 {
+                out.push(0.25);
+            }
         }
+        None => {
+            for _ in 0..5 {
+                out.push(0.0);
+            }
+        }
+    }
+}
+
+/// Push per-number production (11 features): total building_weight per dice value 2..=12.
+pub(crate) fn encode_per_number_production(
+    boards: &PlayerBoards,
+    topo: &Topology,
+    tile_numbers: &[u8; 19],
+    out: &mut Vec<f32>,
+) {
+    let mut number_prod = [0.0f32; 11];
+    for (i, tile) in topo.tiles.iter().enumerate() {
+        if tile.terrain.resource().is_some() {
+            let number = tile_numbers[i];
+            if number == 0 {
+                continue;
+            }
+            let mut tile_bw = 0.0f32;
+            for &nid in &tile.nodes {
+                tile_bw += building_weight(boards, nid.0);
+            }
+            number_prod[(number - 2) as usize] += tile_bw;
+        }
+    }
+    for &v in &number_prod {
+        out.push(v / MAX_NUMBER_PRODUCTION);
     }
 }
 

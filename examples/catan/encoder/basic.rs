@@ -2,7 +2,7 @@ use canopy2::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
-use super::{encode_edges, encode_phase, encode_player, encode_ports, encode_tiles, node_value};
+use super::{DICE_PROB, MAX_DICE_PROB, encode_phase, encode_player, node_value};
 
 pub struct BasicEncoder;
 
@@ -12,6 +12,51 @@ impl BasicEncoder {
     pub const EDGES_F: usize = 2;
     pub const TILES_F: usize = 7;
     pub const PORTS_F: usize = 5;
+}
+
+/// Push tile stream (19 × 7 = 133 features).
+fn encode_tiles(state: &GameState, out: &mut Vec<f32>) {
+    let topo = &state.topology;
+    for tile in &topo.tiles {
+        // Resource one-hot (5)
+        let resource_idx = tile.terrain.resource().map(|r| r as usize);
+        for i in 0..5 {
+            out.push(f32::from(resource_idx == Some(i)));
+        }
+        // Dice probability (1)
+        let mut prob = 0.0f32;
+        for roll in 2..=12u8 {
+            if topo.dice_to_tiles[roll as usize].contains(&tile.id) {
+                prob += DICE_PROB[roll as usize];
+            }
+        }
+        out.push(prob / MAX_DICE_PROB);
+        // Robber (1)
+        out.push(f32::from(state.robber == tile.id));
+    }
+}
+
+/// Push edge stream (72 × 2 = 144 features).
+fn encode_edges(state: &GameState, out: &mut Vec<f32>) {
+    let current = state.current_player;
+    let opp = current.opponent();
+    let cur_board = &state.boards[current];
+    let opp_board = &state.boards[opp];
+    for i in 0..72u8 {
+        let mask = 1u128 << i;
+        out.push(f32::from(cur_board.road_network.roads & mask != 0));
+        out.push(f32::from(opp_board.road_network.roads & mask != 0));
+    }
+}
+
+/// Push port stream (9 × 5 = 45 features).
+fn encode_ports(state: &GameState, out: &mut Vec<f32>) {
+    for &port_type in &state.topology.port_types {
+        let resource_idx = port_type.map(|r| r as usize);
+        for i in 0..5 {
+            out.push(f32::from(resource_idx == Some(i)));
+        }
+    }
 }
 
 impl StateEncoder<GameState> for BasicEncoder {

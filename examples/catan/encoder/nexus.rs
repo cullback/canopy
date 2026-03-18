@@ -37,12 +37,11 @@
 
 use canopy2::nn::StateEncoder;
 
-use crate::game::board::Port;
 use crate::game::state::GameState;
 
 use super::{
-    MAX_NUMBER_PRODUCTION, PIPS, building_weight, encode_dice, encode_phase, encode_player,
-    node_value,
+    PIPS, encode_dice, encode_per_number_production, encode_phase, encode_player,
+    encode_port_ratios, encode_road_slots, node_value, tile_numbers,
 };
 
 pub struct NexusEncoder;
@@ -62,32 +61,13 @@ fn encode_player_ext_trimmed(
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
-    let boards = &state.boards[player];
-    let topo = &state.topology;
-
     // Trade ratios (5): (4 - ratio) / 4, so better = higher
     for &ratio in &state.players[player].trade_ratios {
         out.push((4 - ratio.min(4)) as f32 / 4.0);
     }
 
-    // Per-number production (indices 0-10 → dice values 2-12)
-    let mut number_prod = [0.0f32; 11];
-    for (i, tile) in topo.tiles.iter().enumerate() {
-        if tile.terrain.resource().is_some() {
-            let number = tile_numbers[i];
-            if number == 0 {
-                continue;
-            }
-            let mut tile_bw = 0.0f32;
-            for &nid in &tile.nodes {
-                tile_bw += building_weight(boards, nid.0);
-            }
-            number_prod[(number - 2) as usize] += tile_bw;
-        }
-    }
-    for &v in &number_prod {
-        out.push(v / MAX_NUMBER_PRODUCTION);
-    }
+    // Per-number production (11)
+    encode_per_number_production(&state.boards[player], &state.topology, tile_numbers, out);
 }
 
 impl StateEncoder<GameState> for NexusEncoder {
@@ -101,13 +81,7 @@ impl StateEncoder<GameState> for NexusEncoder {
         let opp = current.opponent();
         let topo = &state.topology;
 
-        // === Precompute tile_numbers ===
-        let mut tile_numbers = [0u8; 19];
-        for roll in 2..=12u8 {
-            for &tid in &topo.dice_to_tiles[roll as usize] {
-                tile_numbers[tid.0 as usize] = roll;
-            }
-        }
+        let tile_numbers = tile_numbers(topo);
 
         // === Global features (93) ===
 
@@ -160,35 +134,10 @@ impl StateEncoder<GameState> for NexusEncoder {
             out.push(node_value(opp_board, i));
 
             // port_ratios (5)
-            match node.port {
-                Some(Port::Specific(r)) => {
-                    for ri in 0..5 {
-                        out.push(if ri == r as usize { 0.5 } else { 0.0 });
-                    }
-                }
-                Some(Port::Generic) => {
-                    for _ in 0..5 {
-                        out.push(0.25);
-                    }
-                }
-                None => {
-                    for _ in 0..5 {
-                        out.push(0.0);
-                    }
-                }
-            }
+            encode_port_ratios(node, out);
 
             // road_slot × 3 × 2 players (6)
-            for slot in 0..3 {
-                if slot < node.adjacent_edges.len() {
-                    let mask = 1u128 << node.adjacent_edges[slot].0;
-                    out.push(f32::from(cur_roads & mask != 0));
-                    out.push(f32::from(opp_roads & mask != 0));
-                } else {
-                    out.push(0.0);
-                    out.push(0.0);
-                }
-            }
+            encode_road_slots(node, cur_roads, opp_roads, out);
         }
 
         debug_assert_eq!(
@@ -312,12 +261,7 @@ mod tests {
     fn tile_features_correct() {
         let state = make_main_state();
         let topo = &state.topology;
-        let mut tile_numbers = [0u8; 19];
-        for roll in 2..=12u8 {
-            for &tid in &topo.dice_to_tiles[roll as usize] {
-                tile_numbers[tid.0 as usize] = roll;
-            }
-        }
+        let tile_numbers = super::super::tile_numbers(topo);
 
         let mut features = Vec::new();
         NexusEncoder.encode(&state, &mut features);
