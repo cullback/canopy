@@ -4,15 +4,19 @@ use tokio::sync::mpsc;
 
 /// A pre-encoded inference request sent from an async game task to the batcher.
 /// Game-independent: carries raw features, not game states.
+/// May contain multiple samples (a leaf batch) in a single request.
 pub(super) struct InferRequest {
-    pub features: Vec<f32>,
+    pub flat_features: Vec<f32>,
+    pub batch_size: usize,
     pub response_tx: tokio::sync::oneshot::Sender<InferResponse>,
 }
 
 /// Raw inference result returned from the batcher to a game task.
 pub(super) struct InferResponse {
-    pub policy_logits: Vec<f32>,
-    pub value: f32,
+    /// Flat policy logits for all samples in the request.
+    pub flat_policy_logits: Vec<f32>,
+    /// One value per sample.
+    pub values: Vec<f32>,
 }
 
 /// Sender half of the bounded inference request channel.
@@ -22,13 +26,16 @@ pub(super) type InferSender = mpsc::Sender<InferRequest>;
 pub(super) struct InferBatch {
     flat_features: Vec<f32>,
     feature_size: usize,
-    responses: Vec<tokio::sync::oneshot::Sender<InferResponse>>,
+    /// One entry per original request: (oneshot sender, number of samples in that request).
+    responses: Vec<(tokio::sync::oneshot::Sender<InferResponse>, usize)>,
 }
 
 /// Shared atomic counters updated by the batcher, read by tasks for live stats.
 pub(super) struct BatcherStats {
     pub batches: AtomicU64,
     pub evals: AtomicU64,
+    /// Current number of requests waiting in the queue.
+    pub queue_depth: AtomicU64,
 }
 
 impl BatcherStats {
@@ -36,6 +43,7 @@ impl BatcherStats {
         Self {
             batches: AtomicU64::new(0),
             evals: AtomicU64::new(0),
+            queue_depth: AtomicU64::new(0),
         }
     }
 
@@ -65,27 +73,31 @@ pub(super) fn batcher_loop(
             None => break,
         };
 
-        let feature_size = first.features.len();
+        let feature_size = first.flat_features.len() / first.batch_size;
         batch_requests.push(first);
 
-        // Drain additional requests without blocking, up to max_batch_size
-        while batch_requests.len() < max_batch_size {
+        // Drain additional requests without blocking
+        let mut total_samples: usize = batch_requests[0].batch_size;
+        while total_samples < max_batch_size {
             match request_rx.try_recv() {
-                Ok(req) => batch_requests.push(req),
+                Ok(req) => {
+                    total_samples += req.batch_size;
+                    batch_requests.push(req);
+                }
                 Err(_) => break,
             }
         }
 
-        let bs = batch_requests.len();
-        stats.evals.fetch_add(bs as u64, Relaxed);
+        stats.queue_depth.store(total_samples as u64, Relaxed);
+        stats.evals.fetch_add(total_samples as u64, Relaxed);
         stats.batches.fetch_add(1, Relaxed);
 
         // Collect flat features and response handles
-        let mut flat_features = Vec::with_capacity(bs * feature_size);
-        let mut responses = Vec::with_capacity(bs);
+        let mut flat_features = Vec::with_capacity(total_samples * feature_size);
+        let mut responses = Vec::with_capacity(batch_requests.len());
         for req in batch_requests.drain(..) {
-            flat_features.extend_from_slice(&req.features);
-            responses.push(req.response_tx);
+            flat_features.extend_from_slice(&req.flat_features);
+            responses.push((req.response_tx, req.batch_size));
         }
 
         // Send batch to GPU worker pool (blocks if all workers busy — backpressure)
@@ -112,18 +124,19 @@ pub(super) fn gpu_worker_loop(
     num_actions: usize,
 ) {
     while let Ok(batch) = batches.recv() {
-        let batch_size = batch.responses.len();
+        let total_samples: usize = batch.responses.iter().map(|(_, n)| n).sum();
         let (flat_logits, flat_values) =
-            infer_fn(batch.flat_features, batch_size, batch.feature_size);
+            infer_fn(batch.flat_features, total_samples, batch.feature_size);
 
-        for (i, response_tx) in batch.responses.into_iter().enumerate() {
-            let logits_start = i * num_actions;
-            let policy_logits = flat_logits[logits_start..logits_start + num_actions].to_vec();
-            let value = flat_values[i];
+        let mut offset = 0;
+        for (response_tx, count) in batch.responses {
+            let logits = flat_logits[offset * num_actions..(offset + count) * num_actions].to_vec();
+            let values = flat_values[offset..offset + count].to_vec();
             let _ = response_tx.send(InferResponse {
-                policy_logits,
-                value,
+                flat_policy_logits: logits,
+                values,
             });
+            offset += count;
         }
     }
 }

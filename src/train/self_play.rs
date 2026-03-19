@@ -223,18 +223,19 @@ where
                         &mut search,
                         &ctx.actor_config,
                         &*ctx.encoder,
-                        |features| {
+                        |flat_features, batch_size| {
                             let tx = tx.clone();
                             async move {
                                 let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
                                 tx.send(InferRequest {
-                                    features,
+                                    flat_features,
+                                    batch_size,
                                     response_tx: resp_tx,
                                 })
                                 .await
                                 .unwrap();
                                 let resp = resp_rx.await.unwrap();
-                                (resp.policy_logits, resp.value)
+                                (resp.flat_policy_logits, resp.values)
                             }
                         },
                         &mut rng,
@@ -263,12 +264,35 @@ where
         }
 
         // Drop our copy so batcher sees disconnect when all tasks finish
+        let stats_pb = ctx.pb.clone();
+        let stats_ref = ctx.batcher_stats.clone();
         drop(ctx);
+
+        // Periodic stats tick so the user sees progress before any game finishes
+        let tick_handle = tokio::spawn(async move {
+            let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
+            loop {
+                interval.tick().await;
+                let evals = stats_ref.evals.load(Relaxed);
+                let avg_batch = stats_ref.avg_batch_size();
+                let queue = stats_ref.queue_depth.load(Relaxed);
+                let elapsed = stats_pb.elapsed().as_secs_f64();
+                let evals_per_sec = if elapsed > 0.0 {
+                    evals as f64 / elapsed
+                } else {
+                    0.0
+                };
+                stats_pb.set_message(format!(
+                    "avg_batch={avg_batch:.1}, queue={queue}, evals/s={evals_per_sec:.0}, total_evals={evals}"
+                ));
+            }
+        });
 
         let mut all_results = Vec::new();
         while let Some(result) = join_set.join_next().await {
             all_results.extend(result.unwrap());
         }
+        tick_handle.abort();
         all_results
     });
 

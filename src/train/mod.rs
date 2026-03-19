@@ -154,7 +154,7 @@ impl Default for TrainConfig {
             warmup_iters: 100,
 
             // Self-play
-            games_per_iter: 150,
+            games_per_iter: 200,
             concurrent_games: 256,
             max_batch_size: 1024,
             explore_moves: 30,
@@ -167,7 +167,7 @@ impl Default for TrainConfig {
             gumbel_m: 16,
             c_visit: 50.0,
             c_scale: 1.0,
-            leaf_batch_size: 16,
+            leaf_batch_size: 32,
 
             // Checkpointing
             checkpoint_interval: 5,

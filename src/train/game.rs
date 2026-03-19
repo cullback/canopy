@@ -35,8 +35,8 @@ pub(super) async fn play_game<G, F, Fut>(
 ) -> GameResult
 where
     G: Game,
-    F: Fn(Vec<f32>) -> Fut,
-    Fut: Future<Output = (Vec<f32>, f32)>,
+    F: Fn(Vec<f32>, usize) -> Fut,
+    Fut: Future<Output = (Vec<f32>, Vec<f32>)>,
 {
     let feature_size = encoder.feature_size();
     let mut samples: Vec<Sample> = Vec::new();
@@ -94,18 +94,29 @@ where
         let result = loop {
             match search.step(&evals, rng) {
                 Step::NeedsEval(states) => {
-                    evals.clear();
+                    let batch_size = states.len();
+                    let mut signs = Vec::with_capacity(batch_size);
+                    let mut flat_features = Vec::with_capacity(batch_size * feature_size);
                     for pending_state in states {
                         let sign = match pending_state.status() {
                             Status::Ongoing => pending_state.current_sign(),
                             Status::Terminal(_) => 1.0,
                         };
+                        signs.push(sign);
                         encode_buf.clear();
                         encoder.encode(pending_state, &mut encode_buf);
-                        let (policy_logits, value) = infer(encode_buf.clone()).await;
+                        flat_features.extend_from_slice(&encode_buf);
+                    }
+                    let (flat_logits, values) = infer(flat_features, batch_size).await;
+                    evals.clear();
+                    let num_actions = G::NUM_ACTIONS;
+                    for (i, &sign) in signs.iter().enumerate() {
+                        let logits_start = i * num_actions;
+                        let policy_logits =
+                            flat_logits[logits_start..logits_start + num_actions].to_vec();
                         evals.push(Evaluation {
                             policy_logits,
-                            value: value * sign,
+                            value: values[i] * sign,
                         });
                     }
                 }

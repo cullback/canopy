@@ -88,11 +88,13 @@ fn main() {
         "nexus",
         TrainConfig {
             iterations: 1000,
+            games_per_iter: 200,
             epochs: 2,
             lr: 0.0005,
             replay_window: 15,
             mcts_sims: 800,
             mcts_sims_start: 400,
+            leaf_batch_size: 32,
             ..TrainConfig::default()
         },
     );

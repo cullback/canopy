@@ -119,30 +119,39 @@ async fn play_bench_game<G: Game>(
                     let result = loop {
                         match search.step(&evals, rng) {
                             Step::NeedsEval(states) => {
-                                let mut receivers = Vec::with_capacity(states.len());
+                                let batch_size = states.len();
+                                let num_actions = G::NUM_ACTIONS;
+                                let mut signs = Vec::with_capacity(batch_size);
+                                let mut flat_features =
+                                    Vec::with_capacity(batch_size * feature_size);
                                 for pending_state in states {
                                     let sign = match pending_state.status() {
                                         Status::Ongoing => pending_state.current_sign(),
                                         Status::Terminal(_) => 1.0,
                                     };
+                                    signs.push(sign);
                                     encode_buf.clear();
                                     encoder.encode(pending_state, &mut encode_buf);
-                                    let (tx, rx) = tokio::sync::oneshot::channel();
-                                    request_tx
-                                        .send(InferRequest {
-                                            features: encode_buf.clone(),
-                                            response_tx: tx,
-                                        })
-                                        .await
-                                        .unwrap();
-                                    receivers.push((rx, sign));
+                                    flat_features.extend_from_slice(&encode_buf);
                                 }
+                                let (tx, rx) = tokio::sync::oneshot::channel();
+                                request_tx
+                                    .send(InferRequest {
+                                        flat_features,
+                                        batch_size,
+                                        response_tx: tx,
+                                    })
+                                    .await
+                                    .unwrap();
+                                let resp = rx.await.unwrap();
                                 evals.clear();
-                                for (rx, sign) in receivers {
-                                    let resp = rx.await.unwrap();
+                                for (i, &sign) in signs.iter().enumerate() {
+                                    let start = i * num_actions;
                                     evals.push(Evaluation {
-                                        policy_logits: resp.policy_logits,
-                                        value: resp.value * sign,
+                                        policy_logits: resp.flat_policy_logits
+                                            [start..start + num_actions]
+                                            .to_vec(),
+                                        value: resp.values[i] * sign,
                                     });
                                 }
                             }
