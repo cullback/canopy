@@ -1,3 +1,5 @@
+set dotenv-load := true
+
 # Display available recipes
 default:
     just --list --unsorted
@@ -35,6 +37,6 @@ build:
 run example *args:
     cargo run --release --example {{ example }} -- {{ args }}
 
-# Sync project to a remote host (e.g., just sync 1.2.3.4)
-sync host user="root" port="22":
-    rsync -avz --delete --filter=':- .gitignore' -e 'ssh -p {{ port }}' . {{ user }}@{{ host }}:/workspace/canopy2/
+# Sync project to a remote host (set VASTAI_HOST, VASTAI_USER, VASTAI_PORT in .env)
+sync:
+    rsync -avz --delete --filter=':- .gitignore' -e "ssh -p $VASTAI_PORT" . "$VASTAI_USER@$VASTAI_HOST:/workspace/canopy2/"
