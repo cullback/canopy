@@ -265,13 +265,13 @@ pub fn run_training<G>(
     config: TrainConfig,
     model: &mut dyn TrainableModel<G>,
     encoder: Arc<dyn StateEncoder<G>>,
-    new_state: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
+    new_state: impl Fn(u64) -> G + Send + Sync + 'static,
     evaluators: &Evaluators<G>,
 ) where
     G: Game + 'static,
 {
     let baseline = evaluators.get_arc(&config.bench_eval);
-    let new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync> = Arc::new(new_state);
+    let new_state: Arc<dyn Fn(u64) -> G + Send + Sync> = Arc::new(new_state);
     let (mut rng, start_iteration) = checkpoint::resume_if_requested(&config, model);
     let run_dir = checkpoint::setup_run_dir(&config);
     eprintln!("run directory: {}", run_dir.display());

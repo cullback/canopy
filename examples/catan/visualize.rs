@@ -402,7 +402,7 @@ fn format_steal_result(state: &GameState, hands_before: &[[u8; 5]; 2], lines: &m
 /// All actions in the log (both chance outcomes and player decisions) are
 /// replayed in order. The phase determines how each action is interpreted.
 pub fn render(log: &GameLog, output: &Path) {
-    let mut state = game::new_game(log.seed, Dice::Random);
+    let mut state = game::new_game(log.seed, Dice::default());
 
     let board = build_board(&state);
 
@@ -492,7 +492,7 @@ pub fn render_with_encoder(
     global_labels: Vec<String>,
     node_labels: Vec<String>,
 ) {
-    let mut state = game::new_game(log.seed, Dice::Random);
+    let mut state = game::new_game(log.seed, Dice::default());
     let board = build_board(&state);
 
     let global_len = global_labels.len();

@@ -101,5 +101,5 @@ fn main() {
 
     let matches = setup.command().get_matches();
 
-    setup.run(&matches, |_rng| PigGame::new(100));
+    setup.run(&matches, |_seed| PigGame::new(100));
 }

@@ -23,7 +23,7 @@ async fn bench_game_task<G: Game>(
     nn_losses: Arc<AtomicU32>,
     draws: Arc<AtomicU32>,
     pb: Arc<indicatif::ProgressBar>,
-    new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
+    new_state: Arc<dyn Fn(u64) -> G + Send + Sync>,
     seed: u64,
 ) {
     let mut rng = fastrand::Rng::with_seed(seed);
@@ -36,7 +36,7 @@ async fn bench_game_task<G: Game>(
         }
 
         let nn_sign = if i % 2 == 0 { 1.0f32 } else { -1.0 };
-        let mut state = new_state(&mut rng);
+        let mut state = new_state(rng.u64(..));
 
         let reward = play_bench_game(
             &mut state,
@@ -181,7 +181,7 @@ pub(super) fn run_benchmark<G>(
     encoder: Arc<dyn StateEncoder<G>>,
     config: &TrainConfig,
     rng: &mut fastrand::Rng,
-    new_state: &Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
+    new_state: &Arc<dyn Fn(u64) -> G + Send + Sync>,
     baseline: Arc<dyn Evaluator<G> + Sync>,
 ) -> (u32, u32, u32)
 where

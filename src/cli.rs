@@ -468,7 +468,7 @@ impl<G: Game + 'static> GameCli<G> {
     pub fn run_train(
         &self,
         matches: &ArgMatches,
-        new_state: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
+        new_state: impl Fn(u64) -> G + Send + Sync + 'static,
     ) {
         // Look up config
         let config_name = matches
@@ -535,18 +535,14 @@ impl<G: Game + 'static> GameCli<G> {
     pub fn run(
         &mut self,
         matches: &ArgMatches,
-        new_game: impl Fn(&mut fastrand::Rng) -> G + Send + Sync + 'static,
+        new_game: impl Fn(u64) -> G + Send + Sync + 'static,
     ) {
         if let Some(sub) = matches.subcommand_matches("train") {
             self.run_train(sub, new_game);
             return;
         }
         self.load_nn_evaluator(matches);
-        let new_game = std::sync::Arc::new(new_game);
-        self.run_tournament(matches, move |seed| {
-            let mut rng = fastrand::Rng::with_seed(seed);
-            new_game(&mut rng)
-        });
+        self.run_tournament(matches, new_game);
     }
 
     /// Parse tournament options and run.

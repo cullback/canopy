@@ -142,5 +142,5 @@ fn main() {
         Dice::Balanced(game::dice::BalancedDice::new())
     };
 
-    setup.run(&matches, move |rng| game::new_game(rng.u64(..), dice));
+    setup.run(&matches, move |seed| game::new_game(seed, dice));
 }

@@ -93,7 +93,7 @@ struct TaskContext<G: Game> {
     completed: Arc<AtomicU32>,
     pb: Arc<indicatif::ProgressBar>,
     batcher_stats: Arc<BatcherStats>,
-    new_state: Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
+    new_state: Arc<dyn Fn(u64) -> G + Send + Sync>,
     actor_config: Arc<ActorConfig>,
 }
 
@@ -108,7 +108,7 @@ pub(super) fn run_self_play_iteration<G>(
     effective_sims: u32,
     iteration: usize,
     rng: &mut fastrand::Rng,
-    new_state: &Arc<dyn Fn(&mut fastrand::Rng) -> G + Send + Sync>,
+    new_state: &Arc<dyn Fn(u64) -> G + Send + Sync>,
 ) -> IterGameResults
 where
     G: Game + 'static,
@@ -208,7 +208,7 @@ where
             join_set.spawn(async move {
                 let mut rng = fastrand::Rng::with_seed(seed);
                 let mut results = Vec::new();
-                let mut search = Search::new((ctx.new_state)(&mut rng), mcts_config);
+                let mut search = Search::new((ctx.new_state)(rng.u64(..)), mcts_config);
 
                 loop {
                     let claimed = ctx
@@ -218,7 +218,7 @@ where
                         break;
                     }
 
-                    search.reset((ctx.new_state)(&mut rng));
+                    search.reset((ctx.new_state)(rng.u64(..)));
                     let tx = ctx.request_tx.clone();
                     let game = play_game(
                         &mut search,

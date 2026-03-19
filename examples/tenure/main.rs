@@ -151,5 +151,7 @@ fn main() {
         return;
     }
 
-    setup.run(&matches, |rng| TenureGame::random(rng));
+    setup.run(&matches, |seed| {
+        TenureGame::random(&mut fastrand::Rng::with_seed(seed))
+    });
 }

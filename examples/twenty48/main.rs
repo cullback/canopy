@@ -261,5 +261,7 @@ fn main() {
         return;
     }
 
-    setup.run(&matches, |rng| Board::new(rng));
+    setup.run(&matches, |seed| {
+        Board::new(&mut fastrand::Rng::with_seed(seed))
+    });
 }
