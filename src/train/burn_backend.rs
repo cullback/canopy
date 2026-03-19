@@ -9,6 +9,8 @@ use burn::prelude::*;
 use burn::record::{FullPrecisionSettings, NamedMpkFileRecorder, Recorder};
 use burn::tensor::activation::log_softmax;
 
+use tracing_indicatif::span_ext::IndicatifSpanExt;
+
 use crate::game::Game;
 use crate::nn::{NeuralEvaluator, PolicyValueNet, StateEncoder};
 
@@ -185,7 +187,7 @@ where
         &mut self,
         samples: &[&Sample],
         cfg: &TrainStepConfig,
-        pb: &indicatif::ProgressBar,
+        span: &tracing::Span,
     ) -> (f32, f32, usize) {
         let feature_size = samples[0].features.len();
         let mut model = std::mem::replace(&mut self.model, (self.model_init)(&self.device));
@@ -231,7 +233,7 @@ where
             let grads = loss.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             model = self.optimizer.step(cfg.lr, model, grads);
-            pb.inc(1);
+            span.pb_inc(1);
         }
 
         self.model = model;
@@ -344,14 +346,16 @@ where
         let batches_per_epoch = (train_samples.len() + cfg.batch_size - 1) / cfg.batch_size;
         let total_batches = batches_per_epoch * cfg.epochs;
 
-        let pb = indicatif::ProgressBar::new(total_batches as u64);
-        pb.set_style(
-            indicatif::ProgressStyle::with_template(
-                "{bar:40.cyan/dim} {pos}/{len}  {msg}  [{elapsed_precise} elapsed, ETA {eta_precise}]",
+        let span = tracing::info_span!("training");
+        span.pb_set_style(
+            &indicatif::ProgressStyle::with_template(
+                "{bar:40.cyan/dim} {pos}/{len} {per_sec}  {msg}  [{elapsed} < {eta}]",
             )
             .unwrap(),
         );
-        pb.set_message("training");
+        span.pb_set_length(total_batches as u64);
+        span.pb_set_message("training");
+        span.pb_start();
 
         let mut final_train_ploss = 0.0f32;
         let mut final_train_vloss = 0.0f32;
@@ -360,7 +364,7 @@ where
         let mut total_gradient_steps = 0usize;
 
         for epoch in 0..cfg.epochs {
-            let (ploss, vloss, steps) = self.train_epoch(train_samples, cfg, &pb);
+            let (ploss, vloss, steps) = self.train_epoch(train_samples, cfg, &span);
             total_gradient_steps += steps;
 
             let (val_ploss, val_vloss) = self.validate(val_samples, cfg);
@@ -370,7 +374,7 @@ where
             final_val_ploss = val_ploss;
             final_val_vloss = val_vloss;
 
-            pb.set_message(format!(
+            span.pb_set_message(&format!(
                 "epoch {}/{} p={:.4} v={:.4} val_p={:.4} val_v={:.4}",
                 epoch + 1,
                 cfg.epochs,
@@ -380,8 +384,6 @@ where
                 val_vloss
             ));
         }
-
-        pb.finish();
 
         TrainMetrics {
             loss_policy_train: final_train_ploss,
@@ -421,10 +423,10 @@ where
                 let optimizer =
                     std::mem::replace(&mut self.optimizer, self.optim_config.clone().init());
                 self.optimizer = optimizer.load_record(optim_record);
-                eprintln!("restored optimizer state");
+                tracing::info!("restored optimizer state");
             }
             Err(_) => {
-                eprintln!("warning: no optimizer state found, starting fresh optimizer");
+                tracing::warn!("no optimizer state found, starting fresh optimizer");
             }
         }
     }

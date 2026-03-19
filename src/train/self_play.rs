@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
+use tracing_indicatif::span_ext::IndicatifSpanExt;
+
 use crate::eval::Evaluator;
 use crate::game::Game;
 use crate::mcts::Search;
@@ -91,7 +93,7 @@ struct TaskContext<G: Game> {
     encoder: Arc<dyn StateEncoder<G>>,
     games_remaining: Arc<AtomicU32>,
     completed: Arc<AtomicU32>,
-    pb: Arc<indicatif::ProgressBar>,
+    span: tracing::Span,
     batcher_stats: Arc<BatcherStats>,
     new_state: Arc<dyn Fn(u64) -> G + Send + Sync>,
     actor_config: Arc<ActorConfig>,
@@ -113,20 +115,22 @@ pub(super) fn run_self_play_iteration<G>(
 where
     G: Game + 'static,
 {
-    let pb = indicatif::ProgressBar::new(config.games_per_iter as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::with_template(
-            "{bar:40.cyan/dim} {pos}/{len}  {msg}  [{elapsed_precise} elapsed, ETA {eta_precise}]",
-        )
-        .unwrap(),
-    );
     let iter_label = format!(
         "iter {}/{} self-play (sims={})",
         iteration + 1,
         config.iterations,
         effective_sims,
     );
-    pb.set_message(iter_label.clone());
+    let span = tracing::info_span!("self_play");
+    span.pb_set_style(
+        &indicatif::ProgressStyle::with_template(
+            "{bar:40.cyan/dim} {pos}/{len} {per_sec}  {msg}  [{elapsed} < {eta}]",
+        )
+        .unwrap(),
+    );
+    span.pb_set_length(config.games_per_iter as u64);
+    span.pb_set_message(&iter_label);
+    span.pb_start();
 
     let mcts_config = crate::mcts::Config {
         num_simulations: effective_sims,
@@ -145,14 +149,13 @@ where
     // Actor → Batcher channel (tokio mpsc)
     let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * max_batch_size);
 
-    let pb = Arc::new(pb);
     let batcher_stats = Arc::new(BatcherStats::new());
     let ctx = Arc::new(TaskContext {
         request_tx,
         encoder,
         games_remaining: Arc::new(AtomicU32::new(config.games_per_iter as u32)),
         completed: Arc::new(AtomicU32::new(0)),
-        pb: pb.clone(),
+        span: span.clone(),
         batcher_stats: batcher_stats.clone(),
         new_state: new_state.clone(),
         actor_config: Arc::new(ActorConfig {
@@ -246,7 +249,7 @@ where
                     results.push(game);
 
                     let done = ctx.completed.fetch_add(1, Relaxed) + 1;
-                    ctx.pb.set_position(done as u64);
+                    ctx.span.pb_set_position(done as u64);
                 }
 
                 results
@@ -254,25 +257,26 @@ where
         }
 
         // Drop our copy so batcher sees disconnect when all tasks finish
-        let stats_pb = ctx.pb.clone();
+        let tick_span = ctx.span.clone();
         let stats_ref = ctx.batcher_stats.clone();
         drop(ctx);
 
         // Periodic stats tick so the user sees progress before any game finishes
         let tick_label = iter_label.clone();
+        let tick_start = std::time::Instant::now();
         let tick_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 let evals = stats_ref.evals.load(Relaxed);
                 let avg_batch = stats_ref.avg_batch_size();
-                let elapsed = stats_pb.elapsed().as_secs_f64();
+                let elapsed = tick_start.elapsed().as_secs_f64();
                 let evals_per_sec = if elapsed > 0.0 {
                     evals as f64 / elapsed
                 } else {
                     0.0
                 };
-                stats_pb.set_message(format!(
+                tick_span.pb_set_message(&format!(
                     "{tick_label}  avg_batch={avg_batch:.1}, evals/s={evals_per_sec:.0}"
                 ));
             }
@@ -291,7 +295,7 @@ where
         h.join().unwrap();
     }
 
-    pb.finish();
+    drop(span);
 
     IterGameResults::aggregate(game_results, &batcher_stats, concurrent_games)
 }

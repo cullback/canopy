@@ -12,6 +12,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
+use tracing::info;
 
 use crate::eval::{Evaluator, Evaluators};
 use crate::game::Game;
@@ -272,9 +273,11 @@ pub fn run_training<G>(
 {
     let baseline = evaluators.get_arc(&config.bench_eval);
     let new_state: Arc<dyn Fn(u64) -> G + Send + Sync> = Arc::new(new_state);
+    crate::init_logging();
+
     let (mut rng, start_iteration) = checkpoint::resume_if_requested(&config, model);
     let run_dir = checkpoint::setup_run_dir(&config);
-    eprintln!("run directory: {}", run_dir.display());
+    info!(path = %run_dir.display(), "run directory");
     checkpoint::save_config(&run_dir, &config);
 
     let mut csv = metrics::CsvLogger::open(&run_dir, start_iteration);
@@ -374,7 +377,7 @@ pub fn run_training<G>(
         } else {
             String::new()
         };
-        eprintln!(
+        info!(
             "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | tasks={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
             iters_done,
             config.iterations,

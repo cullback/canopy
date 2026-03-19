@@ -1,6 +1,8 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU32, Ordering::Relaxed};
 
+use tracing_indicatif::span_ext::IndicatifSpanExt;
+
 use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
 use crate::mcts::{Config, Search, Step};
@@ -22,7 +24,7 @@ async fn bench_game_task<G: Game>(
     nn_wins: Arc<AtomicU32>,
     nn_losses: Arc<AtomicU32>,
     draws: Arc<AtomicU32>,
-    pb: Arc<indicatif::ProgressBar>,
+    span: tracing::Span,
     new_state: Arc<dyn Fn(u64) -> G + Send + Sync>,
     seed: u64,
 ) {
@@ -66,8 +68,8 @@ async fn bench_game_task<G: Game>(
         let w = nn_wins.load(Relaxed);
         let l = nn_losses.load(Relaxed);
         let d = draws.load(Relaxed);
-        pb.set_message(format!("bench W:{w} L:{l} D:{d}"));
-        pb.inc(1);
+        span.pb_set_message(&format!("bench W:{w} L:{l} D:{d}"));
+        span.pb_inc(1);
     }
 }
 
@@ -202,15 +204,16 @@ where
     let draws = Arc::new(AtomicU32::new(0));
     let game_counter = Arc::new(AtomicU32::new(0));
 
-    let pb = indicatif::ProgressBar::new(config.bench_games as u64);
-    pb.set_style(
-        indicatif::ProgressStyle::with_template(
-            "{bar:40.cyan/dim} {pos}/{len}  {msg}  [{elapsed_precise} elapsed, ETA {eta_precise}]",
+    let span = tracing::info_span!("benchmark");
+    span.pb_set_style(
+        &indicatif::ProgressStyle::with_template(
+            "{bar:40.cyan/dim} {pos}/{len} {per_sec}  {msg}  [{elapsed} < {eta}]",
         )
         .unwrap(),
     );
-    pb.set_message("bench W:0 L:0 D:0".to_string());
-    let pb = Arc::new(pb);
+    span.pb_set_length(config.bench_games as u64);
+    span.pb_set_message("bench W:0 L:0 D:0");
+    span.pb_start();
 
     let concurrent_games = config.concurrent_games.min(config.bench_games as usize);
     let max_batch_size = config.max_batch_size;
@@ -265,7 +268,7 @@ where
                 nn_wins.clone(),
                 nn_losses.clone(),
                 draws.clone(),
-                pb.clone(),
+                span.clone(),
                 new_state.clone(),
                 seed,
             ));
@@ -283,7 +286,7 @@ where
     for h in worker_handles {
         h.join().unwrap();
     }
-    pb.finish();
+    drop(span);
 
     (
         nn_wins.load(Relaxed),

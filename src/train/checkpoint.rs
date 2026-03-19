@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::Serialize;
+use tracing::{info, warn};
 
 use super::{CheckpointMeta, TrainConfig, TrainableModel};
 use crate::game::Game;
@@ -33,14 +34,15 @@ pub(super) fn resume_if_requested<G: Game>(
             let meta: CheckpointMeta =
                 serde_json::from_slice(&meta_bytes).expect("failed to parse checkpoint metadata");
             rng = fastrand::Rng::with_seed(meta.rng_seed);
-            eprintln!(
-                "resumed from iteration {}, rng_seed={}",
-                meta.iteration, meta.rng_seed
+            info!(
+                iteration = meta.iteration,
+                rng_seed = meta.rng_seed,
+                "resumed from checkpoint"
             );
         } else {
-            eprintln!(
-                "warning: no checkpoint metadata at {}, using fresh RNG",
-                meta_path.display()
+            warn!(
+                path = %meta_path.display(),
+                "no checkpoint metadata found, using fresh RNG"
             );
         }
     }
@@ -91,8 +93,8 @@ pub(super) fn save_checkpoint<G: Game>(
     std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())
         .expect("failed to save checkpoint metadata");
 
-    eprintln!(
-        "checkpoint: {}",
-        run_dir.join(format!("model_iter_{iter_num}")).display()
+    info!(
+        path = %run_dir.join(format!("model_iter_{iter_num}")).display(),
+        "checkpoint saved"
     );
 }

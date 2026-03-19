@@ -171,10 +171,10 @@ fn migrate_csv(csv_path: &std::path::Path, header: &[String]) {
         return;
     }
 
-    eprintln!(
-        "migrating metrics.csv: {} -> {} columns",
-        old_header.len(),
-        header.len()
+    tracing::info!(
+        old_columns = old_header.len(),
+        new_columns = header.len(),
+        "migrating metrics.csv"
     );
 
     // Build mapping: for each canonical column, find its index in the old header (if any)

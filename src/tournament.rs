@@ -1,6 +1,8 @@
 use std::path::PathBuf;
 
-use indicatif::{ProgressBar, ProgressStyle};
+use indicatif::ProgressStyle;
+use tracing::info;
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use crate::eval::{Evaluator, Evaluators};
 use crate::game::{Game, Status};
@@ -29,8 +31,8 @@ impl TournamentOptions {
             registry.get(&self.eval_names[1]),
         ];
 
-        println!(
-            "=== Tournament: {} ({}) vs {} ({}) simulations, {} games ===\n",
+        info!(
+            "=== Tournament: {} ({}) vs {} ({}) simulations, {} games ===",
             self.eval_names[0],
             self.configs[0].num_simulations,
             self.eval_names[1],
@@ -128,11 +130,16 @@ pub fn tournament<G: Game>(
     let mut draws = 0u32;
     let mut game_logs = Vec::with_capacity(num_games as usize);
 
-    let pb = ProgressBar::new(num_games as u64);
-    pb.set_style(
-        ProgressStyle::with_template("{bar:30} {pos}/{len} | W {msg} | {elapsed} < {eta}").unwrap(),
+    let span = tracing::info_span!("tournament");
+    span.pb_set_style(
+        &ProgressStyle::with_template(
+            "{bar:30} {pos}/{len} {per_sec} | W {msg} | [{elapsed} < {eta}]",
+        )
+        .unwrap(),
     );
-    pb.set_message("0-0-0");
+    span.pb_set_length(num_games as u64);
+    span.pb_set_message("0-0-0");
+    span.pb_start();
 
     for i in 0..num_games {
         let swap = i % 2 == 1;
@@ -152,14 +159,14 @@ pub fn tournament<G: Game>(
             draws += 1;
         }
 
-        pb.set_message(format!("{}-{}-{}", wins[0], wins[1], draws));
-        pb.inc(1);
+        span.pb_set_message(&format!("{}-{}-{}", wins[0], wins[1], draws));
+        span.pb_inc(1);
     }
 
-    pb.finish();
+    drop(span);
 
     let total = num_games;
-    println!(
+    info!(
         "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%)",
         wins[0],
         total,
@@ -181,6 +188,6 @@ pub fn save_game_logs(logs: &[GameLog], dir: &std::path::Path) {
     for (i, log) in logs.iter().enumerate() {
         let path = dir.join(format!("game_{i}.log"));
         log.write(&path);
-        println!("Wrote {}", path.display());
+        info!("Wrote {}", path.display());
     }
 }
