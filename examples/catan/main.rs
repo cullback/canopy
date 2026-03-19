@@ -53,9 +53,7 @@ fn main() {
         TrainConfig {
             iterations: 1000,
             epochs: 2,
-            batch_size: 128,
             replay_window: 10,
-            games_per_iter: 100,
             bench_interval: 30,
             bench_sims: 50,
             ..TrainConfig::default()
@@ -67,10 +65,7 @@ fn main() {
             iterations: 1000,
             epochs: 3,
             lr: 0.001,
-            batch_size: 256,
             replay_window: 10,
-            games_per_iter: 150,
-            mcts_sims: 800,
             mcts_sims_start: 400,
             bench_games: 20,
             bench_interval: 10,
@@ -84,14 +79,20 @@ fn main() {
             iterations: 1000,
             epochs: 2,
             lr: 0.0005,
-            batch_size: 256,
             replay_window: 20,
-            games_per_iter: 150,
+            mcts_sims_start: 400,
+            ..TrainConfig::default()
+        },
+    );
+    setup.add_config(
+        "nexus",
+        TrainConfig {
+            iterations: 1000,
+            epochs: 2,
+            lr: 0.0005,
+            replay_window: 15,
             mcts_sims: 800,
             mcts_sims_start: 400,
-            bench_games: 20,
-            bench_interval: 20,
-            bench_sims: 800,
             ..TrainConfig::default()
         },
     );

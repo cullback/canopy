@@ -1,5 +1,6 @@
 .claude/
 .env
+rust-analyzer.toml
 target/
 perf.*
 logs/

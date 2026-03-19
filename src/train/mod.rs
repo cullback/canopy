@@ -161,9 +161,9 @@ impl Default for TrainConfig {
             leaf_batch_size: 16,
 
             // Benchmark
-            bench_games: 10,
+            bench_games: 20,
             bench_interval: 10,
-            bench_sims: 200,
+            bench_sims: 800,
             bench_eval: "rollout".to_string(),
         }
     }
