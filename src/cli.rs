@@ -121,6 +121,12 @@ pub fn train_command() -> Command {
                 .help("Self-play games per iteration"),
         )
         .arg(
+            Arg::new("concurrent-games")
+                .long("concurrent-games")
+                .default_value(d.concurrent_games.to_string())
+                .help("Maximum async game tasks running concurrently during self-play"),
+        )
+        .arg(
             Arg::new("simulations")
                 .long("simulations")
                 .default_value(d.mcts_sims.to_string())
@@ -569,6 +575,9 @@ pub fn parse_train_config(
     }
     if set("games") {
         config.games_per_iter = val("games").parse().unwrap();
+    }
+    if set("concurrent-games") {
+        config.concurrent_games = val("concurrent-games").parse().unwrap();
     }
     if set("simulations") {
         config.mcts_sims = val("simulations").parse().unwrap();
