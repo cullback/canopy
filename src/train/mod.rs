@@ -170,7 +170,7 @@ impl Default for TrainConfig {
             leaf_batch_size: 32,
 
             // Checkpointing
-            checkpoint_interval: 5,
+            checkpoint_interval: 1,
 
             // Benchmark
             bench_games: 20,
