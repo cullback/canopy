@@ -217,6 +217,7 @@ pub fn apply(state: &mut GameState, action: ActionId) {
         }
         _ => unreachable!("Invalid action id: {}", action.0),
     }
+    check_victory(state);
 }
 
 fn apply_settlement(state: &mut GameState, nid: NodeId) {
@@ -452,7 +453,6 @@ fn apply_build_road(state: &mut GameState, eid: EdgeId) {
     }
 
     update_longest_road(state);
-    check_victory(state);
 }
 
 fn apply_build_settlement(state: &mut GameState, nid: NodeId) {
@@ -482,7 +482,6 @@ fn apply_build_settlement(state: &mut GameState, nid: NodeId) {
     );
 
     update_longest_road(state);
-    check_victory(state);
 }
 
 fn apply_build_city(state: &mut GameState, nid: NodeId) {
@@ -495,8 +494,6 @@ fn apply_build_city(state: &mut GameState, nid: NodeId) {
     state.current_mut().settlements_left += 1;
     state.current_mut().cities_left -= 1;
     state.current_mut().building_vps += 1;
-
-    check_victory(state);
 }
 
 fn apply_buy_dev_card(state: &mut GameState) {
@@ -505,10 +502,6 @@ fn apply_buy_dev_card(state: &mut GameState) {
     let card = state.dev_deck.draw().unwrap();
     state.current_mut().dev_cards[card] += 1;
     state.current_mut().dev_cards_bought_this_turn[card] += 1;
-
-    if card == DevCardKind::VictoryPoint {
-        check_victory(state);
-    }
 }
 
 fn apply_play_knight(state: &mut GameState) {
