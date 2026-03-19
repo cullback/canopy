@@ -34,8 +34,6 @@ pub(super) struct InferBatch {
 pub(super) struct BatcherStats {
     pub batches: AtomicU64,
     pub evals: AtomicU64,
-    /// Current number of requests waiting in the queue.
-    pub queue_depth: AtomicU64,
 }
 
 impl BatcherStats {
@@ -43,7 +41,6 @@ impl BatcherStats {
         Self {
             batches: AtomicU64::new(0),
             evals: AtomicU64::new(0),
-            queue_depth: AtomicU64::new(0),
         }
     }
 
@@ -88,7 +85,6 @@ pub(super) fn batcher_loop(
             }
         }
 
-        stats.queue_depth.store(total_samples as u64, Relaxed);
         stats.evals.fetch_add(total_samples as u64, Relaxed);
         stats.batches.fetch_add(1, Relaxed);
 

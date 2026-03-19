@@ -120,12 +120,13 @@ where
         )
         .unwrap(),
     );
-    pb.set_message(format!(
+    let iter_label = format!(
         "iter {}/{} self-play (sims={})",
         iteration + 1,
         config.iterations,
         effective_sims,
-    ));
+    );
+    pb.set_message(iter_label.clone());
 
     let mcts_config = crate::mcts::Config {
         num_simulations: effective_sims,
@@ -246,17 +247,6 @@ where
 
                     let done = ctx.completed.fetch_add(1, Relaxed) + 1;
                     ctx.pb.set_position(done as u64);
-                    let avg_batch = ctx.batcher_stats.avg_batch_size();
-                    let evals = ctx.batcher_stats.evals.load(Relaxed);
-                    let elapsed = ctx.pb.elapsed().as_secs_f64();
-                    let evals_per_sec = if elapsed > 0.0 {
-                        evals as f64 / elapsed
-                    } else {
-                        0.0
-                    };
-                    ctx.pb.set_message(format!(
-                        "avg_batch={avg_batch:.1}, evals/s={evals_per_sec:.0}"
-                    ));
                 }
 
                 results
@@ -269,13 +259,13 @@ where
         drop(ctx);
 
         // Periodic stats tick so the user sees progress before any game finishes
+        let tick_label = iter_label.clone();
         let tick_handle = tokio::spawn(async move {
             let mut interval = tokio::time::interval(std::time::Duration::from_secs(1));
             loop {
                 interval.tick().await;
                 let evals = stats_ref.evals.load(Relaxed);
                 let avg_batch = stats_ref.avg_batch_size();
-                let queue = stats_ref.queue_depth.load(Relaxed);
                 let elapsed = stats_pb.elapsed().as_secs_f64();
                 let evals_per_sec = if elapsed > 0.0 {
                     evals as f64 / elapsed
@@ -283,7 +273,7 @@ where
                     0.0
                 };
                 stats_pb.set_message(format!(
-                    "avg_batch={avg_batch:.1}, queue={queue}, evals/s={evals_per_sec:.0}, total_evals={evals}"
+                    "{tick_label}  avg_batch={avg_batch:.1}, evals/s={evals_per_sec:.0}"
                 ));
             }
         });
