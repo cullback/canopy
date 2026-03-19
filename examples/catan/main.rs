@@ -112,10 +112,10 @@ fn main() {
         .command()
         .subcommand(viz)
         .arg(
-            Arg::new("balanced")
-                .long("balanced")
+            Arg::new("random-dice")
+                .long("random-dice")
                 .action(clap::ArgAction::SetTrue)
-                .help("Use balanced dice instead of random"),
+                .help("Use random dice instead of balanced (default)"),
         )
         .get_matches();
 
@@ -136,10 +136,10 @@ fn main() {
         return;
     }
 
-    let dice = if matches.get_flag("balanced") {
-        Dice::Balanced(game::dice::BalancedDice::new())
-    } else {
+    let dice = if matches.get_flag("random-dice") {
         Dice::Random
+    } else {
+        Dice::Balanced(game::dice::BalancedDice::new())
     };
 
     setup.run(&matches, move |rng| game::new_game(rng.u64(..), dice));

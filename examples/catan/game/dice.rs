@@ -13,7 +13,7 @@ pub enum Dice {
 
 impl Default for Dice {
     fn default() -> Self {
-        Dice::Random
+        Dice::Balanced(BalancedDice::new())
     }
 }
 
