@@ -537,6 +537,7 @@ impl<G: Game + 'static> GameCli<G> {
         matches: &ArgMatches,
         new_game: impl Fn(u64) -> G + Send + Sync + 'static,
     ) {
+        crate::init_logging();
         if let Some(sub) = matches.subcommand_matches("train") {
             self.run_train(sub, new_game);
             return;
