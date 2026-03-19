@@ -102,7 +102,7 @@ struct TaskContext<G: Game> {
 /// Shutdown: actors finish → drop mpsc sender → batcher exits → drops crossbeam
 /// sender → workers exit.
 pub(super) fn run_self_play_iteration<G>(
-    evaluator: Arc<dyn Evaluator<G> + Sync>,
+    evaluators: Vec<Arc<dyn Evaluator<G> + Sync>>,
     encoder: Arc<dyn StateEncoder<G>>,
     config: &TrainConfig,
     effective_sims: u32,
@@ -163,18 +163,22 @@ where
     });
 
     // Batcher → GPU workers channel (crossbeam SPMC, bounded to limit memory)
-    // Currently 1 worker; multi-GPU: clone evaluator per worker + spawn more.
     let (work_tx, work_rx) = crossbeam_channel::bounded(2);
 
-    let worker_handle = std::thread::spawn(move || {
-        gpu_worker_loop(
-            work_rx,
-            |features, batch_size, feature_size| {
-                evaluator.infer_features(features, batch_size, feature_size)
-            },
-            num_actions,
-        );
-    });
+    let mut worker_handles = Vec::new();
+    for evaluator in evaluators {
+        let rx = work_rx.clone();
+        worker_handles.push(std::thread::spawn(move || {
+            gpu_worker_loop(
+                rx,
+                |features, batch_size, feature_size| {
+                    evaluator.infer_features(features, batch_size, feature_size)
+                },
+                num_actions,
+            );
+        }));
+    }
+    drop(work_rx);
 
     let batcher_stats_ref = batcher_stats.clone();
     let batcher_handle = std::thread::spawn(move || {
@@ -269,7 +273,9 @@ where
     });
 
     batcher_handle.join().unwrap();
-    worker_handle.join().unwrap();
+    for h in worker_handles {
+        h.join().unwrap();
+    }
 
     pb.finish();
 

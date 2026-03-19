@@ -47,6 +47,21 @@ pub fn default_device() -> Device {
     Device::default()
 }
 
+/// Return the device for the `index`-th inference worker.
+///
+/// CUDA: maps to the GPU with that ordinal. Other backends: always the default device.
+pub fn inference_device(index: usize) -> Device {
+    #[cfg(feature = "cuda")]
+    {
+        burn::backend::cuda::CudaDevice::new(index)
+    }
+    #[cfg(not(feature = "cuda"))]
+    {
+        let _ = index;
+        Device::default()
+    }
+}
+
 /// Prepare batch tensors from a slice of samples.
 /// Returns (features, policy_targets, value_targets, mask, num_full) tensors.
 fn prepare_batch<B: Backend>(
@@ -303,6 +318,21 @@ where
             infer_model,
             self.device.clone(),
         ))
+    }
+
+    fn evaluators(
+        &self,
+        encoder: Arc<dyn StateEncoder<G>>,
+        count: usize,
+    ) -> Vec<Arc<dyn crate::eval::Evaluator<G> + Sync>> {
+        (0..count)
+            .map(|i| {
+                let device = inference_device(i);
+                let infer_model = self.model.valid().to_device(&device);
+                Arc::new(NeuralEvaluator::new(encoder.clone(), infer_model, device))
+                    as Arc<dyn crate::eval::Evaluator<G> + Sync>
+            })
+            .collect()
     }
 
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics {

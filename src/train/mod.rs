@@ -126,6 +126,10 @@ pub struct TrainConfig {
     /// Name of evaluator in the registry to use as benchmark opponent.
     #[serde(skip)]
     pub bench_eval: String,
+
+    /// Number of GPU inference workers for self-play and benchmark (default: 1).
+    #[serde(skip)]
+    pub inference_workers: usize,
 }
 
 impl Default for TrainConfig {
@@ -165,6 +169,7 @@ impl Default for TrainConfig {
             bench_interval: 10,
             bench_sims: 800,
             bench_eval: "rollout".to_string(),
+            inference_workers: 1,
         }
     }
 }
@@ -200,6 +205,15 @@ pub struct CheckpointMeta {
 
 pub trait TrainableModel<G: Game>: Send {
     fn evaluator(&self, encoder: Arc<dyn StateEncoder<G>>) -> Arc<dyn Evaluator<G> + Sync>;
+    fn evaluators(
+        &self,
+        encoder: Arc<dyn StateEncoder<G>>,
+        count: usize,
+    ) -> Vec<Arc<dyn Evaluator<G> + Sync>> {
+        (0..count)
+            .map(|_| self.evaluator(encoder.clone()))
+            .collect()
+    }
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics;
     fn save(&self, dir: &Path, iteration: usize);
     fn load(&mut self, dir: &Path, iteration: usize);
@@ -263,11 +277,11 @@ pub fn run_training<G>(
         let iter_start = Instant::now();
         let effective_lr = cosine_lr(&config, iteration);
         let effective_sims = progressive_sims(&config, iteration);
-        let evaluator = model.evaluator(encoder.clone());
+        let evaluators = model.evaluators(encoder.clone(), config.inference_workers);
 
         // Self-play
         let sp = self_play::run_self_play_iteration(
-            evaluator,
+            evaluators,
             encoder.clone(),
             &config,
             effective_sims,
@@ -312,9 +326,9 @@ pub fn run_training<G>(
             && iter_num % config.bench_interval == 0;
         let (bench_wins, bench_losses, bench_draws, bench_elapsed) = if run_bench {
             let bench_start = Instant::now();
-            let eval = model.evaluator(encoder.clone());
+            let evals = model.evaluators(encoder.clone(), config.inference_workers);
             let result = benchmark::run_benchmark(
-                eval,
+                evals,
                 encoder.clone(),
                 &config,
                 &mut rng,

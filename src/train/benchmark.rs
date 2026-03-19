@@ -168,7 +168,7 @@ async fn play_bench_game<G: Game>(
 /// Play benchmark games: NN evaluator vs baseline, alternating seats.
 /// Returns (nn_wins, nn_losses, draws).
 pub(super) fn run_benchmark<G>(
-    evaluator: Arc<dyn Evaluator<G> + Sync>,
+    evaluators: Vec<Arc<dyn Evaluator<G> + Sync>>,
     encoder: Arc<dyn StateEncoder<G>>,
     config: &TrainConfig,
     rng: &mut fastrand::Rng,
@@ -212,18 +212,23 @@ where
     let stats = Arc::new(BatcherStats::new());
     let stats_ref = stats.clone();
 
-    // Batcher → GPU worker channel (crossbeam SPMC, 1 worker for benchmark)
+    // Batcher → GPU worker channel (crossbeam SPMC)
     let (work_tx, work_rx) = crossbeam_channel::bounded(2);
 
-    let worker_handle = std::thread::spawn(move || {
-        gpu_worker_loop(
-            work_rx,
-            |features, batch_size, feature_size| {
-                evaluator.infer_features(features, batch_size, feature_size)
-            },
-            num_actions,
-        );
-    });
+    let mut worker_handles = Vec::new();
+    for evaluator in evaluators {
+        let rx = work_rx.clone();
+        worker_handles.push(std::thread::spawn(move || {
+            gpu_worker_loop(
+                rx,
+                |features, batch_size, feature_size| {
+                    evaluator.infer_features(features, batch_size, feature_size)
+                },
+                num_actions,
+            );
+        }));
+    }
+    drop(work_rx);
 
     let batcher_handle = std::thread::spawn(move || {
         batcher_loop(&mut request_rx, &work_tx, max_batch_size, &stats_ref);
@@ -266,7 +271,9 @@ where
     });
 
     batcher_handle.join().unwrap();
-    worker_handle.join().unwrap();
+    for h in worker_handles {
+        h.join().unwrap();
+    }
     pb.finish();
 
     (

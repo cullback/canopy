@@ -234,6 +234,12 @@ pub fn train_command() -> Command {
                 .default_value("rollout")
                 .help("Evaluator name for benchmark opponent"),
         )
+        .arg(
+            Arg::new("gpus")
+                .long("gpus")
+                .default_value("1")
+                .help("Number of GPUs for parallel inference during self-play"),
+        )
 }
 
 // ---------------------------------------------------------------------------
@@ -624,6 +630,9 @@ pub fn parse_train_config(
     }
     if set("bench-eval") {
         config.bench_eval = val("bench-eval");
+    }
+    if set("gpus") {
+        config.inference_workers = val("gpus").parse().unwrap();
     }
 
     config
