@@ -116,6 +116,11 @@ pub struct TrainConfig {
     /// Leaves to collect per MCTS batch before requesting evaluation.
     pub leaf_batch_size: u32,
 
+    // -- Checkpointing --
+    /// Save model checkpoint every N iterations (1 = every iteration).
+    /// The final iteration is always checkpointed regardless of this setting.
+    pub checkpoint_interval: usize,
+
     // -- Benchmark --
     /// Benchmark games against random-rollout bot (0 = skip).
     pub bench_games: u32,
@@ -163,6 +168,9 @@ impl Default for TrainConfig {
             c_visit: 50.0,
             c_scale: 1.0,
             leaf_batch_size: 16,
+
+            // Checkpointing
+            checkpoint_interval: 5,
 
             // Benchmark
             bench_games: 20,
@@ -318,7 +326,10 @@ pub fn run_training<G>(
 
         // Checkpoint
         let iter_num = iteration + 1;
-        checkpoint::save_checkpoint(model, &run_dir, iter_num, &mut rng);
+        let is_last = iter_num == config.iterations;
+        if is_last || iter_num % config.checkpoint_interval == 0 {
+            checkpoint::save_checkpoint(model, &run_dir, iter_num, &mut rng);
+        }
 
         // Benchmark
         let run_bench = config.bench_games > 0

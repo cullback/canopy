@@ -183,8 +183,10 @@ fn migrate_csv(csv_path: &std::path::Path, header: &[String]) {
         .map(|col| old_header.iter().position(|old| old == col))
         .collect();
 
+    // Write to a temp file first, then atomically rename to avoid data loss on crash.
+    let tmp_path = csv_path.with_extension("csv.tmp");
     let mut output = csv::Writer::from_writer(BufWriter::new(
-        std::fs::File::create(csv_path).expect("failed to rewrite metrics.csv"),
+        std::fs::File::create(&tmp_path).expect("failed to create temp metrics.csv"),
     ));
     // Write new header
     output.write_record(header).unwrap();
@@ -199,6 +201,8 @@ fn migrate_csv(csv_path: &std::path::Path, header: &[String]) {
         output.write_record(&row).unwrap();
     }
     output.flush().unwrap();
+    drop(output);
+    std::fs::rename(&tmp_path, csv_path).expect("failed to rename migrated metrics.csv");
 }
 
 impl CsvLogger {
@@ -228,7 +232,7 @@ impl CsvLogger {
 
     pub fn write_row(&mut self, row: &CsvRow) {
         self.writer.serialize(row).expect("failed to write CSV row");
-        self.writer.flush().ok();
+        self.writer.flush().expect("failed to flush metrics.csv");
     }
 }
 

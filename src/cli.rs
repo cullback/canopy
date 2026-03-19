@@ -165,6 +165,12 @@ pub fn train_command() -> Command {
                 .help("Iterations to ramp MCTS sims and Z→Q blend together"),
         )
         .arg(
+            Arg::new("checkpoint-interval")
+                .long("checkpoint-interval")
+                .default_value(d.checkpoint_interval.to_string())
+                .help("Save model checkpoint every N iterations (last iteration always saved)"),
+        )
+        .arg(
             Arg::new("bench-games")
                 .long("bench-games")
                 .default_value(d.bench_games.to_string())
@@ -594,6 +600,9 @@ pub fn parse_train_config(
     }
     if set("warmup-iters") {
         config.warmup_iters = val("warmup-iters").parse().unwrap();
+    }
+    if set("checkpoint-interval") {
+        config.checkpoint_interval = val("checkpoint-interval").parse().unwrap();
     }
     if set("bench-games") {
         config.bench_games = val("bench-games").parse().unwrap();
