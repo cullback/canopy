@@ -91,7 +91,7 @@ fn main() {
             games_per_iter: 200,
             epochs: 2,
             lr: 0.0005,
-            replay_window: 15,
+            replay_window: 10,
             mcts_sims: 800,
             mcts_sims_start: 400,
             leaf_batch_size: 32,

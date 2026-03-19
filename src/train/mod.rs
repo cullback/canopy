@@ -150,7 +150,7 @@ impl Default for TrainConfig {
             batch_size: 1024,
             lr: 0.001,
             lr_min: 0.0001,
-            replay_window: 40,
+            replay_window: 10,
             warmup_iters: 100,
 
             // Self-play
