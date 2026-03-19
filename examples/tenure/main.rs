@@ -12,10 +12,10 @@
 
 use clap::{Arg, Command};
 
-use canopy2::cli::GameCli;
-use canopy2::eval::RolloutEvaluator;
-use canopy2::game::{Game, Status};
-use canopy2::game_log::GameLog;
+use canopy::cli::GameCli;
+use canopy::eval::RolloutEvaluator;
+use canopy::game::{Game, Status};
+use canopy::game_log::GameLog;
 
 mod encoder;
 mod game;
@@ -78,7 +78,7 @@ impl Game for TenureGame {
 }
 
 fn main() {
-    use canopy2::train::TrainConfig;
+    use canopy::train::TrainConfig;
     use std::sync::Arc;
 
     let mut setup = GameCli::new("tenure", "Spencer's Attacker-Defender (Tenure) Game");

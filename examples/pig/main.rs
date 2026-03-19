@@ -8,9 +8,9 @@
 //! cargo run --example pig -- train --iterations 5 --games 20
 //! ```
 
-use canopy2::cli::GameCli;
-use canopy2::eval::RolloutEvaluator;
-use canopy2::game::{Game, Status};
+use canopy::cli::GameCli;
+use canopy::eval::RolloutEvaluator;
+use canopy::game::{Game, Status};
 
 mod encoder;
 mod game;
@@ -68,7 +68,7 @@ impl Game for PigGame {
 }
 
 fn main() {
-    use canopy2::train::TrainConfig;
+    use canopy::train::TrainConfig;
     use std::sync::Arc;
 
     let mut setup = GameCli::new("pig", "Pig dice game tournament between two MCTS bots");

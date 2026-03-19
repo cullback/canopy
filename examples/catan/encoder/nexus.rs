@@ -35,7 +35,7 @@
 //! | port_ratios   |     5 | per-resource trade improvement     |
 //! | road_slots    |     6 | 3 adj edges × 2 players            |
 
-use canopy2::nn::StateEncoder;
+use canopy::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
@@ -57,7 +57,7 @@ impl NexusEncoder {
 /// Push 16 trimmed extended per-player features: trade ratios (5) + per-number production (11).
 fn encode_player_ext_trimmed(
     state: &GameState,
-    player: canopy2::player::Player,
+    player: canopy::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
@@ -158,8 +158,8 @@ mod tests {
     use crate::game::dice::Dice;
     use crate::game::state::Phase;
     use crate::game::topology::Topology;
-    use canopy2::game::Game;
-    use canopy2::player::Player;
+    use canopy::game::Game;
+    use canopy::player::Player;
     use std::sync::Arc;
 
     fn make_state() -> GameState {

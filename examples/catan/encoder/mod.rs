@@ -65,7 +65,7 @@
 
 use std::collections::VecDeque;
 
-use canopy2::player::Player;
+use canopy::player::Player;
 
 use crate::game::board::{Node, Port};
 use crate::game::dice::Dice;

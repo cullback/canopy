@@ -1,7 +1,7 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
-use canopy2::game::Game;
-use canopy2::nn::PolicyValueNet;
+use canopy::game::Game;
+use canopy::nn::PolicyValueNet;
 
 use crate::encoder::TenureEncoder;
 use crate::game::TenureGame;

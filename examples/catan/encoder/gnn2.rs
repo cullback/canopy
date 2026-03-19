@@ -30,7 +30,7 @@
 //! | port_ratios              |     5 | Per-resource trade improvement      |
 //! | road_slot × 3 × 2       |     6 | Binary per player per adj edge      |
 
-use canopy2::nn::StateEncoder;
+use canopy::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
@@ -57,7 +57,7 @@ impl Gnn2Encoder {
 /// robbed production (5), per-number production (11).
 fn encode_player_extended(
     state: &GameState,
-    player: canopy2::player::Player,
+    player: canopy::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
@@ -198,8 +198,8 @@ mod tests {
     use crate::game::dice::Dice;
     use crate::game::state::Phase;
     use crate::game::topology::Topology;
-    use canopy2::game::Game;
-    use canopy2::player::Player;
+    use canopy::game::Game;
+    use canopy::player::Player;
     use std::sync::Arc;
 
     fn make_state() -> GameState {

@@ -1,9 +1,9 @@
 use serde::Serialize;
 use std::path::Path;
 
-use canopy2::game::Game;
-pub use canopy2::game_log::GameLog;
-use canopy2::player::Player;
+use canopy::game::Game;
+pub use canopy::game_log::GameLog;
+use canopy::player::Player;
 
 use crate::game;
 use crate::game::action::{
@@ -486,7 +486,7 @@ fn is_encodable_phase(state: &GameState) -> bool {
 
 /// Render a game log with per-frame encoder features embedded in the HTML.
 pub fn render_with_encoder(
-    encoder: &dyn canopy2::nn::StateEncoder<GameState>,
+    encoder: &dyn canopy::nn::StateEncoder<GameState>,
     log: &GameLog,
     output: &Path,
     global_labels: Vec<String>,

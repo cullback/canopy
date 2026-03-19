@@ -1,4 +1,4 @@
-use canopy2::player::Player;
+use canopy::player::Player;
 
 const INITIAL_DECK: [u8; 11] = [1, 2, 3, 4, 5, 6, 5, 4, 3, 2, 1];
 const TOTAL_CARDS: u8 = 36;

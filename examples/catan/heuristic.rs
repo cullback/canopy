@@ -1,4 +1,4 @@
-use canopy2::eval::{Evaluation, Evaluator};
+use canopy::eval::{Evaluation, Evaluator};
 
 use crate::game::action::{
     self, BUY_DEV_CARD, CITY_END, CITY_START, END_TURN, MARITIME_END, MARITIME_START, MONOPOLY_END,
@@ -22,7 +22,7 @@ use crate::game::state::GameState;
 /// - Everything else: baseline
 #[derive(Default)]
 pub struct HeuristicEvaluator {
-    pub rollout: canopy2::eval::RolloutEvaluator,
+    pub rollout: canopy::eval::RolloutEvaluator,
 }
 
 impl Evaluator<GameState> for HeuristicEvaluator {
@@ -106,15 +106,15 @@ mod tests {
     use super::*;
     use crate::game;
     use crate::game::dice::Dice;
-    use canopy2::eval::Evaluator;
-    use canopy2::game::Game;
-    use canopy2::player::Player;
+    use canopy::eval::Evaluator;
+    use canopy::game::Game;
+    use canopy::player::Player;
 
     #[test]
     fn heuristic_returns_bounded_value() {
         let state = game::new_game(42, Dice::default());
         let eval = HeuristicEvaluator {
-            rollout: canopy2::eval::RolloutEvaluator::default(),
+            rollout: canopy::eval::RolloutEvaluator::default(),
         };
         let mut rng = fastrand::Rng::with_seed(0);
         let out = eval.evaluate(&state, &mut rng);

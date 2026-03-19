@@ -1,4 +1,4 @@
-use canopy2::eval::{Evaluation, Evaluator};
+use canopy::eval::{Evaluation, Evaluator};
 
 use crate::game::{DESTROY_A, DESTROY_B, DONE, K, NUM_ACTIONS, Phase, TenureGame, optimal_value};
 

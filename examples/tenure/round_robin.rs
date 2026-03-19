@@ -1,11 +1,11 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use canopy2::eval::Evaluator;
-use canopy2::mcts::Config;
-use canopy2::nn::NeuralEvaluator;
-use canopy2::tournament::play_match;
-use canopy2::train::{InferBackend, default_device};
+use canopy::eval::Evaluator;
+use canopy::mcts::Config;
+use canopy::nn::NeuralEvaluator;
+use canopy::tournament::play_match;
+use canopy::train::{InferBackend, default_device};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use crate::encoder::TenureEncoder;

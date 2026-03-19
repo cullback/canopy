@@ -39,4 +39,4 @@ run example *args:
 
 # Sync project to a remote host (set VASTAI_HOST, VASTAI_USER, VASTAI_PORT in .env)
 sync:
-    rsync -avz --delete --filter=':- .gitignore' -e "ssh -p $VASTAI_PORT" . "$VASTAI_USER@$VASTAI_HOST:/workspace/canopy2/"
+    rsync -avz --delete --filter=':- .gitignore' -e "ssh -p $VASTAI_PORT" . "$VASTAI_USER@$VASTAI_HOST:/workspace/canopy/"

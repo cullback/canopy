@@ -15,11 +15,11 @@ use std::sync::Arc;
 use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
 
-use canopy2::cli::GameCli;
-use canopy2::eval::{Evaluation, RolloutEvaluator};
-use canopy2::game::{Game, Status};
-use canopy2::mcts::{Config, Search, Step};
-use canopy2::train::TrainConfig;
+use canopy::cli::GameCli;
+use canopy::eval::{Evaluation, RolloutEvaluator};
+use canopy::game::{Game, Status};
+use canopy::mcts::{Config, Search, Step};
+use canopy::train::TrainConfig;
 
 mod encoder;
 mod game;

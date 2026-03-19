@@ -12,10 +12,10 @@ use std::sync::Arc;
 
 use clap::{Arg, Command};
 
-use canopy2::cli::GameCli;
-use canopy2::eval::RolloutEvaluator;
-use canopy2::game_log::GameLog;
-use canopy2::train::TrainConfig;
+use canopy::cli::GameCli;
+use canopy::eval::RolloutEvaluator;
+use canopy::game_log::GameLog;
+use canopy::train::TrainConfig;
 
 mod encoder;
 mod game;

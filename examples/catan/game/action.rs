@@ -39,7 +39,7 @@
 //! |                 | RoadBuilding, YOP, Monopoly, MaritimeTrade                 |
 //! | RoadBuilding    | Road (or EndTurn if none legal / no roads left)            |
 
-use canopy2::player::Player;
+use canopy::player::Player;
 
 use super::board::{EdgeId, NodeId, TileId};
 use super::dev_card::DevCardKind;

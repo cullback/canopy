@@ -8,8 +8,8 @@ pub mod road;
 pub mod state;
 pub mod topology;
 
-use canopy2::game::{Game, Status};
-use canopy2::player::Player;
+use canopy::game::{Game, Status};
+use canopy::player::Player;
 
 use action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
@@ -148,7 +148,7 @@ impl Game for GameState {
     fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
         match self.phase {
             Phase::Roll => match &self.dice {
-                Dice::Random => canopy2::utils::sample_weighted(&DICE_WEIGHTS, rng),
+                Dice::Random => canopy::utils::sample_weighted(&DICE_WEIGHTS, rng),
                 Dice::Balanced(b) => Some(b.sample(self.current_player, rng)),
             },
             Phase::StealResolve => {
@@ -701,7 +701,7 @@ mod tests {
     use super::dice::Dice;
     use super::resource::{DEV_CARD_COST, Resource, SETTLEMENT_COST};
     use super::*;
-    use canopy2::game::Game;
+    use canopy::game::Game;
     use std::sync::Arc;
 
     fn make_state_with_seed(seed: u64) -> GameState {

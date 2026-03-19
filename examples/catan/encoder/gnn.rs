@@ -19,7 +19,7 @@
 //! | port_type one-hot (L/B/W/G/O/generic) |     6 | binary    |
 //! | road_slot per neighbor (×3×2 players) |     6 | binary    |
 
-use canopy2::nn::StateEncoder;
+use canopy::nn::StateEncoder;
 
 use crate::game::board::Port;
 use crate::game::state::GameState;
@@ -154,8 +154,8 @@ mod tests {
     use crate::game::dice::Dice;
     use crate::game::state::Phase;
     use crate::game::topology::Topology;
-    use canopy2::game::Game;
-    use canopy2::player::Player;
+    use canopy::game::Game;
+    use canopy::player::Player;
     use std::sync::Arc;
 
     fn make_state() -> GameState {

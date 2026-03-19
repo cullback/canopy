@@ -8,8 +8,8 @@ use std::sync::OnceLock;
 use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::{relu, tanh};
-use canopy2::game::Game;
-use canopy2::nn::PolicyValueNet;
+use canopy::game::Game;
+use canopy::nn::PolicyValueNet;
 
 use crate::game::state::GameState;
 use crate::game::topology::Topology;

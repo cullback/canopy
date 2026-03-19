@@ -2,7 +2,7 @@
 
 Each example lives in its own folder with at least two files:
 
-- **`game.rs`** — Standalone game implementation. No canopy2 imports. This should be portable code you could drop into any project.
+- **`game.rs`** — Standalone game implementation. No canopy imports. This should be portable code you could drop into any project.
 - **`main.rs`** — Implements `Game` trait for the game type, wires up CLI and tournament. Kept minimal to showcase what integration looks like.
 
 ## Game ideas

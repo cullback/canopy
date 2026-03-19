@@ -1,4 +1,4 @@
-use canopy2::eval::{Evaluation, Evaluator};
+use canopy::eval::{Evaluation, Evaluator};
 
 use crate::game::{self, PigGame};
 

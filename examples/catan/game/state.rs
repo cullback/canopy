@@ -1,7 +1,7 @@
 use std::fmt;
 use std::sync::Arc;
 
-use canopy2::player::{PerPlayer, Player};
+use canopy::player::{PerPlayer, Player};
 
 use super::board::TileId;
 use super::dev_card::{DevCardArray, DevCardDeck, DevCardKind};

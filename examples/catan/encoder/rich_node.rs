@@ -28,7 +28,7 @@
 //! | best_endpoint_production   | pips/13   | zeroed if endpoint occupied or adj-occupied |
 //! | best_endpoint_hop_distance | /5 capped | min hop_cur of two endpoints                |
 
-use canopy2::nn::StateEncoder;
+use canopy::nn::StateEncoder;
 
 use crate::game::board::Port;
 use crate::game::state::GameState;
@@ -236,8 +236,8 @@ mod tests {
     use crate::game::dice::Dice;
     use crate::game::state::Phase;
     use crate::game::topology::Topology;
-    use canopy2::game::Game;
-    use canopy2::player::Player;
+    use canopy::game::Game;
+    use canopy::player::Player;
     use std::sync::Arc;
 
     fn make_state() -> GameState {

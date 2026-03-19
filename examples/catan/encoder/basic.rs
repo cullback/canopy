@@ -1,4 +1,4 @@
-use canopy2::nn::StateEncoder;
+use canopy::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
@@ -116,7 +116,7 @@ mod tests {
     use crate::game::dev_card::DevCardDeck;
     use crate::game::dice::Dice;
     use crate::game::topology::Topology;
-    use canopy2::game::Game;
+    use canopy::game::Game;
     use std::sync::Arc;
 
     fn make_state() -> GameState {

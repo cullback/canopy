@@ -1,10 +1,10 @@
 [package]
-name = "canopy2"
+name = "canopy"
 version = "0.1.0"
 edition = "2024"
 
 [lib]
-name = "canopy2"
+name = "canopy"
 path = "src/lib.rs"
 
 [features]
@@ -26,7 +26,7 @@ serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
 
 [dev-dependencies]
-canopy2 = { path = ".", features = ["cli", "visualize", "nn"] }
+canopy = { path = ".", features = ["cli", "visualize", "nn"] }
 
 [[example]]
 name = "pig"
