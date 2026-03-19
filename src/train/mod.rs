@@ -147,7 +147,7 @@ impl Default for TrainConfig {
 
             // Training
             epochs: 3,
-            batch_size: 256,
+            batch_size: 1024,
             lr: 0.001,
             lr_min: 0.0001,
             replay_window: 40,
