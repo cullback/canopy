@@ -13,7 +13,6 @@
 use clap::{Arg, Command};
 
 use canopy::cli::GameCli;
-use canopy::eval::RolloutEvaluator;
 use canopy::game::{Game, Status};
 use canopy::game_log::GameLog;
 
@@ -82,7 +81,6 @@ fn main() {
     use std::sync::Arc;
 
     let mut setup = GameCli::new("tenure", "Spencer's Attacker-Defender (Tenure) Game");
-    setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("balanced-attacker", strategy::BalancedAttacker);
     setup.add_evaluator("optimal-defender", strategy::OptimalDefender);
 

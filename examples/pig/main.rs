@@ -4,12 +4,11 @@
 //! configurations playing the Pig dice game.
 //!
 //! ```text
-//! cargo run --example pig -- --p1-simulations 1000 --p2-simulations 5000
+//! cargo run --example pig -- --p1-sims 1000 --p2-sims 5000
 //! cargo run --example pig -- train --iterations 5 --games 20
 //! ```
 
 use canopy::cli::GameCli;
-use canopy::eval::RolloutEvaluator;
 use canopy::game::{Game, Status};
 
 mod encoder;
@@ -72,7 +71,6 @@ fn main() {
     use std::sync::Arc;
 
     let mut setup = GameCli::new("pig", "Pig dice game tournament between two MCTS bots");
-    setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("hold-at-20", strategy::HoldAt(20));
     setup.add_evaluator("erkp", strategy::EndRaceKeepPace);
 

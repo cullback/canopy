@@ -11,8 +11,8 @@ const PREFIXES: [&str; 2] = ["p1", "p2"];
 fn prefixed_args(prefix: &str) -> Vec<Arg> {
     let d = Config::default();
     vec![
-        Arg::new(format!("{prefix}-simulations"))
-            .long(format!("{prefix}-simulations"))
+        Arg::new(format!("{prefix}-sims"))
+            .long(format!("{prefix}-sims"))
             .default_value(d.num_simulations.to_string()),
         Arg::new(format!("{prefix}-gumbel-m"))
             .long(format!("{prefix}-gumbel-m"))
@@ -32,7 +32,7 @@ fn parse_one(matches: &ArgMatches, prefix: &str) -> Config {
         matches.get_one::<String>(&key).unwrap().clone()
     };
     Config {
-        num_simulations: get("simulations").parse().unwrap(),
+        num_simulations: get("sims").parse().unwrap(),
         num_sampled_actions: get("gumbel-m").parse().unwrap(),
         c_visit: get("c-visit").parse().unwrap(),
         c_scale: get("c-scale").parse().unwrap(),
@@ -289,10 +289,13 @@ pub struct GameCli<G: Game> {
 #[cfg(feature = "nn")]
 impl<G: Game + 'static> GameCli<G> {
     pub fn new(name: impl Into<String>, about: impl Into<String>) -> Self {
+        let mut evaluators = crate::eval::Evaluators::new();
+        evaluators.add("random", crate::eval::RandomEvaluator);
+        evaluators.add("rollout", crate::eval::RolloutEvaluator::default());
         Self {
             name: name.into(),
             about: about.into(),
-            evaluators: crate::eval::Evaluators::new(),
+            evaluators,
             encoders: Vec::new(),
             models: Vec::new(),
             configs: Vec::new(),

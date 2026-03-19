@@ -89,6 +89,7 @@ pub fn play_match<G: Game>(
 ) -> (f32, Vec<usize>) {
     let mut state = game.clone();
     let mut actions = Vec::new();
+    let mut action_buf = Vec::new();
 
     loop {
         match state.status() {
@@ -104,9 +105,17 @@ pub fn play_match<G: Game>(
             let idx = ((1.0 - state.current_sign()) / 2.0) as usize;
             let seat = idx ^ (swap as usize);
             let eval = evaluators[seat];
-            let config = configs[seat].clone();
-            let result = run_to_completion(&mut Search::new(state.clone(), config), eval, rng);
-            let action = result.selected_action;
+
+            let action = if configs[seat].num_simulations == 0 {
+                let eval_result = eval.evaluate(&state, rng);
+                action_buf.clear();
+                state.legal_actions(&mut action_buf);
+                crate::utils::sample_policy(&eval_result.policy_logits, &action_buf, rng)
+            } else {
+                let config = configs[seat].clone();
+                let result = run_to_completion(&mut Search::new(state.clone(), config), eval, rng);
+                result.selected_action
+            };
 
             actions.push(action);
             state.apply_action(action);
@@ -163,11 +172,12 @@ pub fn tournament<G: Game>(
         span.pb_inc(1);
     }
 
+    let total = num_games;
+    let elapsed = crate::utils::HumanDuration(span.pb_elapsed());
     drop(span);
 
-    let total = num_games;
     info!(
-        "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%)",
+        "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%) | {elapsed}",
         wins[0],
         total,
         wins[0] as f32 / total as f32 * 100.0,

@@ -50,6 +50,15 @@ pub trait Evaluator<G: Game>: Send {
     }
 }
 
+/// Instant evaluator: uniform policy, zero value. No rollout, no cloning.
+pub struct RandomEvaluator;
+
+impl<G: Game> Evaluator<G> for RandomEvaluator {
+    fn evaluate(&self, _state: &G, _rng: &mut fastrand::Rng) -> Evaluation {
+        Evaluation::uniform(G::NUM_ACTIONS, 0.0)
+    }
+}
+
 /// Default evaluator: random rollouts with uniform policy logits.
 #[derive(Clone)]
 pub struct RolloutEvaluator {

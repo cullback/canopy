@@ -29,6 +29,20 @@ pub fn sample_weighted(items: &[(usize, u32)], rng: &mut fastrand::Rng) -> Optio
     items.last().map(|&(item, _)| item)
 }
 
+/// Softmax over legal actions, then weighted sample.
+pub fn sample_policy(logits: &[f32], legal_actions: &[usize], rng: &mut fastrand::Rng) -> usize {
+    let probs = softmax_masked(logits, legal_actions);
+    let r: f32 = rng.f32();
+    let mut cumulative = 0.0;
+    for (i, &p) in probs.iter().enumerate() {
+        cumulative += p;
+        if r < cumulative {
+            return legal_actions[i];
+        }
+    }
+    *legal_actions.last().unwrap()
+}
+
 pub struct HumanDuration(pub std::time::Duration);
 
 impl fmt::Display for HumanDuration {

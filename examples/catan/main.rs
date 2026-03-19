@@ -3,7 +3,7 @@
 //! Runs a head-to-head tournament between two MCTS bots playing Catan.
 //!
 //! ```text
-//! cargo run --example catan -- --p1-simulations 200 --p2-simulations 1000
+//! cargo run --example catan -- --p1-sims 200 --p2-sims 1000
 //! cargo run --example catan -- visualize logs/game_0.log
 //! cargo run --example catan -- train --iterations 10 --games 20
 //! ```
@@ -13,7 +13,6 @@ use std::sync::Arc;
 use clap::{Arg, Command};
 
 use canopy::cli::GameCli;
-use canopy::eval::RolloutEvaluator;
 use canopy::game_log::GameLog;
 use canopy::train::TrainConfig;
 
@@ -29,7 +28,6 @@ use model::{init_gnn, init_gnn_with, init_nexus_with, init_resnet, init_simple, 
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
-    setup.add_evaluator("rollout", RolloutEvaluator::default());
     setup.add_evaluator("heuristic", heuristic::HeuristicEvaluator::default());
 
     // Encoders

@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --example twenty48 -- solo -n 10 --simulations 100 --eval rollout
-//! cargo run --example twenty48 -- --p1-simulations 200 --p2-simulations 200
+//! cargo run --example twenty48 -- --p1-sims 200 --p2-sims 200
 //! cargo run --example twenty48 -- train --iterations 5 --games 20
 //! ```
 
@@ -16,7 +16,7 @@ use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use canopy::cli::GameCli;
-use canopy::eval::{Evaluation, RolloutEvaluator};
+use canopy::eval::Evaluation;
 use canopy::game::{Game, Status};
 use canopy::mcts::{Config, Search, Step};
 use canopy::train::TrainConfig;
@@ -229,8 +229,6 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameCli<Board>) {
 
 fn main() {
     let mut setup = GameCli::new("twenty48", "2048 tile-sliding game");
-    setup.add_evaluator("rollout", RolloutEvaluator::default());
-
     setup.add_encoder("default", Arc::new(encoder::Twenty48Encoder));
     setup.add_model("default", model::init_twenty48);
     setup.add_config(
