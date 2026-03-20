@@ -1,15 +1,16 @@
-//! # NexusEncoder (928 features)
+//! # NexusEncoder (940 features)
 //!
 //! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
 //!
-//! ## Global (93 features)
+//! ## Global (105 features)
 //!
-//! | Block                  | Count | Source                    |
-//! |------------------------|-------|---------------------------|
-//! | Phase one-hot          |     7 | `encode_phase` (shared)   |
-//! | Per-player std × 2     |    42 | `encode_player` (shared)  |
-//! | Per-player ext × 2     |    32 | `encode_player_ext_trim`  |
-//! | Dice state             |    12 | `encode_dice` (shared)    |
+//! | Block                  | Count | Source                         |
+//! |------------------------|-------|--------------------------------|
+//! | Phase one-hot          |     7 | `encode_phase` (shared)        |
+//! | Per-player std × 2     |    42 | `encode_player` (shared)       |
+//! | Per-player ext × 2     |    32 | `encode_player_ext_trim`       |
+//! | Dice state             |    12 | `encode_dice` (shared)         |
+//! | Per-player dev extra×2 |    12 | `encode_player_dev_extra`      |
 //!
 //! ### Per-player extended trimmed (16)
 //!
@@ -41,15 +42,15 @@ use crate::game::state::GameState;
 
 use super::{
     PIPS, encode_dice, encode_per_number_production, encode_phase, encode_player,
-    encode_port_ratios, encode_road_slots, node_value, tile_numbers,
+    encode_player_dev_extra, encode_port_ratios, encode_road_slots, node_value, tile_numbers,
 };
 
 pub struct NexusEncoder;
 
 #[allow(dead_code)]
 impl NexusEncoder {
-    pub const FEATURE_SIZE: usize = 928;
-    pub const GLOBAL_LEN: usize = 93;
+    pub const FEATURE_SIZE: usize = 940;
+    pub const GLOBAL_LEN: usize = 105;
     pub const TILES_F: usize = 7;
     pub const NODES_F: usize = 13;
 }
@@ -98,6 +99,10 @@ impl StateEncoder<GameState> for NexusEncoder {
 
         // Dice state (12)
         encode_dice(state, out);
+
+        // Per-player dev extra (6 × 2 = 12)
+        encode_player_dev_extra(state, current, out);
+        encode_player_dev_extra(state, opp, out);
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);
 
@@ -237,7 +242,7 @@ mod tests {
     }
 
     // ── Feature offset helpers ───────────────────────────────────────
-    const GLOBAL_OFF: usize = 93;
+    const GLOBAL_OFF: usize = 105;
     const TILES_OFF: usize = GLOBAL_OFF + 19 * 7; // 93 + 133 = 226
     const NODES_OFF: usize = TILES_OFF; // tiles end = nodes start... no:
     // tiles: 93..226, nodes: 226..928

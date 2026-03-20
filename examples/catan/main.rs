@@ -44,7 +44,7 @@ fn main() {
     setup.add_model("resnet", init_resnet);
     setup.add_model("gnn", init_gnn);
     setup.add_model("gnn2", init_gnn_with::<_, 101, 34>);
-    setup.add_model("nexus", init_nexus_with::<_, 93, 7, 13>);
+    setup.add_model("nexus", init_nexus_with::<_, 105, 7, 13>);
 
     // Configs
     setup.add_config(
@@ -91,7 +91,7 @@ fn main() {
             epochs: 2,
             lr: 0.0005,
             replay_window: 10,
-            mcts_sims: 2500,
+            mcts_sims: 3000,
             mcts_sims_start: 400,
             leaf_batch_size: 32,
             bench_games: 0,

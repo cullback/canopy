@@ -1271,7 +1271,8 @@ mod tests {
     fn robber_must_move_to_different_tile() {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
-        // Disable friendly robber so all non-current tiles are legal
+        // Disable friendly robber for both players so all non-current tiles are legal
+        state.players[Player::One].building_vps = FRIENDLY_ROBBER_VP;
         state.players[Player::Two].building_vps = FRIENDLY_ROBBER_VP;
         state.phase = Phase::MoveRobber;
 
