@@ -48,6 +48,7 @@ fn main() {
             replay_window: 30,
             mcts_sims: 3000,
             mcts_sims_start: 400,
+            train_batch_size: 4096,
             leaf_batch_size: 32,
             bench_games: 0,
             ..TrainConfig::default()
