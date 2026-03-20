@@ -111,7 +111,7 @@ impl<G: Game> Evaluators<G> {
     }
 
     /// Look up an evaluator by name. Panics with available names on miss.
-    pub fn get(&self, name: &str) -> &dyn Evaluator<G> {
+    pub fn get(&self, name: &str) -> &(dyn Evaluator<G> + Sync) {
         for (n, e) in &self.entries {
             if n == name {
                 return &**e;

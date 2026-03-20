@@ -2,7 +2,7 @@ mod benchmark;
 mod burn_backend;
 mod checkpoint;
 mod game;
-mod inference;
+pub mod inference;
 mod metrics;
 mod self_play;
 

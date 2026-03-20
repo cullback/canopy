@@ -1,4 +1,6 @@
 use std::path::PathBuf;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use indicatif::ProgressStyle;
 use tracing::info;
@@ -21,12 +23,12 @@ impl TournamentOptions {
     /// Run a full tournament: print banner, play games, print results, save logs.
     pub fn run<G: Game>(
         &self,
-        new_game: impl Fn(u64) -> G,
+        new_game: impl Fn(u64) -> G + Sync,
         registry: &Evaluators<G>,
     ) -> Vec<GameLog> {
         let mut rng = fastrand::Rng::new();
 
-        let evaluators: [&dyn Evaluator<G>; 2] = [
+        let evaluators: [&(dyn Evaluator<G> + Sync); 2] = [
             registry.get(&self.eval_names[0]),
             registry.get(&self.eval_names[1]),
         ];
@@ -82,7 +84,7 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
 /// the game's P1 uses `configs[1]` and vice versa.
 pub fn play_match<G: Game>(
     game: &G,
-    evaluators: &[&dyn Evaluator<G>; 2],
+    evaluators: &[&(dyn Evaluator<G> + Sync); 2],
     configs: &[Config; 2],
     swap: bool,
     rng: &mut fastrand::Rng,
@@ -128,16 +130,18 @@ pub fn play_match<G: Game>(
 /// `new_game` is a factory that creates a fresh game state from a seed.
 /// Even-numbered games use the original seat assignment;
 /// odd-numbered games swap which config plays as P1.
+/// Games run in parallel across available CPU cores.
 pub fn tournament<G: Game>(
-    new_game: impl Fn(u64) -> G,
-    evaluators: &[&dyn Evaluator<G>; 2],
+    new_game: impl Fn(u64) -> G + Sync,
+    evaluators: &[&(dyn Evaluator<G> + Sync); 2],
     configs: &[Config; 2],
     num_games: u32,
     rng: &mut fastrand::Rng,
 ) -> Vec<GameLog> {
-    let mut wins: [u32; 2] = [0, 0];
-    let mut draws = 0u32;
-    let mut game_logs = Vec::with_capacity(num_games as usize);
+    let n = num_games as usize;
+
+    // Pre-generate all seeds for deterministic results regardless of thread count.
+    let seeds: Vec<u64> = (0..n).map(|_| rng.u64(..)).collect();
 
     let span = tracing::info_span!("tournament");
     span.pb_set_style(
@@ -150,46 +154,194 @@ pub fn tournament<G: Game>(
     span.pb_set_message("0-0-0");
     span.pb_start();
 
-    for i in 0..num_games {
-        let swap = i % 2 == 1;
-        let seed = rng.u64(..);
-        let game = new_game(seed);
-        let (reward, actions) = play_match(&game, evaluators, configs, swap, rng);
-        game_logs.push(GameLog { seed, actions });
+    // Shared state for parallel workers.
+    let next_game = AtomicUsize::new(0);
+    let wins = [AtomicUsize::new(0), AtomicUsize::new(0)];
+    let draw_count = AtomicUsize::new(0);
+    let results: Mutex<Vec<Option<GameLog>>> = Mutex::new((0..n).map(|_| None).collect());
 
-        // Map reward back to seat 0's perspective
-        let seat0_reward = if swap { -reward } else { reward };
+    let num_workers = std::thread::available_parallelism()
+        .map(|p| p.get())
+        .unwrap_or(1);
 
-        if seat0_reward > 0.0 {
-            wins[0] += 1;
-        } else if seat0_reward < 0.0 {
-            wins[1] += 1;
-        } else {
-            draws += 1;
+    std::thread::scope(|s| {
+        for _ in 0..num_workers {
+            s.spawn(|| {
+                loop {
+                    let i = next_game.fetch_add(1, Ordering::Relaxed);
+                    if i >= n {
+                        break;
+                    }
+                    let swap = i % 2 == 1;
+                    let seed = seeds[i];
+                    let mut thread_rng = fastrand::Rng::with_seed(seed);
+                    let game = new_game(seed);
+                    let (reward, actions) =
+                        play_match(&game, evaluators, configs, swap, &mut thread_rng);
+
+                    results.lock().unwrap()[i] = Some(GameLog { seed, actions });
+
+                    // Update progress counters.
+                    let seat0_reward = if swap { -reward } else { reward };
+                    if seat0_reward > 0.0 {
+                        wins[0].fetch_add(1, Ordering::Relaxed);
+                    } else if seat0_reward < 0.0 {
+                        wins[1].fetch_add(1, Ordering::Relaxed);
+                    } else {
+                        draw_count.fetch_add(1, Ordering::Relaxed);
+                    }
+
+                    let w0 = wins[0].load(Ordering::Relaxed);
+                    let w1 = wins[1].load(Ordering::Relaxed);
+                    let d = draw_count.load(Ordering::Relaxed);
+                    span.pb_set_message(&format!("{w0}-{w1}-{d}"));
+                    span.pb_inc(1);
+                }
+            });
         }
+    });
 
-        span.pb_set_message(&format!("{}-{}-{}", wins[0], wins[1], draws));
-        span.pb_inc(1);
-    }
+    let game_logs: Vec<GameLog> = results
+        .into_inner()
+        .unwrap()
+        .into_iter()
+        .map(|opt| opt.unwrap())
+        .collect();
 
+    let w0 = wins[0].load(Ordering::Relaxed);
+    let w1 = wins[1].load(Ordering::Relaxed);
+    let d = draw_count.load(Ordering::Relaxed);
     let total = num_games;
     let elapsed = crate::utils::HumanDuration(span.pb_elapsed());
     drop(span);
 
     info!(
         "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%) | {elapsed}",
-        wins[0],
+        w0,
         total,
-        wins[0] as f32 / total as f32 * 100.0,
-        wins[1],
+        w0 as f32 / total as f32 * 100.0,
+        w1,
         total,
-        wins[1] as f32 / total as f32 * 100.0,
-        draws,
+        w1 as f32 / total as f32 * 100.0,
+        d,
         total,
-        draws as f32 / total as f32 * 100.0,
+        d as f32 / total as f32 * 100.0,
     );
 
     game_logs
+}
+
+// ---------------------------------------------------------------------------
+// BatchedEvaluator — transparent batching wrapper for nn evaluators
+// ---------------------------------------------------------------------------
+
+/// Wraps an nn evaluator + encoder pair, routing inference through a shared
+/// batcher pipeline via blocking channel sends/receives. Implements
+/// `Evaluator<G>` so it's transparent to `play_match` / `tournament`.
+#[cfg(feature = "nn")]
+pub struct BatchedEvaluator<G: Game> {
+    evaluator: std::sync::Arc<dyn Evaluator<G> + Sync>,
+    encoder: std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
+    request_tx: tokio::sync::mpsc::Sender<crate::train::inference::InferRequest>,
+}
+
+#[cfg(feature = "nn")]
+impl<G: Game> BatchedEvaluator<G> {
+    pub fn new(
+        evaluator: std::sync::Arc<dyn Evaluator<G> + Sync>,
+        encoder: std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
+        request_tx: tokio::sync::mpsc::Sender<crate::train::inference::InferRequest>,
+    ) -> Self {
+        Self {
+            evaluator,
+            encoder,
+            request_tx,
+        }
+    }
+}
+
+#[cfg(feature = "nn")]
+impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
+    fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> crate::eval::Evaluation {
+        self.evaluate_batch(&[state], rng).pop().unwrap()
+    }
+
+    fn evaluate_batch(
+        &self,
+        states: &[&G],
+        _rng: &mut fastrand::Rng,
+    ) -> Vec<crate::eval::Evaluation> {
+        use crate::eval::Evaluation;
+        use crate::train::inference::{InferRequest, InferResponse};
+
+        let feature_size = self.encoder.feature_size();
+        let num_actions = G::NUM_ACTIONS;
+
+        let mut signs = Vec::with_capacity(states.len());
+        let mut nn_indices = Vec::new();
+        let mut results: Vec<Option<Evaluation>> = (0..states.len()).map(|_| None).collect();
+
+        for (i, state) in states.iter().enumerate() {
+            match state.status() {
+                Status::Terminal(reward) => {
+                    results[i] = Some(Evaluation::uniform(num_actions, reward));
+                }
+                Status::Ongoing => {
+                    signs.push(state.current_sign());
+                    nn_indices.push(i);
+                }
+            }
+        }
+
+        if nn_indices.is_empty() {
+            return results.into_iter().map(|r| r.unwrap()).collect();
+        }
+
+        // Encode ongoing states
+        let n = nn_indices.len();
+        let mut flat_features = Vec::with_capacity(n * feature_size);
+        let mut buf = Vec::with_capacity(feature_size);
+        for &i in &nn_indices {
+            buf.clear();
+            self.encoder.encode(states[i], &mut buf);
+            flat_features.extend_from_slice(&buf);
+        }
+
+        // Send to batcher and wait for response
+        let (tx, rx) = tokio::sync::oneshot::channel::<InferResponse>();
+        self.request_tx
+            .blocking_send(InferRequest {
+                flat_features,
+                batch_size: n,
+                response_tx: tx,
+            })
+            .expect("batcher channel closed");
+
+        let resp = rx.blocking_recv().expect("batcher response channel closed");
+
+        // Unpack response with sign correction
+        for (j, &i) in nn_indices.iter().enumerate() {
+            let logits_start = j * num_actions;
+            let logits = resp.flat_policy_logits[logits_start..logits_start + num_actions].to_vec();
+            let value = resp.values[j] * signs[j];
+            results[i] = Some(Evaluation {
+                policy_logits: logits,
+                value,
+            });
+        }
+
+        results.into_iter().map(|r| r.unwrap()).collect()
+    }
+
+    fn infer_features(
+        &self,
+        features: Vec<f32>,
+        batch_size: usize,
+        feature_size: usize,
+    ) -> (Vec<f32>, Vec<f32>) {
+        self.evaluator
+            .infer_features(features, batch_size, feature_size)
+    }
 }
 
 /// Write game logs to a directory, one file per game.

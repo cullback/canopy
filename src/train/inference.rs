@@ -1,18 +1,22 @@
+use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
 
 use tokio::sync::mpsc;
 
+use crate::eval::Evaluator;
+use crate::game::Game;
+
 /// A pre-encoded inference request sent from an async game task to the batcher.
 /// Game-independent: carries raw features, not game states.
 /// May contain multiple samples (a leaf batch) in a single request.
-pub(super) struct InferRequest {
+pub struct InferRequest {
     pub flat_features: Vec<f32>,
     pub batch_size: usize,
     pub response_tx: tokio::sync::oneshot::Sender<InferResponse>,
 }
 
 /// Raw inference result returned from the batcher to a game task.
-pub(super) struct InferResponse {
+pub struct InferResponse {
     /// Flat policy logits for all samples in the request.
     pub flat_policy_logits: Vec<f32>,
     /// One value per sample.
@@ -20,10 +24,10 @@ pub(super) struct InferResponse {
 }
 
 /// Sender half of the bounded inference request channel.
-pub(super) type InferSender = mpsc::Sender<InferRequest>;
+pub type InferSender = mpsc::Sender<InferRequest>;
 
 /// A batch of inference requests ready for GPU execution.
-pub(super) struct InferBatch {
+pub struct InferBatch {
     flat_features: Vec<f32>,
     feature_size: usize,
     /// One entry per original request: (oneshot sender, number of samples in that request).
@@ -31,7 +35,7 @@ pub(super) struct InferBatch {
 }
 
 /// Shared atomic counters updated by the batcher, read by tasks for live stats.
-pub(super) struct BatcherStats {
+pub struct BatcherStats {
     pub batches: AtomicU64,
     pub evals: AtomicU64,
 }
@@ -55,7 +59,7 @@ impl BatcherStats {
 /// forms batches, and dispatches them to GPU workers via a crossbeam SPMC queue.
 ///
 /// Pure routing — no model or GPU knowledge.
-pub(super) fn batcher_loop(
+pub fn batcher_loop(
     request_rx: &mut mpsc::Receiver<InferRequest>,
     work_tx: &crossbeam_channel::Sender<InferBatch>,
     inference_batch_size: usize,
@@ -114,7 +118,7 @@ pub(super) fn batcher_loop(
 ///
 /// Each worker owns its own evaluator clone and runs on a dedicated thread.
 /// Work-stealing is natural: the fastest GPU takes the next batch.
-pub(super) fn gpu_worker_loop(
+pub fn gpu_worker_loop(
     batches: crossbeam_channel::Receiver<InferBatch>,
     infer_fn: impl Fn(Vec<f32>, usize, usize) -> (Vec<f32>, Vec<f32>),
     num_actions: usize,
@@ -133,6 +137,70 @@ pub(super) fn gpu_worker_loop(
                 values,
             });
             offset += count;
+        }
+    }
+}
+
+/// Manages batcher + GPU worker threads for shared inference.
+///
+/// Spawn with [`start`](Self::start), clone senders with [`sender`](Self::sender),
+/// then call [`join`](Self::join) after dropping all senders / `BatchedEvaluator`s.
+pub struct InferencePipeline {
+    request_tx: mpsc::Sender<InferRequest>,
+    batcher_handle: std::thread::JoinHandle<()>,
+    worker_handles: Vec<std::thread::JoinHandle<()>>,
+}
+
+impl InferencePipeline {
+    /// Spawn one batcher thread and one GPU worker thread per evaluator.
+    pub fn start<G: Game + 'static>(
+        evaluators: Vec<Arc<dyn Evaluator<G> + Sync>>,
+        inference_batch_size: usize,
+    ) -> Self {
+        let num_actions = G::NUM_ACTIONS;
+        let (request_tx, mut request_rx) = mpsc::channel(2 * inference_batch_size);
+        let (work_tx, work_rx) = crossbeam_channel::bounded(2);
+        let stats = Arc::new(BatcherStats::new());
+        let stats_ref = stats.clone();
+
+        let batcher_handle = std::thread::spawn(move || {
+            batcher_loop(&mut request_rx, &work_tx, inference_batch_size, &stats_ref);
+        });
+
+        let mut worker_handles = Vec::new();
+        for evaluator in evaluators {
+            let rx = work_rx.clone();
+            worker_handles.push(std::thread::spawn(move || {
+                gpu_worker_loop(
+                    rx,
+                    |features, batch_size, feature_size| {
+                        evaluator.infer_features(features, batch_size, feature_size)
+                    },
+                    num_actions,
+                );
+            }));
+        }
+        drop(work_rx);
+
+        Self {
+            request_tx,
+            batcher_handle,
+            worker_handles,
+        }
+    }
+
+    /// Clone the request sender (for `BatchedEvaluator` construction).
+    pub fn sender(&self) -> mpsc::Sender<InferRequest> {
+        self.request_tx.clone()
+    }
+
+    /// Shut down the pipeline: drop sender, join all threads.
+    /// All `BatchedEvaluator`s using this pipeline must be dropped first.
+    pub fn join(self) {
+        drop(self.request_tx);
+        self.batcher_handle.join().unwrap();
+        for h in self.worker_handles {
+            h.join().unwrap();
         }
     }
 }

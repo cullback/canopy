@@ -99,7 +99,7 @@ pub fn run(dir: &Path, num_games: u32, simulations: u32) {
                 contestants[i].name, contestants[j].name
             ));
 
-            let evaluators: [&dyn Evaluator<TenureGame>; 2] =
+            let evaluators: [&(dyn Evaluator<TenureGame> + Sync); 2] =
                 [&*contestants[i].evaluator, &*contestants[j].evaluator];
 
             for g in 0..num_games {

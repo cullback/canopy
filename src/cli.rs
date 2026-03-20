@@ -365,6 +365,8 @@ pub struct GameCli<G: Game> {
     encoders: Vec<(String, std::sync::Arc<dyn crate::nn::StateEncoder<G>>)>,
     models: Vec<(String, ModelFactory<G>)>,
     configs: Vec<(String, crate::train::TrainConfig)>,
+    /// Encoder used by the loaded nn evaluator (set by `load_nn_evaluator`).
+    nn_encoder: Option<std::sync::Arc<dyn crate::nn::StateEncoder<G>>>,
 }
 
 #[cfg(feature = "nn")]
@@ -380,6 +382,7 @@ impl<G: Game + 'static> GameCli<G> {
             encoders: Vec::new(),
             models: Vec::new(),
             configs: Vec::new(),
+            nn_encoder: None,
         }
     }
 
@@ -550,8 +553,9 @@ impl<G: Game + 'static> GameCli<G> {
 
         let mut trainable = factory();
         trainable.load(checkpoint_dir, iteration);
-        let evaluator = trainable.evaluator(encoder);
+        let evaluator = trainable.evaluator(encoder.clone());
         self.evaluators.add_arc("nn", evaluator);
+        self.nn_encoder = Some(encoder);
     }
 
     /// Look up the selected `--config`, `--encoder`, `--model`, merge CLI
@@ -657,9 +661,75 @@ impl<G: Game + 'static> GameCli<G> {
     }
 
     /// Parse tournament options and run.
-    pub fn run_tournament(&self, matches: &ArgMatches, new_game: impl Fn(u64) -> G) {
+    pub fn run_tournament(&self, matches: &ArgMatches, new_game: impl Fn(u64) -> G + Sync) {
         let opts = parse_tournament(matches);
-        opts.run(new_game, &self.evaluators);
+
+        // If an nn encoder is loaded, set up batched evaluation for nn players.
+        if let Some(encoder) = &self.nn_encoder {
+            self.run_tournament_batched(&opts, new_game, encoder.clone());
+        } else {
+            opts.run(new_game, &self.evaluators);
+        }
+    }
+
+    /// Run tournament with batched nn evaluation.
+    fn run_tournament_batched(
+        &self,
+        opts: &crate::tournament::TournamentOptions,
+        new_game: impl Fn(u64) -> G + Sync,
+        encoder: std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
+    ) {
+        use crate::tournament::BatchedEvaluator;
+        use crate::train::inference::InferencePipeline;
+
+        let nn_eval = self.evaluators.get_arc("nn");
+        let pipeline = InferencePipeline::start::<G>(vec![nn_eval.clone()], 256);
+
+        // Wrap nn players in BatchedEvaluator; leave others direct.
+        let batched: [Option<BatchedEvaluator<G>>; 2] = [
+            (opts.eval_names[0] == "nn").then(|| {
+                BatchedEvaluator::new(nn_eval.clone(), encoder.clone(), pipeline.sender())
+            }),
+            (opts.eval_names[1] == "nn").then(|| {
+                BatchedEvaluator::new(nn_eval.clone(), encoder.clone(), pipeline.sender())
+            }),
+        ];
+
+        let eval_refs: [&(dyn crate::eval::Evaluator<G> + Sync); 2] = [
+            batched[0]
+                .as_ref()
+                .map_or_else(|| self.evaluators.get(&opts.eval_names[0]), |b| b),
+            batched[1]
+                .as_ref()
+                .map_or_else(|| self.evaluators.get(&opts.eval_names[1]), |b| b),
+        ];
+
+        let mut rng = fastrand::Rng::new();
+
+        tracing::info!(
+            "=== Tournament: {} ({}) vs {} ({}) simulations, {} games (batched) ===",
+            opts.eval_names[0],
+            opts.configs[0].num_simulations,
+            opts.eval_names[1],
+            opts.configs[1].num_simulations,
+            opts.num_games,
+        );
+
+        let logs = crate::tournament::tournament(
+            new_game,
+            &eval_refs,
+            &opts.configs,
+            opts.num_games,
+            &mut rng,
+        );
+
+        if let Some(dir) = &opts.log_dir {
+            crate::tournament::save_game_logs(&logs, dir);
+        }
+
+        // Drop batched evaluators (their cloned senders) before joining pipeline.
+        drop(batched);
+        pipeline.join();
     }
 }
 
