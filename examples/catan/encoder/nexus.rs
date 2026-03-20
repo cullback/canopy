@@ -1,23 +1,24 @@
-//! # NexusEncoder (940 features)
+//! # NexusEncoder (1266 features)
 //!
 //! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
 //!
-//! ## Global (105 features)
+//! ## Global (107 features)
 //!
 //! | Block                  | Count | Source                         |
 //! |------------------------|-------|--------------------------------|
 //! | Phase one-hot          |     7 | `encode_phase` (shared)        |
-//! | Per-player std × 2     |    42 | `encode_player` (shared)       |
-//! | Per-player ext × 2     |    32 | `encode_player_ext_trim`       |
+//! | Per-player nexus × 2   |    88 | `encode_player_nexus`          |
 //! | Dice state             |    12 | `encode_dice` (shared)         |
-//! | Per-player dev extra×2 |    12 | `encode_player_dev_extra`      |
 //!
-//! ### Per-player extended trimmed (16)
+//! ### Per-player nexus (44)
 //!
-//! | Feature              | Count | Norm | Description                                |
-//! |----------------------|-------|------|--------------------------------------------|
-//! | trade_ratios         |     5 | /4   | Best maritime ratio per resource            |
-//! | per_number_production|    11 | /10  | Total building_weight per dice value (2-12) |
+//! | Feature              | Count | Source                         |
+//! |----------------------|-------|--------------------------------|
+//! | standard             |    22 | `encode_player` (shared)       |
+//! | trade_ratios         |     5 | /4, best maritime ratio        |
+//! | per_number_production|    11 | /10, building_weight per dice  |
+//! | dev_bought_this_turn |     5 | /deck_max, exact self, 0 opp   |
+//! | played_dev_this_turn |     1 | binary                         |
 //!
 //! ## Tiles (19 × 7 = 133 features)
 //!
@@ -27,41 +28,48 @@
 //! | pips          |     1 | pips / 5                           |
 //! | robber        |     1 | binary                             |
 //!
-//! ## Nodes (54 × 13 = 702 features)
+//! ## Nodes (54 × 19 = 1026 features)
 //!
-//! | Feature       | Count | Description                        |
-//! |---------------|-------|------------------------------------|
-//! | building_cur  |     1 | 0/0.5/1.0                          |
-//! | building_opp  |     1 | 0/0.5/1.0                          |
-//! | port_ratios   |     5 | per-resource trade improvement     |
-//! | road_slots    |     6 | 3 adj edges × 2 players            |
+//! | Feature            | Count | Description                        |
+//! |--------------------|-------|------------------------------------|
+//! | building_cur       |     1 | 0/0.5/1.0                          |
+//! | building_opp       |     1 | 0/0.5/1.0                          |
+//! | port_ratios        |     5 | per-resource trade improvement     |
+//! | production         |     5 | sum of pips from adj tiles / 13    |
+//! | blocked_production |     5 | robber-blocked tile pips / 5       |
+//! | road_count_cur     |     1 | adj edges with cur road / 3        |
+//! | road_count_opp     |     1 | adj edges with opp road / 3        |
 
 use canopy::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
 use super::{
-    PIPS, encode_dice, encode_per_number_production, encode_phase, encode_player,
-    encode_player_dev_extra, encode_port_ratios, encode_road_slots, node_value, tile_numbers,
+    PIPS, encode_dice, encode_node_blocked_production, encode_node_production,
+    encode_per_number_production, encode_phase, encode_player, encode_player_dev_extra,
+    encode_port_ratios, encode_road_counts, node_value, tile_numbers,
 };
 
 pub struct NexusEncoder;
 
 #[allow(dead_code)]
 impl NexusEncoder {
-    pub const FEATURE_SIZE: usize = 940;
-    pub const GLOBAL_LEN: usize = 105;
+    pub const FEATURE_SIZE: usize = 1266;
+    pub const GLOBAL_LEN: usize = 107;
     pub const TILES_F: usize = 7;
-    pub const NODES_F: usize = 13;
+    pub const NODES_F: usize = 19;
 }
 
-/// Push 16 trimmed extended per-player features: trade ratios (5) + per-number production (11).
-fn encode_player_ext_trimmed(
+/// Push 44 unified per-player features: std(22) + ext_trimmed(16) + dev_extra(6).
+fn encode_player_nexus(
     state: &GameState,
     player: canopy::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
+    // Standard (21)
+    encode_player(state, player, out);
+
     // Trade ratios (5): (4 - ratio) / 4, so better = higher
     for &ratio in &state.players[player].trade_ratios {
         out.push((4 - ratio.min(4)) as f32 / 4.0);
@@ -69,6 +77,9 @@ fn encode_player_ext_trimmed(
 
     // Per-number production (11)
     encode_per_number_production(&state.boards[player], &state.topology, tile_numbers, out);
+
+    // Dev extra (6)
+    encode_player_dev_extra(state, player, out);
 }
 
 impl StateEncoder<GameState> for NexusEncoder {
@@ -84,25 +95,17 @@ impl StateEncoder<GameState> for NexusEncoder {
 
         let tile_numbers = tile_numbers(topo);
 
-        // === Global features (93) ===
+        // === Global features (105) ===
 
         // Phase one-hot (7)
         encode_phase(state, out);
 
-        // Per-player standard (21 × 2 = 42)
-        encode_player(state, current, out);
-        encode_player(state, opp, out);
-
-        // Per-player extended trimmed (16 × 2 = 32)
-        encode_player_ext_trimmed(state, current, &tile_numbers, out);
-        encode_player_ext_trimmed(state, opp, &tile_numbers, out);
+        // Per-player nexus (43 × 2 = 86)
+        encode_player_nexus(state, current, &tile_numbers, out);
+        encode_player_nexus(state, opp, &tile_numbers, out);
 
         // Dice state (12)
         encode_dice(state, out);
-
-        // Per-player dev extra (6 × 2 = 12)
-        encode_player_dev_extra(state, current, out);
-        encode_player_dev_extra(state, opp, out);
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);
 
@@ -125,7 +128,7 @@ impl StateEncoder<GameState> for NexusEncoder {
             out.push(f32::from(state.robber == tile.id));
         }
 
-        // === Node stream (54 × 13 = 702) ===
+        // === Node stream (54 × 19 = 1026) ===
         let cur_board = &state.boards[current];
         let opp_board = &state.boards[opp];
         let cur_roads = cur_board.road_network.roads;
@@ -141,8 +144,14 @@ impl StateEncoder<GameState> for NexusEncoder {
             // port_ratios (5)
             encode_port_ratios(node, out);
 
-            // road_slot × 3 × 2 players (6)
-            encode_road_slots(node, cur_roads, opp_roads, out);
+            // production (5)
+            encode_node_production(node, topo, &tile_numbers, state.robber, out);
+
+            // blocked_production (5)
+            encode_node_blocked_production(node, topo, &tile_numbers, state.robber, out);
+
+            // road_count_cur, road_count_opp (2)
+            encode_road_counts(node, cur_roads, opp_roads, out);
         }
 
         debug_assert_eq!(
@@ -242,17 +251,14 @@ mod tests {
     }
 
     // ── Feature offset helpers ───────────────────────────────────────
-    const GLOBAL_OFF: usize = 105;
-    const TILES_OFF: usize = GLOBAL_OFF + 19 * 7; // 93 + 133 = 226
-    const NODES_OFF: usize = TILES_OFF; // tiles end = nodes start... no:
-    // tiles: 93..226, nodes: 226..928
+    const GLOBAL_OFF: usize = 107;
 
     fn tile_feat(t: usize, f: usize) -> usize {
         GLOBAL_OFF + t * 7 + f
     }
 
     fn node_feat(n: usize, f: usize) -> usize {
-        GLOBAL_OFF + 19 * 7 + n * 13 + f
+        GLOBAL_OFF + 19 * 7 + n * 19 + f
     }
 
     fn make_main_state() -> GameState {
@@ -352,7 +358,7 @@ mod tests {
     }
 
     #[test]
-    fn road_slot_features() {
+    fn road_count_features() {
         let mut state = make_main_state();
         let topo = &state.topology;
         let n = 5usize;
@@ -366,13 +372,100 @@ mod tests {
         let mut features = Vec::new();
         NexusEncoder.encode(&state, &mut features);
 
-        // Road slots start at per-node offset 7 (2 + 5)
-        assert_eq!(features[node_feat(n, 7)], 1.0, "slot 0 cur road");
-        assert_eq!(features[node_feat(n, 8)], 0.0, "slot 0 opp road");
-        assert_eq!(features[node_feat(n, 9)], 0.0, "slot 1 cur road");
-        assert_eq!(features[node_feat(n, 10)], 1.0, "slot 1 opp road");
-        assert_eq!(features[node_feat(n, 11)], 0.0, "slot 2 cur road");
-        assert_eq!(features[node_feat(n, 12)], 0.0, "slot 2 opp road");
+        // Road counts at per-node offset 17-18 (2 + 5 + 5 + 5 = 17)
+        assert_eq!(
+            features[node_feat(n, 17)],
+            1.0 / 3.0,
+            "cur road count = 1/3"
+        );
+        assert_eq!(
+            features[node_feat(n, 18)],
+            1.0 / 3.0,
+            "opp road count = 1/3"
+        );
+    }
+
+    #[test]
+    fn node_production_features() {
+        let state = make_main_state();
+        let topo = &state.topology;
+        let tile_numbers = super::super::tile_numbers(topo);
+
+        let mut features = Vec::new();
+        NexusEncoder.encode(&state, &mut features);
+
+        // Pick an interior node that has 3 adjacent tiles
+        for n in 0..54 {
+            let node = &topo.nodes[n];
+            // Compute expected production per resource
+            let mut expected = [0.0f32; 5];
+            for &tid in &node.adjacent_tiles {
+                let tile = &topo.tiles[tid.0 as usize];
+                if tile.id == state.robber {
+                    continue;
+                }
+                if let Some(r) = tile.terrain.resource() {
+                    let number = tile_numbers[tid.0 as usize];
+                    if number > 0 {
+                        expected[r as usize] += super::PIPS[number as usize] as f32 / 13.0;
+                    }
+                }
+            }
+            // Production starts at per-node offset 7 (2 + 5)
+            for ri in 0..5 {
+                assert!(
+                    (features[node_feat(n, 7 + ri)] - expected[ri]).abs() < 1e-6,
+                    "node {n} production resource {ri}: got {}, expected {}",
+                    features[node_feat(n, 7 + ri)],
+                    expected[ri]
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn node_blocked_production_features() {
+        let mut state = make_main_state();
+        let topo = &state.topology;
+        let tile_numbers = super::super::tile_numbers(topo);
+
+        // Move robber to a resource tile (find one that isn't desert)
+        let robber_tile = topo
+            .tiles
+            .iter()
+            .find(|t| t.terrain.resource().is_some())
+            .unwrap();
+        state.robber = robber_tile.id;
+
+        let mut features = Vec::new();
+        NexusEncoder.encode(&state, &mut features);
+
+        // Nodes adjacent to the robber tile should have nonzero blocked_production
+        for &nid in &robber_tile.nodes {
+            let n = nid.0 as usize;
+            let r = robber_tile.terrain.resource().unwrap() as usize;
+            let number = tile_numbers[robber_tile.id.0 as usize];
+            let expected = super::PIPS[number as usize] as f32 / 5.0;
+            // blocked_production starts at per-node offset 12 (2 + 5 + 5)
+            assert!(
+                (features[node_feat(n, 12 + r)] - expected).abs() < 1e-6,
+                "node {n} blocked resource {r}: got {}, expected {}",
+                features[node_feat(n, 12 + r)],
+                expected
+            );
+        }
+
+        // A node NOT adjacent to the robber tile should have all-zero blocked_production
+        let non_adj_node = (0..54u8)
+            .find(|i| !robber_tile.nodes.contains(&crate::game::board::NodeId(*i)))
+            .unwrap() as usize;
+        for ri in 0..5 {
+            assert_eq!(
+                features[node_feat(non_adj_node, 12 + ri)],
+                0.0,
+                "non-adj node {non_adj_node} blocked resource {ri} should be 0"
+            );
+        }
     }
 
     #[test]
@@ -384,18 +477,19 @@ mod tests {
         let mut features = Vec::new();
         NexusEncoder.encode(&state, &mut features);
 
-        // Global: phase(7) + player_std(42) = 49, then ext_trimmed starts
-        let cur_ext = 49;
-        assert_eq!(features[cur_ext + 0], 0.5, "lumber 2:1 → 0.5");
-        assert_eq!(features[cur_ext + 1], 0.25, "brick 3:1 → 0.25");
-        assert_eq!(features[cur_ext + 2], 0.25, "wool 3:1 → 0.25");
-        assert_eq!(features[cur_ext + 3], 0.0, "grain 4:1 → 0.0");
-        assert_eq!(features[cur_ext + 4], 0.0, "ore 4:1 → 0.0");
+        // Global: phase(7) + player_nexus cur starts at 7
+        // Inside player_nexus: std(22) then trade ratios at offset 22
+        let cur_trade = 7 + 22;
+        assert_eq!(features[cur_trade + 0], 0.5, "lumber 2:1 → 0.5");
+        assert_eq!(features[cur_trade + 1], 0.25, "brick 3:1 → 0.25");
+        assert_eq!(features[cur_trade + 2], 0.25, "wool 3:1 → 0.25");
+        assert_eq!(features[cur_trade + 3], 0.0, "grain 4:1 → 0.0");
+        assert_eq!(features[cur_trade + 4], 0.0, "ore 4:1 → 0.0");
 
-        // Opp ext_trimmed starts at 49 + 16 = 65
-        let opp_ext = 65;
+        // Opp player_nexus starts at 7 + 44 = 51, trade ratios at 51 + 22 = 73
+        let opp_trade = 51 + 22;
         for i in 0..5 {
-            assert_eq!(features[opp_ext + i], 0.0, "opp all 4:1 → 0.0");
+            assert_eq!(features[opp_trade + i], 0.0, "opp all 4:1 → 0.0");
         }
     }
 }

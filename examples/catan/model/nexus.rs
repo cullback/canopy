@@ -20,11 +20,14 @@ const _: () = assert!(
     "action space changed — update split constants below"
 );
 
+const GL: usize = 107;
+const TF: usize = 7;
+const NF: usize = 19;
 const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
-const HIDDEN: usize = 128;
-const GLOBAL_HIDDEN: usize = 64;
+const HIDDEN: usize = 192;
+const GLOBAL_HIDDEN: usize = 96;
 const NUM_LAYERS: usize = 4;
 
 // Action layout (must match action.rs ACTION_SPACE = 249):
@@ -177,12 +180,12 @@ impl<B: Backend> HeteroGnnLayer<B> {
             .linear_nn
             .forward(node_norm.clone().reshape([batch * num_nodes, hidden]))
             .reshape([batch, num_nodes, hidden]);
-        let nn_agg = node_adj.matmul(nn_msg); // [B, 54, 128]
+        let nn_agg = node_adj.matmul(nn_msg); // [B, 54, 192]
         let tn_msg = self
             .linear_tn
             .forward(tile_norm.clone().reshape([batch * num_tiles, hidden]))
             .reshape([batch, num_tiles, hidden]);
-        let tn_agg = tile_to_node_adj.matmul(tn_msg); // [B, 54, 128]
+        let tn_agg = tile_to_node_adj.matmul(tn_msg); // [B, 54, 192]
         let node_out = node + relu(node_self + nn_agg + tn_agg);
 
         // Tile update: self + node-to-tile messages
@@ -194,7 +197,7 @@ impl<B: Backend> HeteroGnnLayer<B> {
             .linear_nt
             .forward(node_norm.reshape([batch * num_nodes, hidden]))
             .reshape([batch, num_nodes, hidden]);
-        let nt_agg = node_to_tile_adj.matmul(nt_msg); // [B, 19, 128]
+        let nt_agg = node_to_tile_adj.matmul(nt_msg); // [B, 19, 192]
         let tile_out = tile + relu(tile_self + nt_agg);
 
         (node_out, tile_out)
@@ -204,12 +207,7 @@ impl<B: Backend> HeteroGnnLayer<B> {
 // ── Nexus Model ──────────────────────────────────────────────────────
 
 #[derive(Module, Debug)]
-pub struct CatanNexusModel<
-    B: Backend,
-    const GL: usize = 93,
-    const TF: usize = 7,
-    const NF: usize = 13,
-> {
+pub struct CatanNexusModel<B: Backend> {
     // Input projections
     global_proj: Linear<B>,
     tile_proj: Linear<B>,
@@ -246,13 +244,7 @@ pub struct CatanNexusModel<
     value3: Linear<B>,
 }
 
-pub fn init_nexus<B: Backend>(device: &B::Device) -> CatanNexusModel<B> {
-    init_nexus_with(device)
-}
-
-pub fn init_nexus_with<B: Backend, const GL: usize, const TF: usize, const NF: usize>(
-    device: &B::Device,
-) -> CatanNexusModel<B, GL, TF, NF> {
+pub fn init_nexus_with<B: Backend>(device: &B::Device) -> CatanNexusModel<B> {
     let graph = nexus_graph_data();
 
     // Build constant graph tensors
@@ -285,8 +277,8 @@ pub fn init_nexus_with<B: Backend, const GL: usize, const TF: usize, const NF: u
         device,
     );
 
-    // Pooled dimension for other-policy and value: node_pool(128) + tile_pool(128) + global(64)
-    let pool_dim = HIDDEN + HIDDEN + GLOBAL_HIDDEN; // 320
+    // Pooled dimension for other-policy and value: node_pool(192) + tile_pool(192) + global(96)
+    let pool_dim = HIDDEN + HIDDEN + GLOBAL_HIDDEN; // 480
 
     CatanNexusModel {
         global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
@@ -307,7 +299,7 @@ pub fn init_nexus_with<B: Backend, const GL: usize, const TF: usize, const NF: u
         edge_dst,
 
         policy_settlement: LinearConfig::new(HIDDEN, 1).init(device),
-        policy_road1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        policy_road1: LinearConfig::new(HIDDEN * 2, HIDDEN).init(device),
         policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
         policy_city: LinearConfig::new(HIDDEN, 1).init(device),
         policy_other1: LinearConfig::new(pool_dim, HIDDEN).init(device),
@@ -320,9 +312,7 @@ pub fn init_nexus_with<B: Backend, const GL: usize, const TF: usize, const NF: u
     }
 }
 
-impl<B: Backend, const GL: usize, const TF: usize, const NF: usize> PolicyValueNet<B>
-    for CatanNexusModel<B, GL, TF, NF>
-{
+impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
     fn forward(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
         let [batch, _] = input.dims();
 
@@ -339,14 +329,14 @@ impl<B: Backend, const GL: usize, const TF: usize, const NF: usize> PolicyValueN
         // ── Project global: [batch, GL] → [batch, 64] ───────────────
         let global = relu(self.global_proj.forward(global_raw));
 
-        // ── Project tiles: [batch, 19, TF] → [batch, 19, 128] ──────
+        // ── Project tiles: [batch, 19, TF] → [batch, 19, 192] ──────
         let tiles = relu(
             self.tile_proj
                 .forward(tiles_raw.reshape([batch * NUM_TILES, TF])),
         )
         .reshape([batch, NUM_TILES, HIDDEN]);
 
-        // ── Project nodes: [batch, 54, NF] → [batch, 54, 128] ──────
+        // ── Project nodes: [batch, 54, NF] → [batch, 54, 192] ──────
         let nodes = relu(
             self.node_proj
                 .forward(nodes_raw.reshape([batch * NUM_NODES, NF])),
@@ -393,7 +383,7 @@ impl<B: Backend, const GL: usize, const TF: usize, const NF: usize> PolicyValueN
             h_node = n;
             h_tile = t;
         }
-        // h_node: [batch, 54, 128], h_tile: [batch, 19, 128]
+        // h_node: [batch, 54, 192], h_tile: [batch, 19, 192]
 
         // ── Policy: Settlement (actions 0-53) ────────────────────────
         let settlement_logits = self
@@ -404,12 +394,12 @@ impl<B: Backend, const GL: usize, const TF: usize, const NF: usize> PolicyValueN
         // ── Policy: Road (actions 54-125) ────────────────────────────
         let h_src = h_node.clone().select(1, self.edge_src.clone());
         let h_dst = h_node.clone().select(1, self.edge_dst.clone());
-        let edge_feats = h_src + h_dst;
+        let edge_feats = Tensor::cat(vec![h_src, h_dst], 2);
         let road_logits = self
             .policy_road2
             .forward(relu(
                 self.policy_road1
-                    .forward(edge_feats.reshape([batch * NUM_EDGES, HIDDEN])),
+                    .forward(edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2])),
             ))
             .reshape([batch, NUM_EDGES]);
 
@@ -422,7 +412,7 @@ impl<B: Backend, const GL: usize, const TF: usize, const NF: usize> PolicyValueN
         // ── Pooled features (shared by other-policy and value heads) ─
         let node_pool = h_node.mean_dim(1).reshape([batch, HIDDEN]);
         let tile_pool = h_tile.clone().mean_dim(1).reshape([batch, HIDDEN]);
-        let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1); // [batch, 320]
+        let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1); // [batch, 480]
 
         // ── Policy: Other (50 non-robber actions) ────────────────────
         let other_logits = self
