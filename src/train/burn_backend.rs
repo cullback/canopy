@@ -199,8 +199,8 @@ where
         let mut total_value_loss = 0.0f32;
         let mut num_batches = 0usize;
 
-        for batch_start in (0..indices.len()).step_by(cfg.batch_size) {
-            let batch_end = (batch_start + cfg.batch_size).min(indices.len());
+        for batch_start in (0..indices.len()).step_by(cfg.train_batch_size) {
+            let batch_end = (batch_start + cfg.train_batch_size).min(indices.len());
             let batch_indices = &indices[batch_start..batch_end];
             if batch_indices.is_empty() {
                 continue;
@@ -259,8 +259,8 @@ where
         let mut total_value_loss = 0.0f32;
         let mut num_batches = 0usize;
 
-        for batch_start in (0..samples.len()).step_by(cfg.batch_size) {
-            let batch_end = (batch_start + cfg.batch_size).min(samples.len());
+        for batch_start in (0..samples.len()).step_by(cfg.train_batch_size) {
+            let batch_end = (batch_start + cfg.train_batch_size).min(samples.len());
             let batch = &samples[batch_start..batch_end];
             if batch.is_empty() {
                 continue;
@@ -343,7 +343,8 @@ where
             .min(samples.len().saturating_sub(1));
         let (train_samples, val_samples) = samples.split_at(val_split);
 
-        let batches_per_epoch = (train_samples.len() + cfg.batch_size - 1) / cfg.batch_size;
+        let batches_per_epoch =
+            (train_samples.len() + cfg.train_batch_size - 1) / cfg.train_batch_size;
         let total_batches = batches_per_epoch * cfg.epochs;
 
         let span = tracing::info_span!("training");

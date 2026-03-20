@@ -143,11 +143,11 @@ where
     let fast_sims = config.playout_cap_fast_sims.min(effective_sims);
 
     let concurrent_games = config.concurrent_games.min(config.games_per_iter);
-    let max_batch_size = config.max_batch_size;
+    let inference_batch_size = config.inference_batch_size;
     let num_actions = G::NUM_ACTIONS;
 
     // Actor → Batcher channel (tokio mpsc)
-    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * max_batch_size);
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * inference_batch_size);
 
     let batcher_stats = Arc::new(BatcherStats::new());
     let ctx = Arc::new(TaskContext {
@@ -189,7 +189,7 @@ where
         batcher_loop(
             &mut request_rx,
             &work_tx,
-            max_batch_size,
+            inference_batch_size,
             &batcher_stats_ref,
         );
     });

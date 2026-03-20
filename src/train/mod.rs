@@ -65,7 +65,7 @@ pub struct TrainConfig {
     /// Training epochs over the replay buffer per iteration.
     pub epochs: usize,
     /// Mini-batch size for training.
-    pub batch_size: usize,
+    pub train_batch_size: usize,
     /// Peak learning rate (cosine-annealed from here to `lr_min`).
     pub lr: f64,
     /// Minimum learning rate at end of cosine cycle (default: `lr / 10`).
@@ -92,7 +92,7 @@ pub struct TrainConfig {
     pub concurrent_games: usize,
     /// Maximum evaluations per GPU forward pass. Also determines the
     /// eval request queue capacity (2x this value).
-    pub max_batch_size: usize,
+    pub inference_batch_size: usize,
     /// Early-game turns where action is sampled from improved policy
     /// (for exploration diversity). After this, the best action is used deterministically.
     pub explore_moves: u32,
@@ -148,7 +148,7 @@ impl Default for TrainConfig {
 
             // Training
             epochs: 3,
-            batch_size: 1024,
+            train_batch_size: 1024,
             lr: 0.001,
             lr_min: 0.0001,
             replay_window: 10,
@@ -157,7 +157,7 @@ impl Default for TrainConfig {
             // Self-play
             games_per_iter: 200,
             concurrent_games: 256,
-            max_batch_size: 1024,
+            inference_batch_size: 1024,
             explore_moves: 30,
             playout_cap_full_prob: 0.25,
             playout_cap_fast_sims: 32,
@@ -186,7 +186,7 @@ impl Default for TrainConfig {
 /// Per-iteration config passed to the model's train_step method.
 pub struct TrainStepConfig {
     pub lr: f64,
-    pub batch_size: usize,
+    pub train_batch_size: usize,
     pub epochs: usize,
     /// Weight of Q in value target: 0.0 = pure Z, 1.0 = pure Q.
     pub q_weight: f32,
@@ -320,7 +320,7 @@ pub fn run_training<G>(
         fastrand::shuffle(&mut samples);
         let step_cfg = TrainStepConfig {
             lr: effective_lr,
-            batch_size: config.batch_size,
+            train_batch_size: config.train_batch_size,
             epochs: config.epochs,
             q_weight,
         };

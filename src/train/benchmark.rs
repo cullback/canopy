@@ -216,10 +216,10 @@ where
     span.pb_start();
 
     let concurrent_games = config.concurrent_games.min(config.bench_games as usize);
-    let max_batch_size = config.max_batch_size;
+    let inference_batch_size = config.inference_batch_size;
     let num_actions = G::NUM_ACTIONS;
 
-    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * max_batch_size);
+    let (request_tx, mut request_rx) = tokio::sync::mpsc::channel(2 * inference_batch_size);
 
     let stats = Arc::new(BatcherStats::new());
     let stats_ref = stats.clone();
@@ -243,7 +243,7 @@ where
     drop(work_rx);
 
     let batcher_handle = std::thread::spawn(move || {
-        batcher_loop(&mut request_rx, &work_tx, max_batch_size, &stats_ref);
+        batcher_loop(&mut request_rx, &work_tx, inference_batch_size, &stats_ref);
     });
 
     // Tokio runtime for async bench tasks

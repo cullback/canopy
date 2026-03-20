@@ -58,10 +58,10 @@ impl BatcherStats {
 pub(super) fn batcher_loop(
     request_rx: &mut mpsc::Receiver<InferRequest>,
     work_tx: &crossbeam_channel::Sender<InferBatch>,
-    max_batch_size: usize,
+    inference_batch_size: usize,
     stats: &BatcherStats,
 ) {
-    let mut batch_requests: Vec<InferRequest> = Vec::with_capacity(max_batch_size);
+    let mut batch_requests: Vec<InferRequest> = Vec::with_capacity(inference_batch_size);
 
     loop {
         // Block for the first request (None = all senders dropped)
@@ -75,7 +75,7 @@ pub(super) fn batcher_loop(
 
         // Drain additional requests without blocking
         let mut total_samples: usize = batch_requests[0].batch_size;
-        while total_samples < max_batch_size {
+        while total_samples < inference_batch_size {
             match request_rx.try_recv() {
                 Ok(req) => {
                     total_samples += req.batch_size;

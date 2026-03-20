@@ -139,9 +139,16 @@ pub fn train_command() -> Command {
                 .help("Training epochs per iteration"),
         )
         .arg(
-            Arg::new("batch-size")
-                .long("batch-size")
-                .default_value(d.batch_size.to_string()),
+            Arg::new("train-batch-size")
+                .long("train-batch-size")
+                .default_value(d.train_batch_size.to_string())
+                .help("Mini-batch size for training gradient steps"),
+        )
+        .arg(
+            Arg::new("inference-batch-size")
+                .long("inference-batch-size")
+                .default_value(d.inference_batch_size.to_string())
+                .help("Maximum evaluations per GPU forward pass during self-play"),
         )
         .arg(Arg::new("lr").long("lr").default_value(d.lr.to_string()))
         .arg(
@@ -585,8 +592,11 @@ pub fn parse_train_config(
     if set("epochs") {
         config.epochs = val("epochs").parse().unwrap();
     }
-    if set("batch-size") {
-        config.batch_size = val("batch-size").parse().unwrap();
+    if set("train-batch-size") {
+        config.train_batch_size = val("train-batch-size").parse().unwrap();
+    }
+    if set("inference-batch-size") {
+        config.inference_batch_size = val("inference-batch-size").parse().unwrap();
     }
     if set("lr") {
         config.lr = val("lr").parse().unwrap();

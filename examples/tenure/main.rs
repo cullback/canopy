@@ -94,7 +94,7 @@ fn main() {
             mcts_sims: 200,
             mcts_sims_start: 50,
             epochs: 3,
-            batch_size: 256,
+            train_batch_size: 256,
             replay_window: 8,
             warmup_iters: 15,
             bench_games: 200,
