@@ -87,10 +87,10 @@ fn main() {
         "nexus",
         TrainConfig {
             iterations: 1000,
-            games_per_iter: 200,
-            epochs: 2,
+            games_per_iter: 300,
+            epochs: 3,
             lr: 0.0005,
-            replay_window: 10,
+            replay_window: 20,
             mcts_sims: 3000,
             mcts_sims_start: 400,
             leaf_batch_size: 32,
