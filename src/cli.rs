@@ -23,6 +23,9 @@ fn prefixed_args(prefix: &str) -> Vec<Arg> {
         Arg::new(format!("{prefix}-c-scale"))
             .long(format!("{prefix}-c-scale"))
             .default_value(d.c_scale.to_string()),
+        Arg::new(format!("{prefix}-leaf-batch"))
+            .long(format!("{prefix}-leaf-batch"))
+            .default_value("8"),
     ]
 }
 
@@ -36,6 +39,7 @@ fn parse_one(matches: &ArgMatches, prefix: &str) -> Config {
         num_sampled_actions: get("gumbel-m").parse().unwrap(),
         c_visit: get("c-visit").parse().unwrap(),
         c_scale: get("c-scale").parse().unwrap(),
+        leaf_batch_size: get("leaf-batch").parse().unwrap(),
         ..Default::default()
     }
 }
