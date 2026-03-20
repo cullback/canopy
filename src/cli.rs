@@ -99,6 +99,76 @@ pub fn parse_tournament(matches: &ArgMatches) -> TournamentOptions {
     }
 }
 
+/// Returns a `serve` subcommand for the web analysis board.
+#[cfg(feature = "server")]
+pub fn serve_command() -> Command {
+    Command::new("serve")
+        .about("Launch the web analysis board")
+        .arg(
+            Arg::new("port")
+                .long("port")
+                .default_value("3000")
+                .help("HTTP port"),
+        )
+        .arg(
+            Arg::new("eval")
+                .long("eval")
+                .default_value("rollout")
+                .help("Evaluator name"),
+        )
+        .arg(
+            Arg::new("sims")
+                .long("sims")
+                .default_value("200")
+                .help("Default MCTS simulations per move"),
+        )
+        .arg(
+            Arg::new("human")
+                .long("human")
+                .default_value("none")
+                .value_parser(["p1", "p2", "both", "none"])
+                .help("Which players are human-controlled"),
+        )
+}
+
+/// Parsed serve options.
+#[cfg(feature = "server")]
+pub struct ServeOptions {
+    pub port: u16,
+    pub eval_name: String,
+    pub simulations: u32,
+    pub human_players: [bool; 2],
+}
+
+/// Parse serve subcommand options.
+#[cfg(feature = "server")]
+pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
+    let port: u16 = matches
+        .get_one::<String>("port")
+        .unwrap()
+        .parse()
+        .expect("invalid port");
+    let eval_name = matches.get_one::<String>("eval").unwrap().clone();
+    let simulations: u32 = matches
+        .get_one::<String>("sims")
+        .unwrap()
+        .parse()
+        .expect("invalid sims");
+    let human = matches.get_one::<String>("human").unwrap().as_str();
+    let human_players = match human {
+        "p1" => [true, false],
+        "p2" => [false, true],
+        "both" => [true, true],
+        _ => [false, false],
+    };
+    ServeOptions {
+        port,
+        eval_name,
+        simulations,
+        human_players,
+    }
+}
+
 /// Returns a `train` subcommand with all game-agnostic args.
 ///
 /// The caller can append game-specific args via `.arg()`.
@@ -414,7 +484,14 @@ impl<G: Game + 'static> GameCli<G> {
             );
         }
 
-        cmd.subcommand(self.train_command())
+        cmd = cmd.subcommand(self.train_command());
+
+        #[cfg(feature = "server")]
+        {
+            cmd = cmd.subcommand(serve_command());
+        }
+
+        cmd
     }
 
     /// If `--nn-model` was provided, load the checkpoint and register an
@@ -539,9 +616,6 @@ impl<G: Game + 'static> GameCli<G> {
     }
 
     /// Dispatch to train or tournament based on subcommand.
-    ///
-    /// Accepts the train-form closure (`Fn(&mut Rng) -> G`) and adapts it
-    /// for tournament by constructing an Rng from the seed.
     pub fn run(
         &mut self,
         matches: &ArgMatches,
@@ -554,6 +628,28 @@ impl<G: Game + 'static> GameCli<G> {
         }
         self.load_nn_evaluator(matches);
         self.run_tournament(matches, new_game);
+    }
+
+    /// Launch the web analysis board server (serve subcommand).
+    #[cfg(feature = "server")]
+    pub fn run_serve(
+        &mut self,
+        matches: &ArgMatches,
+        serve_matches: &ArgMatches,
+        presenter: std::sync::Arc<dyn crate::server::GamePresenter<G>>,
+    ) {
+        crate::init_logging();
+        self.load_nn_evaluator(matches);
+        let opts = parse_serve(serve_matches);
+        let evaluator = self.evaluators.get_arc(&opts.eval_name);
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        rt.block_on(crate::server::serve(
+            opts.port,
+            evaluator,
+            presenter,
+            opts.simulations,
+            opts.human_players,
+        ));
     }
 
     /// Parse tournament options and run.

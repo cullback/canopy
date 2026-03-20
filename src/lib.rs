@@ -8,6 +8,8 @@ pub mod mcts;
 #[cfg(feature = "nn")]
 pub mod nn;
 pub mod player;
+#[cfg(feature = "server")]
+pub mod server;
 pub mod tournament;
 #[cfg(feature = "nn")]
 pub mod train;

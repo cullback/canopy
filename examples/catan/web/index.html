@@ -1,0 +1,118 @@
+<!DOCTYPE html>
+<html lang="en" class="dark">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Canopy — Catan Analysis Board</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+tailwind.config = {
+  darkMode: 'class',
+  theme: {
+    extend: {
+      colors: {
+        bg: { DEFAULT: '#1a1a2e', 2: '#16213e', 3: '#0f3460' },
+        p1: '#4a9eff',
+        p2: '#ff6b6b',
+        accent: '#e94560',
+        bar: '#2a2a4a',
+      }
+    }
+  }
+}
+</script>
+<link rel="stylesheet" href="style.css">
+</head>
+<body class="bg-bg text-gray-200 font-sans h-screen flex flex-col">
+
+<div id="app" class="flex flex-col h-full">
+  <!-- Header -->
+  <header class="flex items-center gap-4 px-4 py-2 bg-bg-2 border-b border-gray-700">
+    <h1 class="text-sm font-semibold text-gray-100">Canopy Analysis Board</h1>
+    <span id="phase-label" class="bg-bg-3 px-2 py-0.5 rounded text-xs text-gray-300"></span>
+    <span id="turn-label" class="text-xs text-gray-500"></span>
+  </header>
+
+  <!-- Main 3-column layout -->
+  <div id="main-layout" class="flex flex-1 overflow-hidden">
+    <!-- Left: Player panels -->
+    <div id="players-panel" class="w-52 min-w-52 flex flex-col gap-2 p-2 bg-bg-2 border-r border-gray-700 overflow-y-auto">
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-0">
+        <h3 class="text-sm font-medium text-p1 flex items-center gap-1.5 mb-1">
+          P1 <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs" id="p0-vp">0</span>
+        </h3>
+        <div class="flex flex-wrap gap-1 text-xs" id="p0-hand"></div>
+        <div class="flex flex-wrap gap-1 text-xs mt-1" id="p0-dev"></div>
+        <div class="text-xs text-gray-400 mt-1" id="p0-stats"></div>
+        <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="0">Take Over</button>
+      </div>
+      <div class="bg-bg rounded-md p-2.5 border border-gray-700 player-card" id="player-1">
+        <h3 class="text-sm font-medium text-p2 flex items-center gap-1.5 mb-1">
+          P2 <span class="bg-bg-3 px-1.5 py-0.5 rounded text-xs" id="p1-vp">0</span>
+        </h3>
+        <div class="flex flex-wrap gap-1 text-xs" id="p1-hand"></div>
+        <div class="flex flex-wrap gap-1 text-xs mt-1" id="p1-dev"></div>
+        <div class="text-xs text-gray-400 mt-1" id="p1-stats"></div>
+        <button class="takeover-btn mt-2 w-full py-1 text-xs bg-bg-3 border border-gray-700 text-gray-300 rounded hover:bg-accent transition-colors cursor-pointer" data-player="1">Take Over</button>
+      </div>
+    </div>
+
+    <!-- Center: SVG Board + action buttons -->
+    <div id="board-container" class="flex-1 flex flex-col items-center p-2 overflow-auto">
+      <svg id="board-svg" class="w-full max-w-lg max-h-[60vh]" viewBox="-50 -50 500 500"></svg>
+      <div id="action-list" class="w-full max-w-lg max-h-48 overflow-y-auto p-1 flex flex-wrap gap-1"></div>
+    </div>
+
+    <!-- Right: MCTS Analysis -->
+    <div id="analysis-panel" class="w-80 min-w-80 flex flex-col bg-bg-2 border-l border-gray-700 overflow-y-auto">
+      <div id="search-info" class="flex gap-3 px-2.5 py-2 text-xs border-b border-gray-700 flex-wrap">
+        <span id="sims-count" class="whitespace-nowrap text-gray-300">0 sims</span>
+        <span id="root-q" class="whitespace-nowrap text-gray-300"></span>
+        <span id="net-value" class="whitespace-nowrap text-gray-300"></span>
+      </div>
+      <div id="policy-bars" class="p-1 flex-1 overflow-y-auto"></div>
+      <div id="tree-explorer" class="border-t border-gray-700 p-1.5">
+        <h4 class="text-xs font-medium mb-1 text-gray-300">Tree Explorer</h4>
+        <div id="tree-view" class="text-[11px] max-h-60 overflow-y-auto"></div>
+      </div>
+      <div id="game-log" class="border-t border-gray-700 p-1.5">
+        <h4 class="text-xs font-medium mb-1 text-gray-300">Game Log</h4>
+        <div id="log-view" class="text-[11px] max-h-48 overflow-y-auto text-gray-400"></div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Bottom: Controls -->
+  <div id="controls" class="flex items-center gap-2 px-4 py-2 bg-bg-2 border-t border-gray-700 flex-wrap">
+    <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
+    <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
+    <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
+    <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Bot Move</button>
+    <div class="flex items-center gap-1.5 text-xs text-gray-300">
+      <label class="flex items-center gap-1">Sims:
+        <input type="range" id="sims-slider" min="0" max="2000" value="200" step="10" class="w-20 accent-accent">
+        <span id="sims-value">200</span>
+      </label>
+    </div>
+    <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Run Sims</button>
+    <button id="btn-snapshot" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Snapshot</button>
+    <div class="flex items-center gap-2 text-xs text-gray-300">
+      <label class="flex items-center gap-1 cursor-pointer">
+        <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Autoplay
+      </label>
+      <label class="flex items-center gap-1">Delay:
+        <input type="range" id="speed-slider" min="100" max="3000" value="500" step="100" class="w-20 accent-accent">
+        <span id="speed-value">500ms</span>
+      </label>
+    </div>
+    <div id="result-banner" class="hidden px-3 py-1 bg-accent rounded font-semibold text-sm text-white"></div>
+  </div>
+</div>
+
+<script src="session.js"></script>
+<script src="board.js"></script>
+<script src="mcts.js"></script>
+<script src="controls.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

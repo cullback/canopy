@@ -7,6 +7,60 @@ use crate::game::{Game, Status};
 use seq_halving::Schedule;
 use tree::{Bufs, ExpandResult, NodeId, NodeKind, Tree};
 
+// ── Snapshot types ───────────────────────────────────────────────────
+
+/// Snapshot of a single root edge (action) for the analysis board.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct EdgeSnapshot {
+    pub action: usize,
+    pub visits: u32,
+    /// Q value for this edge's child (None if unvisited).
+    pub q: Option<f32>,
+    /// Softmax prior probability.
+    pub prior: f32,
+    /// Raw policy logit.
+    pub logit: f32,
+    /// Improved policy weight (None if no gumbel state).
+    pub improved_policy: Option<f32>,
+}
+
+/// Snapshot of the root search state.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct SearchSnapshot {
+    /// Root Q value (P1 perspective).
+    pub root_q: f32,
+    /// Raw network value at root (P1 perspective).
+    pub network_value: f32,
+    /// Total simulations completed so far.
+    pub total_simulations: u32,
+    /// Per-edge snapshots, sorted by edge index.
+    pub edges: Vec<EdgeSnapshot>,
+}
+
+/// Recursive snapshot of a subtree node for the tree explorer.
+#[derive(Clone, Debug)]
+#[cfg_attr(feature = "serde", derive(serde::Serialize))]
+pub struct TreeNodeSnapshot {
+    /// Action that led to this node (None for root).
+    pub action: Option<usize>,
+    /// Label for this node (game-specific, set by caller).
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub label: Option<String>,
+    /// Q value of this node.
+    pub q: f32,
+    /// Total visits.
+    pub visits: u32,
+    /// Node kind label: "decision", "chance", or "terminal".
+    pub kind: &'static str,
+    /// Which player acts at this node: 0 = P1, 1 = P2, None = chance/terminal.
+    #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
+    pub player: Option<u8>,
+    /// Children (empty if leaf or max_depth reached).
+    pub children: Vec<TreeNodeSnapshot>,
+}
+
 // ── Public types ──────────────────────────────────────────────────────
 
 /// Gumbel AlphaZero MCTS configuration.
@@ -212,6 +266,92 @@ impl<G: Game> Search<G> {
     /// Update the simulation budget (takes effect on the next search).
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
+    }
+
+    /// Read access to the MCTS config.
+    pub fn config(&self) -> &Config {
+        &self.config
+    }
+
+    /// Snapshot the current root search state for the analysis board.
+    ///
+    /// Returns `None` if the root is not yet expanded (no tree data).
+    pub fn snapshot(&self) -> Option<SearchSnapshot> {
+        let root = self.root?;
+        let edges = self.tree.edges(root);
+        let total_simulations: u32 = edges.iter().map(|e| e.visits).sum();
+
+        // Compute improved policy if gumbel state is available.
+        let improved = self.gumbel.as_ref().map(|gs| {
+            let ctx = RootContext::new(&self.tree, root);
+            let mut logits = Vec::with_capacity(edges.len());
+            for (i, edge) in ctx.edges.iter().enumerate() {
+                let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
+                let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
+                let s = sigma(
+                    q_norm,
+                    ctx.max_visits,
+                    self.config.c_visit,
+                    self.config.c_scale,
+                );
+                logits.push(gs.root_logits[i] + s);
+            }
+            softmax(&mut logits);
+            logits
+        });
+
+        let edge_snapshots = edges
+            .iter()
+            .enumerate()
+            .map(|(i, edge)| EdgeSnapshot {
+                action: edge.action,
+                visits: edge.visits,
+                q: edge.child.map(|c| self.tree.q(c)),
+                prior: edge.prior,
+                logit: edge.logit,
+                improved_policy: improved.as_ref().map(|ip| ip[i]),
+            })
+            .collect();
+
+        Some(SearchSnapshot {
+            root_q: self.tree.q(root),
+            network_value: self.root_network_value,
+            total_simulations,
+            edges: edge_snapshots,
+        })
+    }
+
+    /// Snapshot the subtree rooted at the current root, up to `max_depth`.
+    pub fn snapshot_subtree(&self, max_depth: usize) -> Option<TreeNodeSnapshot> {
+        let root = self.root?;
+        Some(snapshot_node(&self.tree, root, None, None, max_depth))
+    }
+
+    /// Follow a path of actions from root, then snapshot that subtree.
+    ///
+    /// Returns `None` if the root is not expanded or the path leads to
+    /// an unexpanded node.
+    pub fn snapshot_at_path(
+        &self,
+        actions: &[usize],
+        max_depth: usize,
+    ) -> Option<TreeNodeSnapshot> {
+        let mut current = self.root?;
+        let mut parent_player = None;
+        for &action in actions {
+            // The player at `current` is the one who chose `action`.
+            if let NodeKind::Decision(sign) = self.tree.kind(current) {
+                parent_player = Some(if *sign > 0.0 { 0u8 } else { 1 });
+            }
+            current = self.tree.child_for_action(current, action)?;
+        }
+        Some(snapshot_node(
+            &self.tree,
+            current,
+            actions.last().copied(),
+            parent_player,
+            max_depth,
+        ))
     }
 
     /// Apply an action to the internal game state and walk the tree pointer.
@@ -937,6 +1077,57 @@ fn extract_gumbel_result<G: Game>(
     }
 }
 
+/// Recursively snapshot a tree node and its children.
+fn snapshot_node(
+    tree: &Tree,
+    node: NodeId,
+    action: Option<usize>,
+    parent_player: Option<u8>,
+    depth_remaining: usize,
+) -> TreeNodeSnapshot {
+    // Who acts at this node (used as parent_player for children).
+    let this_player = match tree.kind(node) {
+        NodeKind::Decision(sign) => Some(if *sign > 0.0 { 0u8 } else { 1 }),
+        _ => None,
+    };
+
+    let kind_str = match tree.kind(node) {
+        NodeKind::Terminal => "terminal",
+        NodeKind::Decision(_) => "decision",
+        NodeKind::Chance => "chance",
+    };
+
+    let children = if depth_remaining == 0 {
+        Vec::new()
+    } else {
+        tree.edges(node)
+            .iter()
+            .filter_map(|edge| {
+                edge.child.map(|child| {
+                    snapshot_node(
+                        tree,
+                        child,
+                        Some(edge.action),
+                        this_player,
+                        depth_remaining - 1,
+                    )
+                })
+            })
+            .collect()
+    };
+
+    let data = &tree[node];
+    TreeNodeSnapshot {
+        action,
+        label: None,
+        q: data.q,
+        visits: data.total_visits,
+        kind: kind_str,
+        player: parent_player,
+        children,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1158,5 +1349,92 @@ mod tests {
 
         // Should complete successfully and pick the winning action
         assert_eq!(result.selected_action, 0);
+    }
+
+    #[test]
+    fn snapshot_after_search() {
+        let evaluator = RolloutEvaluator::default();
+        let config = Config {
+            num_simulations: 100,
+            ..Default::default()
+        };
+        let mut rng = fastrand::Rng::new();
+
+        let mut search = Search::new(TrivialGame::new(), config);
+        let _result = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        let snap = search
+            .snapshot()
+            .expect("snapshot should exist after search");
+        assert_eq!(snap.edges.len(), 2);
+        assert!(snap.total_simulations > 0);
+        // All edges should have improved policy
+        for edge in &snap.edges {
+            assert!(edge.improved_policy.is_some());
+        }
+        // Improved policy should sum to ~1.0
+        let ip_sum: f32 = snap.edges.iter().filter_map(|e| e.improved_policy).sum();
+        assert!(
+            (ip_sum - 1.0).abs() < 0.01,
+            "improved policy sum = {ip_sum}"
+        );
+    }
+
+    #[test]
+    fn snapshot_subtree_depth() {
+        let evaluator = RolloutEvaluator::default();
+        let config = Config {
+            num_simulations: 200,
+            ..Default::default()
+        };
+        let mut rng = fastrand::Rng::new();
+
+        let mut search = Search::new(TwoStepGame::new(), config);
+        let _result = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        // Depth 0: root only, no children
+        let snap0 = search.snapshot_subtree(0).unwrap();
+        assert!(snap0.children.is_empty());
+        assert!(snap0.visits > 0);
+
+        // Depth 1: root + immediate children
+        let snap1 = search.snapshot_subtree(1).unwrap();
+        assert!(!snap1.children.is_empty());
+        for child in &snap1.children {
+            assert!(child.children.is_empty()); // depth limit stops here
+        }
+
+        // Depth 2: can see grandchildren (terminal nodes)
+        let snap2 = search.snapshot_subtree(2).unwrap();
+        let has_grandchildren = snap2.children.iter().any(|c| !c.children.is_empty());
+        assert!(has_grandchildren, "depth 2 should reach terminal children");
+    }
+
+    #[test]
+    fn snapshot_at_path_works() {
+        let evaluator = RolloutEvaluator::default();
+        let config = Config {
+            num_simulations: 200,
+            ..Default::default()
+        };
+        let mut rng = fastrand::Rng::new();
+
+        let mut search = Search::new(TwoStepGame::new(), config);
+        let _result = run_to_completion(&mut search, &evaluator, &mut rng);
+
+        // Navigate to action 0's subtree
+        let snap = search.snapshot_at_path(&[0], 1).unwrap();
+        assert_eq!(snap.action, Some(0));
+        assert_eq!(snap.kind, "decision");
+
+        // Invalid path returns None
+        assert!(search.snapshot_at_path(&[99], 1).is_none());
+    }
+
+    #[test]
+    fn snapshot_none_before_search() {
+        let search = Search::new(TrivialGame::new(), Config::default());
+        assert!(search.snapshot().is_none());
+        assert!(search.snapshot_subtree(1).is_none());
     }
 }

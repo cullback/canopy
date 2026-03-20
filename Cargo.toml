@@ -8,20 +8,22 @@ name = "canopy"
 path = "src/lib.rs"
 
 [features]
+serde = ["dep:serde", "dep:serde_json"]
 cli = ["dep:clap"]
-visualize = ["dep:serde", "dep:serde_json"]
+visualize = ["serde"]
+server = ["serde", "dep:axum", "dep:tower-http", "dep:tokio"]
 nn = [
+  "serde",
   "dep:burn",
   "dep:crossbeam-channel",
   "dep:csv",
-  "dep:serde",
-  "dep:serde_json",
   "dep:tokio",
 ]
 cuda = ["nn", "burn/cuda"]
 wgpu = ["nn", "burn/wgpu"]
 
 [dependencies]
+axum = { version = "0.8", features = ["ws"], optional = true }
 burn = { version = "0.20", default-features = false, features = ["std", "ndarray", "autodiff"], optional = true }
 clap = { version = "4", default-features = false, features = ["std", "string"], optional = true }
 crossbeam-channel = { version = "0.5", optional = true }
@@ -31,12 +33,13 @@ indicatif = "0.18"
 serde = { version = "1", features = ["derive"], optional = true }
 serde_json = { version = "1", optional = true }
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time"], optional = true }
+tower-http = { version = "0.6", features = ["fs"], optional = true }
 tracing = "0.1"
 tracing-indicatif = "0.3"
 tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
-canopy = { path = ".", features = ["cli", "visualize", "nn"] }
+canopy = { path = ".", features = ["cli", "visualize", "server", "nn"] }
 
 [[example]]
 name = "pig"

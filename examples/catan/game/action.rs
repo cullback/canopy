@@ -329,19 +329,23 @@ fn populate_discard(state: &GameState, player: Player, actions: &mut Vec<ActionI
 
 fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
     let topo = &state.topology;
-    let opp = state.current_player.opponent();
+    let me = state.current_player;
+    let opp = me.opponent();
+    let my_buildings = state.player_buildings(me);
     let opp_buildings = state.player_buildings(opp);
-    let friendly = state.public_vps(opp) < super::FRIENDLY_ROBBER_VP;
+    let friendly_opp = state.public_vps(opp) < super::FRIENDLY_ROBBER_VP;
+    let friendly_me = state.public_vps(me) < super::FRIENDLY_ROBBER_VP;
 
     for tile in &topo.tiles {
         if tile.id == state.robber {
             continue;
         }
-        if friendly {
-            let tile_mask = topo.adj.tile_nodes[tile.id.0 as usize];
-            if tile_mask & opp_buildings != 0 {
-                continue;
-            }
+        let tile_mask = topo.adj.tile_nodes[tile.id.0 as usize];
+        if friendly_opp && tile_mask & opp_buildings != 0 {
+            continue;
+        }
+        if friendly_me && tile_mask & my_buildings != 0 {
+            continue;
         }
         actions.push(robber_id(tile.id));
     }

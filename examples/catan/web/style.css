@@ -1,0 +1,46 @@
+/* Only styles Tailwind can't express or that apply to dynamically created elements */
+
+:root {
+  --forest: #2d5a27;
+  --hills: #b85c38;
+  --pasture: #7fb069;
+  --fields: #e8c547;
+  --mountains: #6b7b8d;
+  --desert: #d4b896;
+}
+
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+/* Active player highlight */
+.player-card.active {
+  border-color: #e94560 !important;
+}
+
+/* Resource chips */
+.resource-chip {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  margin: 0.1rem;
+  font-size: 0.7rem;
+}
+.resource-chip.lumber { background: var(--forest); }
+.resource-chip.brick { background: var(--hills); }
+.resource-chip.wool { background: var(--pasture); color: #222; }
+.resource-chip.grain { background: var(--fields); color: #222; }
+.resource-chip.ore { background: var(--mountains); }
+
+/* Dev card chips */
+.dev-chip {
+  display: inline-block;
+  padding: 0.1rem 0.4rem;
+  border-radius: 3px;
+  margin: 0.1rem;
+  font-size: 0.7rem;
+  background: #4a3060;
+  color: #dcc;
+}
+
+/* Tree explorer toggle */
+.tree-children { display: none; }
+.tree-children.open { display: block; }

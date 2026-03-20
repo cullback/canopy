@@ -20,6 +20,7 @@ mod encoder;
 mod game;
 mod heuristic;
 mod model;
+mod presenter;
 mod visualize;
 
 use encoder::{BasicEncoder, Gnn2Encoder, GnnEncoder, NexusEncoder, RichNodeEncoder};
@@ -140,6 +141,15 @@ fn main() {
     } else {
         Dice::Balanced(game::dice::BalancedDice::new())
     };
+
+    // Serve subcommand
+    if let Some(sub) = matches.subcommand_matches("serve") {
+        let static_dir =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/catan/web");
+        let presenter = Arc::new(presenter::CatanPresenter::new(static_dir, dice));
+        setup.run_serve(&matches, sub, presenter);
+        return;
+    }
 
     setup.run(&matches, move |seed| game::new_game(seed, dice));
 }

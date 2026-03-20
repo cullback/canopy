@@ -9,8 +9,8 @@ use crate::game;
 use crate::game::action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
     MARITIME_END, MARITIME_START, MONOPOLY_END, MONOPOLY_START, PLAY_KNIGHT, PLAY_ROAD_BUILDING,
-    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, SETTLEMENT_END, SETTLEMENT_START, YOP_END,
-    YOP_START,
+    ROAD_END, ROAD_START, ROBBER_END, ROBBER_START, ROLL, SETTLEMENT_END, SETTLEMENT_START,
+    YOP_END, YOP_START,
 };
 use crate::game::board::{Port, TileId};
 use crate::game::dice::Dice;
@@ -43,7 +43,7 @@ struct ReplayFeatures {
 }
 
 #[derive(Serialize)]
-struct ReplayBoard {
+pub struct ReplayBoard {
     tiles: Vec<ReplayTile>,
     nodes: Vec<[f64; 2]>,
     edges: Vec<[u8; 2]>,
@@ -51,7 +51,7 @@ struct ReplayBoard {
 }
 
 #[derive(Serialize)]
-struct ReplayTile {
+pub struct ReplayTile {
     terrain: &'static str,
     number: Option<u8>,
     cx: f64,
@@ -60,13 +60,13 @@ struct ReplayTile {
 }
 
 #[derive(Serialize)]
-struct ReplayPort {
+pub struct ReplayPort {
     nodes: [u8; 2],
     kind: String,
 }
 
 #[derive(Serialize)]
-struct ReplayFrame {
+pub struct ReplayFrame {
     action: String,
     player: u8,
     phase: String,
@@ -80,7 +80,7 @@ struct ReplayFrame {
 }
 
 #[derive(Serialize)]
-struct PlayerFrame {
+pub struct PlayerFrame {
     hand: [u8; 5],
     vp: u8,
     dev_cards: [u8; 5],
@@ -89,7 +89,7 @@ struct PlayerFrame {
 }
 
 #[derive(Serialize)]
-struct BuildingsFrame {
+pub struct BuildingsFrame {
     settlements: Vec<u8>,
     cities: Vec<u8>,
     roads: Vec<u8>,
@@ -147,7 +147,7 @@ fn terrain_name(terrain: crate::game::board::Terrain) -> &'static str {
     }
 }
 
-fn build_board(state: &GameState) -> ReplayBoard {
+pub fn build_board(state: &GameState) -> ReplayBoard {
     let node_positions = compute_node_positions(state);
     let topo = &state.topology;
 
@@ -240,7 +240,7 @@ fn buildings_frame(state: &GameState, pid: Player) -> BuildingsFrame {
     }
 }
 
-fn capture_frame(
+pub fn capture_frame(
     state: &GameState,
     action: &str,
     player: u8,
@@ -268,53 +268,40 @@ fn capture_frame(
 
 // ─── Action / phase formatting ───────────────────────────────────────────────
 
+/// Compact action description without player prefix (for web UI / tree explorer).
 #[allow(non_contiguous_range_endpoints)]
-fn format_action(action: ActionId, state: &GameState) -> String {
-    let player = match state.current_player {
-        Player::One => "P1",
-        Player::Two => "P2",
-    };
-
-    let desc = match action.0 {
+pub fn format_action_desc(action: ActionId, _state: &GameState) -> String {
+    match action.0 {
         SETTLEMENT_START..SETTLEMENT_END => {
-            let nid = action.settlement_node().0;
-            if matches!(state.phase, Phase::PlaceSettlement) {
-                format!("Place settlement at node {nid}")
-            } else {
-                format!("Build settlement at node {nid}")
-            }
+            format!("Settle N{}", action.settlement_node().0)
         }
         ROAD_START..ROAD_END => {
-            let eid = action.road_edge().0;
-            if matches!(state.phase, Phase::PlaceRoad) {
-                format!("Place road on edge {eid}")
-            } else {
-                format!("Build road on edge {eid}")
-            }
+            format!("Road E{}", action.road_edge().0)
         }
-        CITY_START..CITY_END => format!("Build city at node {}", action.city_node().0),
-        END_TURN => "End turn".to_string(),
-        BUY_DEV_CARD => "Buy development card".to_string(),
-        PLAY_KNIGHT => "Play Knight".to_string(),
-        PLAY_ROAD_BUILDING => "Play Road Building".to_string(),
+        CITY_START..CITY_END => format!("City N{}", action.city_node().0),
+        ROLL => "Roll".to_string(),
+        END_TURN => "End".to_string(),
+        BUY_DEV_CARD => "Buy dev".to_string(),
+        PLAY_KNIGHT => "Knight".to_string(),
+        PLAY_ROAD_BUILDING => "Road Build".to_string(),
         YOP_START..YOP_END => {
             let (r1, r2) = action.year_of_plenty_resources();
-            format!("Year of Plenty: {r1} + {r2}")
+            format!("YoP: {r1}+{r2}")
         }
-        MONOPOLY_START..MONOPOLY_END => format!("Monopoly: {}", action.monopoly_resource()),
-        ROBBER_START..ROBBER_END => format!("Move robber to tile {}", action.robber_tile().0),
-        DISCARD_START..DISCARD_END => format!("Discard {}", action.discard_resource()),
+        MONOPOLY_START..MONOPOLY_END => {
+            format!("Mono: {}", action.monopoly_resource())
+        }
+        ROBBER_START..ROBBER_END => format!("Robber T{}", action.robber_tile().0),
+        DISCARD_START..DISCARD_END => format!("Drop {}", action.discard_resource()),
         MARITIME_START..MARITIME_END => {
             let (give, recv) = action.maritime_trade();
-            format!("Trade {give} for {recv}")
+            format!("{give}→{recv}")
         }
-        _ => format!("Action {}", action.0),
-    };
-
-    format!("{player}: {desc}")
+        _ => format!("#{}", action.0),
+    }
 }
 
-fn format_phase(phase: &Phase) -> String {
+pub fn format_phase(phase: &Phase) -> String {
     match phase {
         Phase::PlaceSettlement => "Place Settlement".to_string(),
         Phase::PlaceRoad => "Place Road".to_string(),
@@ -450,7 +437,8 @@ pub fn render(log: &GameLog, output: &Path) {
         } else {
             // Player action
             let action_id = ActionId(action as u8);
-            let desc = format_action(action_id, &state);
+            let p = if player == 0 { "P1" } else { "P2" };
+            let desc = format!("{p}: {}", format_action_desc(action_id, &state));
             state.apply_action(action);
             frames.push(capture_frame(&state, &desc, player, None));
         }
@@ -570,7 +558,8 @@ pub fn render_with_encoder(
         } else {
             // Player action — encode AFTER applying, from acting player's perspective
             let action_id = ActionId(action as u8);
-            let desc = format_action(action_id, &state);
+            let p = if player == 0 { "P1" } else { "P2" };
+            let desc = format!("{p}: {}", format_action_desc(action_id, &state));
             let acting = state.current_player;
             state.apply_action(action);
 
