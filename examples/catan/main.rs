@@ -45,12 +45,13 @@ fn main() {
             games_per_iter: 500,
             epochs: 1,
             lr: 0.0005,
-            replay_window: 30,
+            replay_window: 10,
             mcts_sims: 3000,
             mcts_sims_start: 400,
             train_batch_size: 4096,
             leaf_batch_size: 32,
             bench_games: 0,
+            warmup_iters: 60,
             ..TrainConfig::default()
         },
     );
