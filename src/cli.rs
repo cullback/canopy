@@ -133,6 +133,11 @@ pub fn serve_command() -> Command {
                 .value_parser(["p1", "p2", "both", "none"])
                 .help("Which players are human-controlled"),
         )
+        .arg(
+            Arg::new("replay")
+                .long("replay")
+                .help("Game log file to replay (seed + actions)"),
+        )
 }
 
 /// Parsed serve options.
@@ -142,6 +147,7 @@ pub struct ServeOptions {
     pub eval_name: String,
     pub simulations: u32,
     pub human_players: [bool; 2],
+    pub replay: Option<PathBuf>,
 }
 
 /// Parse serve subcommand options.
@@ -165,11 +171,13 @@ pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
         "both" => [true, true],
         _ => [false, false],
     };
+    let replay = matches.get_one::<String>("replay").map(PathBuf::from);
     ServeOptions {
         port,
         eval_name,
         simulations,
         human_players,
+        replay,
     }
 }
 
@@ -650,6 +658,9 @@ impl<G: Game + 'static> GameCli<G> {
         self.load_nn_evaluator(matches);
         let opts = parse_serve(serve_matches);
         let evaluator = self.evaluators.get_arc(&opts.eval_name);
+        let replay = opts
+            .replay
+            .map(|path| crate::game_log::GameLog::read(&path));
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(crate::server::serve(
             opts.port,
@@ -657,6 +668,7 @@ impl<G: Game + 'static> GameCli<G> {
             presenter,
             opts.simulations,
             opts.human_players,
+            replay,
         ));
     }
 

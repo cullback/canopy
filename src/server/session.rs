@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use crate::eval::Evaluator;
 use crate::game::{Game, Status};
+use crate::game_log::GameLog;
 use crate::mcts::{Config, Search, Step};
 
 use super::protocol::{ActionInfo, ClientMsg, ServerMsg};
@@ -69,6 +70,29 @@ impl<G: Game + 'static> GameSession<G> {
             cursor: 0,
             seed,
         }
+    }
+
+    /// Load a recorded game log for replay.
+    ///
+    /// Resets the game with the log's seed, replays all actions into history
+    /// (recording labels and chance detection), then rewinds cursor to 0 so
+    /// the UI starts at the beginning with full redo available.
+    pub fn load_replay(&mut self, log: &GameLog) {
+        let state = self.presenter.new_game(log.seed);
+        self.search.reset(state);
+        self.history.clear();
+        self.cursor = 0;
+        self.seed = log.seed;
+
+        // Replay all actions into history.
+        for &action in &log.actions {
+            self.apply_action(action);
+        }
+
+        // Rewind: reset to initial state, keep history for redo.
+        self.cursor = 0;
+        let state = self.presenter.new_game(log.seed);
+        self.search.reset(state);
     }
 
     /// Process a client message and return response messages.

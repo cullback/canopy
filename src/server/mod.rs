@@ -17,6 +17,7 @@ use tower_http::services::ServeDir;
 
 use crate::eval::Evaluator;
 use crate::game::Game;
+use crate::game_log::GameLog;
 
 /// Launch the web analysis board server.
 ///
@@ -28,8 +29,10 @@ pub async fn serve<G: Game + 'static>(
     presenter: Arc<dyn GamePresenter<G>>,
     default_sims: u32,
     human_players: [bool; 2],
+    replay: Option<GameLog>,
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
+    let replay = replay.map(Arc::new);
 
     let session = Arc::new(Mutex::new(GameSession::new(
         evaluator.clone(),
@@ -48,10 +51,12 @@ pub async fn serve<G: Game + 'static>(
                 let session = session.clone();
                 let evaluator = evaluator_for_ws;
                 let presenter = presenter_for_ws;
+                let replay = replay.clone();
                 move |ws: WebSocketUpgrade| {
                     let session = session.clone();
                     let evaluator = evaluator.clone();
                     let presenter = presenter.clone();
+                    let replay = replay.clone();
                     async move {
                         ws.on_upgrade(move |socket| {
                             handle_socket(
@@ -61,6 +66,7 @@ pub async fn serve<G: Game + 'static>(
                                 presenter,
                                 default_sims,
                                 human_players,
+                                replay,
                             )
                         })
                     }
@@ -82,9 +88,13 @@ async fn handle_socket<G: Game + 'static>(
     presenter: Arc<dyn GamePresenter<G>>,
     default_sims: u32,
     human_players: [bool; 2],
+    replay: Option<Arc<GameLog>>,
 ) {
     // Each WebSocket connection gets its own session for isolation.
     let mut session = GameSession::new(evaluator, presenter, default_sims, human_players);
+    if let Some(log) = &replay {
+        session.load_replay(log);
+    }
 
     // Send initial state.
     let init_msgs = session.handle(ClientMsg::GetState);
