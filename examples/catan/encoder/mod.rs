@@ -12,7 +12,7 @@
 //! |  5  | Main            | 1.0                   |
 //! |  6  | RoadBuilding    | 1.0                   |
 //!
-//! ## Per-player (44 × 2 = 88 features) — current player first
+//! ## Per-player (49 × 2 = 98 features) — current player first
 //!
 //! | Features              | Count | Normalization           |
 //! |-----------------------|-------|-------------------------|
@@ -28,6 +28,7 @@
 //! | Victory points        | 1     | / 15 (total self, public opp) |
 //! | Trade ratios          | 5     | / 4                     |
 //! | Per-number production | 11    | / 10                    |
+//! | Per-resource prod.    | 5     | / 35                    |
 //! | Dev bought this turn  | 5     | / deck_max              |
 //! | Played dev this turn  | 1     | binary                  |
 //!
@@ -45,7 +46,8 @@
 //! |      15 | max roads / win threshold (VP)    |
 //! |      13 | max pips at a single node (5+4+4) |
 //! |       5 | max single-tile pips (for 6 or 8) |
-//! |       3 | max adjacent edges/nodes per node |
+//! |      35 | max per-resource production       |
+//! |       6 | max tile corner nodes / BFS cap   |
 //! |    5/36 | max single-tile dice probability  |
 
 use canopy::player::Player;
@@ -232,26 +234,121 @@ pub(crate) fn tile_numbers(topo: &Topology) -> [u8; 19] {
     numbers
 }
 
-/// Push road count features for a node (2 features: cur_count/3, opp_count/3).
-pub(crate) fn encode_road_counts(
-    node: &Node,
-    cur_roads: u128,
-    opp_roads: u128,
+/// Push per-resource production (5 features): total building_weight × pips per resource.
+/// Normalized by MAX_RESOURCE_PRODUCTION.
+pub(crate) fn encode_per_resource_production(
+    boards: &PlayerBoards,
+    topo: &Topology,
+    tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
-    let mut cur_count = 0u8;
-    let mut opp_count = 0u8;
-    for &eid in &node.adjacent_edges {
-        let mask = 1u128 << eid.0;
-        if cur_roads & mask != 0 {
-            cur_count += 1;
-        }
-        if opp_roads & mask != 0 {
-            opp_count += 1;
+    let mut res_prod = [0.0f32; 5];
+    for (i, tile) in topo.tiles.iter().enumerate() {
+        if let Some(r) = tile.terrain.resource() {
+            let number = tile_numbers[i];
+            if number == 0 {
+                continue;
+            }
+            let pips = PIPS[number as usize] as f32;
+            let mut tile_bw = 0.0f32;
+            for &nid in &tile.nodes {
+                tile_bw += building_weight(boards, nid.0);
+            }
+            res_prod[r as usize] += tile_bw * pips;
         }
     }
-    out.push(cur_count as f32 / 3.0);
-    out.push(opp_count as f32 / 3.0);
+    for &v in &res_prod {
+        out.push(v / MAX_RESOURCE_PRODUCTION);
+    }
+}
+
+/// Maximum per-resource production (building_weight × pips summed over all tiles of that resource).
+pub(crate) const MAX_RESOURCE_PRODUCTION: f32 = 35.0;
+
+/// Push tile building weight features (2 features: own/6, opp/6).
+/// Sum of building_weight() for the tile's 6 nodes, for each player.
+pub(crate) fn encode_tile_building_weights(
+    tile: &crate::game::board::Tile,
+    cur_boards: &PlayerBoards,
+    opp_boards: &PlayerBoards,
+    out: &mut Vec<f32>,
+) {
+    let mut cur_bw = 0.0f32;
+    let mut opp_bw = 0.0f32;
+    for &nid in &tile.nodes {
+        cur_bw += building_weight(cur_boards, nid.0);
+        opp_bw += building_weight(opp_boards, nid.0);
+    }
+    out.push(cur_bw / 6.0);
+    out.push(opp_bw / 6.0);
+}
+
+/// Compute network distances from each node to the nearest on-network node.
+///
+/// Uses multi-source BFS over the 54-node graph with bitmask operations.
+/// Seeds: all nodes with a building (settlement or city) OR adjacent to a road.
+/// Returns `min(dist, 6) / 6.0` per node; on-network = 0.0, unreachable = 1.0.
+pub(crate) fn compute_network_distances(
+    adj: &crate::game::board::AdjacencyBitboards,
+    boards: &PlayerBoards,
+) -> [f32; 54] {
+    let buildings = boards.settlements | boards.cities;
+    let roads = boards.road_network.roads;
+
+    // Seed: nodes with buildings or adjacent to at least one road
+    let mut visited: u64 = buildings;
+    for n in 0..54u8 {
+        if adj.node_adj_edges[n as usize] & roads != 0 {
+            visited |= 1u64 << n;
+        }
+    }
+
+    let mut dist = [0u8; 54];
+    if visited == 0 {
+        // No network exists — all nodes get max distance
+        return [1.0; 54];
+    }
+
+    // Initialize distances: on-network = 0, others = 255 (unvisited)
+    for n in 0..54u8 {
+        if visited & (1u64 << n) == 0 {
+            dist[n as usize] = 255;
+        }
+    }
+
+    // BFS
+    let mut frontier = visited;
+    let mut current_dist = 0u8;
+    while frontier != 0 && current_dist < 6 {
+        current_dist += 1;
+        let mut next_frontier: u64 = 0;
+        let mut bits = frontier;
+        while bits != 0 {
+            let n = bits.trailing_zeros() as usize;
+            bits &= bits - 1;
+            let neighbors = adj.node_adj_nodes[n] & !visited;
+            next_frontier |= neighbors;
+        }
+        // Set distances for newly discovered nodes
+        let mut new_bits = next_frontier;
+        while new_bits != 0 {
+            let n = new_bits.trailing_zeros() as usize;
+            new_bits &= new_bits - 1;
+            dist[n] = current_dist;
+        }
+        visited |= next_frontier;
+        frontier = next_frontier;
+    }
+
+    let mut result = [0.0f32; 54];
+    for n in 0..54 {
+        result[n] = if dist[n] == 255 {
+            1.0
+        } else {
+            dist[n] as f32 / 6.0
+        };
+    }
+    result
 }
 
 /// Push per-resource production features for a node (5 features).

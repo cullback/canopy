@@ -1,21 +1,22 @@
-# NexusEncoder — 1266 features
+# NexusEncoder — 1314 features
 
-## Global (107 = 7 + 44×2 + 12)
+## Global (117 = 7 + 49×2 + 12)
 
 | Feature          | Count | Norm    | Notes              |
 | ---------------- | ----- | ------- | ------------------ |
 | Phase            | 7     | one-hot | scalar for Discard |
-| Per-player       | 88    |         | cur player first   |
+| Per-player       | 98    |         | cur player first   |
 | Dice probability | 11    | prob    | per-value weights  |
 | Dice deck frac   | 1     | /36     | 1.0 if random      |
 
-## Per-player (44 × 2 = 88)
+## Per-player (49 × 2 = 98)
 
 | Feature             | Count | Norm      | Notes              |
 | ------------------- | ----- | --------- | ------------------ |
 | Resources           | 5     | /19       | per resource       |
 | Trade ratios        | 5     | /4        | (4−ratio)/4        |
 | Number production   | 11    | /10       | bldg_wt per number |
+| Resource production | 5     | /35       | bldg_wt×pips/res   |
 | Victory points      | 1     | /15       | total / public     |
 | Settlements left    | 1     | /5        |                    |
 | Cities left         | 1     | /4        |                    |
@@ -28,22 +29,24 @@
 | Dev bought          | 5     | /deck_max | exact / 0          |
 | Played dev turn     | 1     | binary    |                    |
 
-## Tiles (19 × 7 = 133)
+## Tiles (19 × 9 = 171)
 
-| Feature  | Count | Norm    |
-| -------- | ----- | ------- |
-| Resource | 5     | one-hot |
-| Pips     | 1     | /5      |
-| Robber   | 1     | binary  |
+| Feature             | Count | Norm    | Notes                   |
+| ------------------- | ----- | ------- | ----------------------- |
+| Resource            | 5     | one-hot |                         |
+| Pips                | 1     | /5      |                         |
+| Robber              | 1     | binary  |                         |
+| Own building weight | 1     | /6      | sum of bldg_wt, 6 nodes |
+| Opp building weight | 1     | /6      | sum of bldg_wt, 6 nodes |
 
 ## Nodes (54 × 19 = 1026)
 
-| Feature            | Count | Norm  | Notes                |
-| ------------------ | ----- | ----- | -------------------- |
-| Building cur       | 1     | 0/½/1 |                      |
-| Building opp       | 1     | 0/½/1 |                      |
-| Port ratios        | 5     |       | .5 specific, .25 gen |
-| Production         | 5     | /13   | adj tile pips/res    |
-| Blocked production | 5     | /5    | robber tiles only    |
-| Road count cur     | 1     | /3    |                      |
-| Road count opp     | 1     | /3    |                      |
+| Feature             | Count | Norm  | Notes                |
+| ------------------- | ----- | ----- | -------------------- |
+| Building cur        | 1     | 0/½/1 |                      |
+| Building opp        | 1     | 0/½/1 |                      |
+| Port ratios         | 5     |       | .5 specific, .25 gen |
+| Production          | 5     | /13   | adj tile pips/res    |
+| Blocked production  | 5     | /5    | robber tiles only    |
+| Dist to own network | 1     | /6    | BFS, capped at 6     |
+| Dist to opp network | 1     | /6    | BFS, capped at 6     |

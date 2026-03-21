@@ -20,8 +20,8 @@ const _: () = assert!(
     "action space changed — update split constants below"
 );
 
-const GL: usize = 107;
-const TF: usize = 7;
+const GL: usize = 117;
+const TF: usize = 9;
 const NF: usize = 19;
 const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
@@ -236,7 +236,8 @@ pub struct CatanNexusModel<B: Backend> {
     policy_city: Linear<B>,
     policy_other1: Linear<B>,
     policy_other2: Linear<B>,
-    policy_robber: Linear<B>,
+    policy_robber1: Linear<B>,
+    policy_robber2: Linear<B>,
 
     // Value head
     value1: Linear<B>,
@@ -304,7 +305,8 @@ pub fn init_nexus_with<B: Backend>(device: &B::Device) -> CatanNexusModel<B> {
         policy_city: LinearConfig::new(HIDDEN, 1).init(device),
         policy_other1: LinearConfig::new(pool_dim, HIDDEN).init(device),
         policy_other2: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
-        policy_robber: LinearConfig::new(HIDDEN, 1).init(device),
+        policy_robber1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
 
         value1: LinearConfig::new(pool_dim, HIDDEN).init(device),
         value2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
@@ -424,8 +426,11 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
 
         // ── Policy: Robber (actions 205-223) ─────────────────────────
         let robber_logits = self
-            .policy_robber
-            .forward(h_tile.reshape([batch * NUM_TILES, HIDDEN]))
+            .policy_robber2
+            .forward(relu(
+                self.policy_robber1
+                    .forward(h_tile.reshape([batch * NUM_TILES, HIDDEN])),
+            ))
             .reshape([batch, NUM_TILES]);
 
         // ── Concatenate: [settlement(54)|road(72)|city(54)|other_pre(25)|robber(19)|other_post(25)]

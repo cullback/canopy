@@ -1,32 +1,35 @@
-//! # NexusEncoder (1266 features)
+//! # NexusEncoder (1314 features)
 //!
 //! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
 //!
-//! ## Global (107 features)
+//! ## Global (117 features)
 //!
 //! | Block                  | Count | Source                         |
 //! |------------------------|-------|--------------------------------|
 //! | Phase one-hot          |     7 | `encode_phase` (shared)        |
-//! | Per-player nexus × 2   |    88 | `encode_player_nexus`          |
+//! | Per-player nexus × 2   |    98 | `encode_player_nexus`          |
 //! | Dice state             |    12 | `encode_dice` (shared)         |
 //!
-//! ### Per-player nexus (44)
+//! ### Per-player nexus (49)
 //!
 //! | Feature              | Count | Source                         |
 //! |----------------------|-------|--------------------------------|
 //! | standard             |    22 | `encode_player` (shared)       |
 //! | trade_ratios         |     5 | /4, best maritime ratio        |
 //! | per_number_production|    11 | /10, building_weight per dice  |
+//! | per_resource_prod    |     5 | /35, building_weight×pips/res  |
 //! | dev_bought_this_turn |     5 | /deck_max, exact self, 0 opp   |
 //! | played_dev_this_turn |     1 | binary                         |
 //!
-//! ## Tiles (19 × 7 = 133 features)
+//! ## Tiles (19 × 9 = 171 features)
 //!
 //! | Feature       | Count | Description                        |
 //! |---------------|-------|------------------------------------|
 //! | resource      |     5 | one-hot                            |
 //! | pips          |     1 | pips / 5                           |
 //! | robber        |     1 | binary                             |
+//! | bldg_wt_cur   |     1 | sum building_weight(own) / 6       |
+//! | bldg_wt_opp   |     1 | sum building_weight(opp) / 6       |
 //!
 //! ## Nodes (54 × 19 = 1026 features)
 //!
@@ -37,37 +40,38 @@
 //! | port_ratios        |     5 | per-resource trade improvement     |
 //! | production         |     5 | sum of pips from adj tiles / 13    |
 //! | blocked_production |     5 | robber-blocked tile pips / 5       |
-//! | road_count_cur     |     1 | adj edges with cur road / 3        |
-//! | road_count_opp     |     1 | adj edges with opp road / 3        |
+//! | dist_to_own_net    |     1 | BFS distance / 6, capped           |
+//! | dist_to_opp_net    |     1 | BFS distance / 6, capped           |
 
 use canopy::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
 use super::{
-    PIPS, encode_dice, encode_node_blocked_production, encode_node_production,
-    encode_per_number_production, encode_phase, encode_player, encode_player_dev_extra,
-    encode_port_ratios, encode_road_counts, node_value, tile_numbers,
+    PIPS, compute_network_distances, encode_dice, encode_node_blocked_production,
+    encode_node_production, encode_per_number_production, encode_per_resource_production,
+    encode_phase, encode_player, encode_player_dev_extra, encode_port_ratios,
+    encode_tile_building_weights, node_value, tile_numbers,
 };
 
 pub struct NexusEncoder;
 
 #[allow(dead_code)]
 impl NexusEncoder {
-    pub const FEATURE_SIZE: usize = 1266;
-    pub const GLOBAL_LEN: usize = 107;
-    pub const TILES_F: usize = 7;
+    pub const FEATURE_SIZE: usize = 1314;
+    pub const GLOBAL_LEN: usize = 117;
+    pub const TILES_F: usize = 9;
     pub const NODES_F: usize = 19;
 }
 
-/// Push 44 unified per-player features: std(22) + ext_trimmed(16) + dev_extra(6).
+/// Push 49 unified per-player features: std(22) + trade(5) + number_prod(11) + resource_prod(5) + dev_extra(6).
 fn encode_player_nexus(
     state: &GameState,
     player: canopy::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
-    // Standard (21)
+    // Standard (22)
     encode_player(state, player, out);
 
     // Trade ratios (5): (4 - ratio) / 4, so better = higher
@@ -77,6 +81,9 @@ fn encode_player_nexus(
 
     // Per-number production (11)
     encode_per_number_production(&state.boards[player], &state.topology, tile_numbers, out);
+
+    // Per-resource production (5)
+    encode_per_resource_production(&state.boards[player], &state.topology, tile_numbers, out);
 
     // Dev extra (6)
     encode_player_dev_extra(state, player, out);
@@ -95,12 +102,12 @@ impl StateEncoder<GameState> for NexusEncoder {
 
         let tile_numbers = tile_numbers(topo);
 
-        // === Global features (105) ===
+        // === Global features (117) ===
 
         // Phase one-hot (7)
         encode_phase(state, out);
 
-        // Per-player nexus (43 × 2 = 86)
+        // Per-player nexus (49 × 2 = 98)
         encode_player_nexus(state, current, &tile_numbers, out);
         encode_player_nexus(state, opp, &tile_numbers, out);
 
@@ -109,7 +116,10 @@ impl StateEncoder<GameState> for NexusEncoder {
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);
 
-        // === Tile stream (19 × 7 = 133) ===
+        // === Tile stream (19 × 9 = 171) ===
+        let cur_board = &state.boards[current];
+        let opp_board = &state.boards[opp];
+
         for (i, tile) in topo.tiles.iter().enumerate() {
             // Resource one-hot (5)
             let resource_idx = tile.terrain.resource().map(|r| r as usize);
@@ -126,13 +136,13 @@ impl StateEncoder<GameState> for NexusEncoder {
             out.push(pips);
             // Robber (1)
             out.push(f32::from(state.robber == tile.id));
+            // Building weights (2)
+            encode_tile_building_weights(tile, cur_board, opp_board, out);
         }
 
         // === Node stream (54 × 19 = 1026) ===
-        let cur_board = &state.boards[current];
-        let opp_board = &state.boards[opp];
-        let cur_roads = cur_board.road_network.roads;
-        let opp_roads = opp_board.road_network.roads;
+        let own_dist = compute_network_distances(&topo.adj, cur_board);
+        let opp_dist = compute_network_distances(&topo.adj, opp_board);
 
         for i in 0..54u8 {
             let node = &topo.nodes[i as usize];
@@ -150,8 +160,9 @@ impl StateEncoder<GameState> for NexusEncoder {
             // blocked_production (5)
             encode_node_blocked_production(node, topo, &tile_numbers, state.robber, out);
 
-            // road_count_cur, road_count_opp (2)
-            encode_road_counts(node, cur_roads, opp_roads, out);
+            // network distances (2)
+            out.push(own_dist[i as usize]);
+            out.push(opp_dist[i as usize]);
         }
 
         debug_assert_eq!(
@@ -251,14 +262,14 @@ mod tests {
     }
 
     // ── Feature offset helpers ───────────────────────────────────────
-    const GLOBAL_OFF: usize = 107;
+    const GLOBAL_OFF: usize = 117;
 
     fn tile_feat(t: usize, f: usize) -> usize {
-        GLOBAL_OFF + t * 7 + f
+        GLOBAL_OFF + t * 9 + f
     }
 
     fn node_feat(n: usize, f: usize) -> usize {
-        GLOBAL_OFF + 19 * 7 + n * 19 + f
+        GLOBAL_OFF + 19 * 9 + n * 19 + f
     }
 
     fn make_main_state() -> GameState {
@@ -358,30 +369,37 @@ mod tests {
     }
 
     #[test]
-    fn road_count_features() {
+    fn network_distance_features() {
         let mut state = make_main_state();
-        let topo = &state.topology;
-        let n = 5usize;
-        let node = &topo.nodes[n];
 
-        let cur_edge = node.adjacent_edges[0];
-        let opp_edge = node.adjacent_edges[1];
-        state.boards[Player::One].road_network.roads = 1u128 << cur_edge.0;
-        state.boards[Player::Two].road_network.roads = 1u128 << opp_edge.0;
+        // Place a settlement for Player::One at node 10
+        state.boards[Player::One].settlements = 1u64 << 10;
 
         let mut features = Vec::new();
         NexusEncoder.encode(&state, &mut features);
 
-        // Road counts at per-node offset 17-18 (2 + 5 + 5 + 5 = 17)
+        // Network distance at per-node offset 17-18 (2 + 5 + 5 + 5 = 17)
+        // Node 10 is on-network → own_dist = 0.0
         assert_eq!(
-            features[node_feat(n, 17)],
-            1.0 / 3.0,
-            "cur road count = 1/3"
+            features[node_feat(10, 17)],
+            0.0,
+            "on-network node should have dist 0.0"
         );
+
+        // Player::Two has no buildings → all opp distances = 1.0 (no network)
         assert_eq!(
-            features[node_feat(n, 18)],
-            1.0 / 3.0,
-            "opp road count = 1/3"
+            features[node_feat(10, 18)],
+            1.0,
+            "no opp network → dist 1.0"
+        );
+
+        // A node adjacent to node 10 should have own_dist = 1/6
+        let topo = &state.topology;
+        let adj_node = topo.nodes[10].adjacent_nodes[0].0 as usize;
+        assert_eq!(
+            features[node_feat(adj_node, 17)],
+            1.0 / 6.0,
+            "adjacent to network → dist 1/6"
         );
     }
 
@@ -486,8 +504,8 @@ mod tests {
         assert_eq!(features[cur_trade + 3], 0.0, "grain 4:1 → 0.0");
         assert_eq!(features[cur_trade + 4], 0.0, "ore 4:1 → 0.0");
 
-        // Opp player_nexus starts at 7 + 44 = 51, trade ratios at 51 + 22 = 73
-        let opp_trade = 51 + 22;
+        // Opp player_nexus starts at 7 + 49 = 56, trade ratios at 56 + 22 = 78
+        let opp_trade = 56 + 22;
         for i in 0..5 {
             assert_eq!(features[opp_trade + i], 0.0, "opp all 4:1 → 0.0");
         }
