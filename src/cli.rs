@@ -552,7 +552,7 @@ impl<G: Game + 'static> GameCli<G> {
             .1;
 
         let mut trainable = factory();
-        trainable.load(checkpoint_dir, iteration);
+        trainable.load_weights(checkpoint_dir, iteration);
         let evaluator = trainable.evaluator(encoder.clone());
         self.evaluators.add_arc("nn", evaluator);
         self.nn_encoder = Some(encoder);

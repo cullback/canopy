@@ -411,13 +411,9 @@ where
     }
 
     fn load(&mut self, dir: &Path, iteration: usize) {
+        self.load_weights(dir, iteration);
+
         let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
-
-        let path = dir.join(format!("model_iter_{iteration}"));
-        self.model = (self.model_init)(&self.device)
-            .load_file(path.to_str().unwrap(), &recorder, &self.device)
-            .expect("failed to load checkpoint");
-
         let optim_path = dir.join(format!("optim_iter_{iteration}"));
         match recorder.load(optim_path, &self.device) {
             Ok(optim_record) => {
@@ -430,5 +426,13 @@ where
                 tracing::warn!("no optimizer state found, starting fresh optimizer");
             }
         }
+    }
+
+    fn load_weights(&mut self, dir: &Path, iteration: usize) {
+        let recorder = NamedMpkFileRecorder::<FullPrecisionSettings>::new();
+        let path = dir.join(format!("model_iter_{iteration}"));
+        self.model = (self.model_init)(&self.device)
+            .load_file(path.to_str().unwrap(), &recorder, &self.device)
+            .expect("failed to load checkpoint");
     }
 }

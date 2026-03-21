@@ -226,6 +226,8 @@ pub trait TrainableModel<G: Game>: Send {
     fn train_step(&mut self, samples: &[&Sample], cfg: &TrainStepConfig) -> TrainMetrics;
     fn save(&self, dir: &Path, iteration: usize);
     fn load(&mut self, dir: &Path, iteration: usize);
+    /// Load only model weights (no optimizer state). Use for inference.
+    fn load_weights(&mut self, dir: &Path, iteration: usize);
 }
 
 // ---------------------------------------------------------------------------
