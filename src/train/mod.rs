@@ -129,9 +129,9 @@ pub trait TrainableModel<G: Game>: Send {
 
 fn warmup_t(config: &TrainConfig, iteration: usize) -> f64 {
     if config.warmup_iters == 0 {
-        return 1.0;
+        return config.q_weight_max as f64;
     }
-    (iteration as f64 / config.warmup_iters as f64).min(1.0)
+    (iteration as f64 / config.warmup_iters as f64).min(config.q_weight_max as f64)
 }
 
 fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {

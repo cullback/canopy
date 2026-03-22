@@ -180,12 +180,12 @@ impl<B: Backend> HeteroGnnLayer<B> {
             .linear_nn
             .forward(node_norm.clone().reshape([batch * num_nodes, hidden]))
             .reshape([batch, num_nodes, hidden]);
-        let nn_agg = node_adj.matmul(nn_msg); // [B, 54, 192]
+        let nn_agg = node_adj.matmul(nn_msg);
         let tn_msg = self
             .linear_tn
             .forward(tile_norm.clone().reshape([batch * num_tiles, hidden]))
             .reshape([batch, num_tiles, hidden]);
-        let tn_agg = tile_to_node_adj.matmul(tn_msg); // [B, 54, 192]
+        let tn_agg = tile_to_node_adj.matmul(tn_msg);
         let node_out = node + relu(node_self + nn_agg + tn_agg);
 
         // Tile update: self + node-to-tile messages
@@ -197,7 +197,7 @@ impl<B: Backend> HeteroGnnLayer<B> {
             .linear_nt
             .forward(node_norm.reshape([batch * num_nodes, hidden]))
             .reshape([batch, num_nodes, hidden]);
-        let nt_agg = node_to_tile_adj.matmul(nt_msg); // [B, 19, 192]
+        let nt_agg = node_to_tile_adj.matmul(nt_msg);
         let tile_out = tile + relu(tile_self + nt_agg);
 
         (node_out, tile_out)
@@ -290,8 +290,7 @@ pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Catan
         device,
     );
 
-    // Pooled dimension for other-policy and value: node_pool(192) + tile_pool(192) + global(96)
-    let pool_dim = HIDDEN + HIDDEN + GLOBAL_HIDDEN; // 480
+    let pool_dim = HIDDEN + HIDDEN + GLOBAL_HIDDEN;
 
     CatanNexusModel {
         global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
@@ -357,17 +356,17 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
             .narrow(1, GL + NUM_TILES * TF, NUM_NODES * NF)
             .reshape([batch, NUM_NODES, NF]);
 
-        // ── Project global: [batch, GL] → [batch, 64] ───────────────
+        // ── Project global ───────────────────────────────────────────
         let global = relu(self.global_proj.forward(global_raw));
 
-        // ── Project tiles: [batch, 19, TF] → [batch, 19, 192] ──────
+        // ── Project tiles ──────────────────────────────────────────
         let tiles = relu(
             self.tile_proj
                 .forward(tiles_raw.reshape([batch * NUM_TILES, TF])),
         )
         .reshape([batch, NUM_TILES, HIDDEN]);
 
-        // ── Project nodes: [batch, 54, NF] → [batch, 54, 192] ──────
+        // ── Project nodes ──────────────────────────────────────────
         let nodes = relu(
             self.node_proj
                 .forward(nodes_raw.reshape([batch * NUM_NODES, NF])),
@@ -402,7 +401,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         )
         .reshape([batch, NUM_TILES, HIDDEN]);
 
-        // ── GNN trunk (4 layers) ─────────────────────────────────────
+        // ── GNN trunk ─────────────────────────────────────────────────
         for layer in &self.gnn_layers {
             let (n, t) = layer.forward(
                 h_node,
@@ -414,7 +413,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
             h_node = n;
             h_tile = t;
         }
-        // h_node: [batch, 54, 192], h_tile: [batch, 19, 192]
+        // h_node: [batch, 54, HIDDEN], h_tile: [batch, 19, HIDDEN]
 
         // ── Policy: Settlement (actions 0-53) ────────────────────────
         let settlement_logits = self
@@ -425,7 +424,9 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         // ── Policy: Road (actions 54-125) ────────────────────────────
         let h_src = h_node.clone().select(1, self.edge_src.clone());
         let h_dst = h_node.clone().select(1, self.edge_dst.clone());
-        let edge_feats = Tensor::cat(vec![h_src, h_dst], 2);
+        let edge_sum = h_src.clone() + h_dst.clone();
+        let edge_diff = (h_src - h_dst).abs();
+        let edge_feats = Tensor::cat(vec![edge_sum, edge_diff], 2);
         let edge_feats_hidden = relu(
             self.policy_road1
                 .forward(edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2])),
@@ -444,7 +445,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         // ── Pooled features (shared by other-policy and value heads) ─
         let node_pool = h_node.clone().mean_dim(1).reshape([batch, HIDDEN]);
         let tile_pool = h_tile.clone().mean_dim(1).reshape([batch, HIDDEN]);
-        let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1); // [batch, 480]
+        let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1);
 
         // ── Policy: Other (50 non-robber actions) ────────────────────
         let other_hidden = relu(self.policy_other1.forward(pooled.clone()));

@@ -23,17 +23,21 @@ pub struct TrainConfig {
     /// Number of most-recent iterations kept in the replay buffer.
     pub replay_window: usize,
     /// Iterations over which MCTS sims ramp from `mcts_sims_start` to `mcts_sims`
-    /// and the value target transitions from pure Z (game outcome) to pure Q
-    /// (search value). 0 = no ramp (full sims and pure Z from the start).
+    /// and the value target transitions from pure Z (game outcome) toward Q
+    /// (search value), capped at `q_weight_max`. 0 = no ramp.
     ///
     /// Both ramps are synchronized because they address the same issue: early in
     /// training the value head is unreliable, so Q (derived from search) is
     /// near-zero garbage and extra sims just average more noise. Z (game outcome)
     /// is noisy but carries real signal. As the network improves, Q becomes a
     /// better per-position target than Z (averaging many sims vs one game result),
-    /// and deeper search produces higher-quality Q. See "Lessons From AlphaZero
-    /// (part 4): Improving the Training Target" (Abrams, 2018).
+    /// and deeper search produces higher-quality Q. A small Z anchor (via
+    /// `q_weight_max < 1.0`) prevents value drift from purely self-generated
+    /// Q targets.
     pub warmup_iters: usize,
+    /// Maximum q_weight after warmup ramp. Values < 1.0 retain a Z (game outcome)
+    /// anchor to prevent value drift from purely self-generated Q targets.
+    pub q_weight_max: f32,
 
     // -- Self-play --
     /// Self-play games generated per iteration.
@@ -107,6 +111,7 @@ impl Default for TrainConfig {
             lr: 0.001,
             replay_window: 10,
             warmup_iters: 100,
+            q_weight_max: 0.85,
 
             // Self-play
             games_per_iter: 200,
@@ -114,7 +119,7 @@ impl Default for TrainConfig {
             inference_batch_size: 1024,
             explore_moves: 30,
             playout_cap_full_prob: 0.25,
-            playout_cap_fast_sims: 32,
+            playout_cap_fast_sims: 64,
 
             // MCTS
             mcts_sims: 800,
@@ -131,7 +136,7 @@ impl Default for TrainConfig {
 
             // Soft policy
             soft_policy_temperature: 4.0,
-            soft_policy_weight: 8.0,
+            soft_policy_weight: 0.5,
 
             // Policy surprise weighting
             surprise_weight_fraction: 0.5,
