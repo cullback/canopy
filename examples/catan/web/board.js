@@ -287,22 +287,16 @@ class Board {
       x1: x0, y1: y0, x2: x1, y2: y1,
       stroke: color, 'stroke-width': 4, 'stroke-linecap': 'round'
     }));
-    // Dashed line from edge out to label
-    parent.appendChild(this._el('line', {
-      x1: mx, y1: my, x2: lx, y2: ly,
-      stroke: color, 'stroke-width': 1.5, 'stroke-dasharray': '3,3'
-    }));
-    // Colored pill with ratio
+    // Circle label with ratio
     const isGeneric = port.kind === 'generic';
-    const hw = 10;
-    parent.appendChild(this._el('rect', {
-      x: lx - hw, y: ly - 7, width: hw * 2, height: 14, rx: 3,
+    parent.appendChild(this._el('circle', {
+      cx: lx, cy: ly, r: 10,
       fill: isGeneric ? '#334' : color,
       stroke: isGeneric ? color : 'none', 'stroke-width': 1.5,
-      opacity: 0.9
+      opacity: 0.85
     }));
     const txt = this._el('text', {
-      x: lx, y: ly + 3.5,
+      x: lx, y: ly + 3,
       'text-anchor': 'middle', 'font-size': '8',
       fill: isGeneric ? '#ddd' : (darkText ? '#222' : '#fff'),
       'font-weight': '600'
