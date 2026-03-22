@@ -4,16 +4,14 @@
 //!
 //! ```text
 //! cargo run --example catan -- --p1-sims 200 --p2-sims 1000
-//! cargo run --example catan -- visualize logs/game_0.log
 //! cargo run --example catan -- train --iterations 10 --games 20
 //! ```
 
 use std::sync::Arc;
 
-use clap::{Arg, Command};
+use clap::Arg;
 
 use canopy::cli::GameCli;
-use canopy::game_log::GameLog;
 use canopy::train::TrainConfig;
 
 mod encoder;
@@ -56,13 +54,8 @@ fn main() {
         },
     );
 
-    let viz = Command::new("visualize")
-        .about("Convert a game log to an HTML visualization")
-        .arg(Arg::new("log-file").required(true));
-
     let matches = setup
         .command()
-        .subcommand(viz)
         .arg(
             Arg::new("random-dice")
                 .long("random-dice")
@@ -70,17 +63,6 @@ fn main() {
                 .help("Use random dice instead of balanced (default)"),
         )
         .get_matches();
-
-    // Visualize subcommand
-    if let Some(sub) = matches.subcommand_matches("visualize") {
-        let log_path = std::path::PathBuf::from(sub.get_one::<String>("log-file").unwrap());
-        let game_log = GameLog::read(&log_path);
-        let html_path = log_path.with_extension("html");
-
-        visualize::render(&game_log, &html_path);
-        println!("Wrote {}", html_path.display());
-        return;
-    }
 
     let dice = if matches.get_flag("random-dice") {
         Dice::Random

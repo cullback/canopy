@@ -1,11 +1,7 @@
 use serde::Serialize;
-use std::path::Path;
 
-use canopy::game::Game;
-pub use canopy::game_log::GameLog;
 use canopy::player::Player;
 
-use crate::game;
 use crate::game::action::{
     ActionId, BUY_DEV_CARD, CITY_END, CITY_START, DISCARD_END, DISCARD_START, END_TURN,
     MARITIME_END, MARITIME_START, MONOPOLY_END, MONOPOLY_START, PLAY_KNIGHT, PLAY_ROAD_BUILDING,
@@ -13,21 +9,11 @@ use crate::game::action::{
     YOP_END, YOP_START,
 };
 use crate::game::board::{Port, TileId};
-use crate::game::dice::Dice;
 use crate::game::hex;
 use crate::game::state::{GameState, Phase};
 use crate::game::topology::LAND_HEXES;
 
 // ─── Replay Data ─────────────────────────────────────────────────────────────
-
-#[derive(Serialize)]
-struct ReplayData {
-    board: ReplayBoard,
-    frames: Vec<ReplayFrame>,
-    result: String,
-    bot1: String,
-    bot2: String,
-}
 
 #[derive(Serialize)]
 pub struct ReplayBoard {
@@ -303,149 +289,4 @@ pub fn format_phase(phase: &Phase) -> String {
         Phase::RoadBuilding { roads_left } => format!("Road Building ({roads_left} left)"),
         Phase::GameOver(p) => format!("Game Over ({p} wins)"),
     }
-}
-
-// ─── Render ──────────────────────────────────────────────────────────────────
-
-const RESOURCE_NAMES: [&str; 5] = ["lumber", "brick", "wool", "grain", "ore"];
-
-/// After a dice roll, compute per-player resource deltas and robber-blocked info.
-fn format_dice_production(
-    state: &GameState,
-    hands_before: &[[u8; 5]; 2],
-    roll: u8,
-    lines: &mut Vec<String>,
-) {
-    if roll == 7 {
-        return;
-    }
-
-    let mut any_produced = false;
-    for (p, p_name) in [(Player::One, "P1"), (Player::Two, "P2")] {
-        let before = &hands_before[p as usize];
-        let after = &state.players[p].hand.0;
-        let mut gained = Vec::new();
-        for r in 0..5 {
-            let delta = after[r].saturating_sub(before[r]);
-            for _ in 0..delta {
-                gained.push(RESOURCE_NAMES[r]);
-            }
-        }
-        if !gained.is_empty() {
-            any_produced = true;
-            lines.push(format!("{p_name} got {}", gained.join(", ")));
-        }
-    }
-
-    let mut any_blocked = false;
-    for &tid in &state.topology.dice_to_tiles[roll as usize] {
-        if tid == state.robber {
-            let terrain = state.topology.tiles[tid.0 as usize].terrain;
-            if let Some(resource) = terrain.resource() {
-                lines.push(format!("Tile {} ({resource}) blocked by robber", tid.0));
-                any_blocked = true;
-            }
-        }
-    }
-
-    if !any_produced && !any_blocked {
-        lines.push("No resources produced".to_string());
-    }
-}
-
-/// After a steal resolution, find what was stolen by diffing hands.
-fn format_steal_result(state: &GameState, hands_before: &[[u8; 5]; 2], lines: &mut Vec<String>) {
-    for (p, p_name) in [(Player::One, "P1"), (Player::Two, "P2")] {
-        let before = &hands_before[p as usize];
-        let after = &state.players[p].hand.0;
-        for r in 0..5 {
-            if after[r] > before[r] {
-                let victim_name = if p == Player::One { "P2" } else { "P1" };
-                lines.push(format!(
-                    "{p_name} stole {} from {victim_name}",
-                    RESOURCE_NAMES[r]
-                ));
-                return;
-            }
-        }
-    }
-}
-
-/// Render a game log into a self-contained HTML replay file.
-///
-/// All actions in the log (both chance outcomes and player decisions) are
-/// replayed in order. The phase determines how each action is interpreted.
-pub fn render(log: &GameLog, output: &Path) {
-    let mut state = game::new_game(log.seed, Dice::default());
-
-    let board = build_board(&state);
-
-    // Frame 0: initial state before any action
-    let mut frames = vec![capture_frame(&state, "Game start", 0, None)];
-    for &action in &log.actions {
-        let player = state.current_player as u8;
-
-        if matches!(state.phase, Phase::Roll) {
-            // Dice roll chance outcome
-            let roll = (action + 2) as u8;
-            let hands_before = [
-                state.players[Player::One].hand.0,
-                state.players[Player::Two].hand.0,
-            ];
-            state.apply_action(action);
-
-            let player_name = if player == 0 { "P1" } else { "P2" };
-            let mut desc = format!("{player_name}: Roll dice \u{2192} {roll}");
-            let mut lines = Vec::new();
-            format_dice_production(&state, &hands_before, roll, &mut lines);
-            for line in &lines {
-                desc.push('\n');
-                desc.push_str(line);
-            }
-            frames.push(capture_frame(&state, &desc, player, Some(roll)));
-        } else if matches!(state.phase, Phase::StealResolve) {
-            // Steal resolution chance — fold result into previous frame
-            let hands_before = [
-                state.players[Player::One].hand.0,
-                state.players[Player::Two].hand.0,
-            ];
-            state.apply_action(action);
-
-            let mut lines = Vec::new();
-            format_steal_result(&state, &hands_before, &mut lines);
-            if let Some(prev) = frames.last_mut() {
-                let mut desc = prev.action.clone();
-                for line in &lines {
-                    desc.push('\n');
-                    desc.push_str(line);
-                }
-                *prev = capture_frame(&state, &desc, prev.player, prev.last_roll);
-            }
-        } else {
-            // Player action
-            let action_id = ActionId(action as u8);
-            let p = if player == 0 { "P1" } else { "P2" };
-            let desc = format!("{p}: {}", format_action_desc(action_id, &state));
-            state.apply_action(action);
-            frames.push(capture_frame(&state, &desc, player, None));
-        }
-    }
-
-    let result = match &state.phase {
-        Phase::GameOver(Player::One) => "P1 wins!".to_string(),
-        Phase::GameOver(Player::Two) => "P2 wins!".to_string(),
-        _ => "Game in progress".to_string(),
-    };
-
-    let data = ReplayData {
-        board,
-        frames,
-        result,
-        bot1: "P1".to_string(),
-        bot2: "P2".to_string(),
-    };
-
-    let json = serde_json::to_string(&data).expect("failed to serialize replay data");
-    let html = include_str!("visualize_template.html").replace("\"__REPLAY_DATA__\"", &json);
-    std::fs::write(output, html).expect("failed to write HTML file");
 }
