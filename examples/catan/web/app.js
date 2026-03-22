@@ -142,16 +142,14 @@ function updatePlayerPanel(idx, state) {
   // VP
   document.getElementById(`p${idx}-vp`).textContent = pf.vp;
 
-  // Hand
+  // Hand — always show all 5 resources as colored rectangles
   const handEl = document.getElementById(`p${idx}-hand`);
   handEl.innerHTML = '';
   for (let r = 0; r < 5; r++) {
-    if (pf.hand[r] > 0) {
-      const chip = document.createElement('span');
-      chip.className = `resource-chip ${RESOURCE_NAMES[r]}`;
-      chip.textContent = `${pf.hand[r]} ${RESOURCE_NAMES[r]}`;
-      handEl.appendChild(chip);
-    }
+    const card = document.createElement('span');
+    card.className = `resource-card ${RESOURCE_NAMES[r]}`;
+    card.textContent = pf.hand[r];
+    handEl.appendChild(card);
   }
 
   // Dev cards
@@ -166,11 +164,17 @@ function updatePlayerPanel(idx, state) {
     }
   }
 
-  // Stats
+  // Stats: knights played + awards
   const statsEl = document.getElementById(`p${idx}-stats`);
   const parts = [];
-  if (pf.knights > 0) parts.push(`Knights: ${pf.knights}`);
-  statsEl.textContent = parts.join(' | ');
+  parts.push(`Knights: ${pf.knights}`);
+  if (frame.longest_road && frame.longest_road[0] === idx) {
+    parts.push(`Longest Road: ${frame.longest_road[1]}`);
+  }
+  if (frame.largest_army && frame.largest_army[0] === idx) {
+    parts.push(`Largest Army: ${frame.largest_army[1]}`);
+  }
+  statsEl.textContent = parts.join(' · ');
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────

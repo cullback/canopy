@@ -5,10 +5,10 @@
 const TERRAIN_COLORS = {
   forest: '#2d5a27',
   hills: '#b85c38',
-  pasture: '#7fb069',
-  fields: '#e8c547',
-  mountains: '#6b7b8d',
-  desert: '#d4b896',
+  pasture: '#7ec850',
+  fields: '#e8b430',
+  mountains: '#7a7a7a',
+  desert: '#d4c088',
 };
 
 const HEX_SIZE = 50;
@@ -24,6 +24,7 @@ class Board {
   // Initial render from board topology (tiles, nodes, edges, ports).
   initBoard(board) {
     this.boardData = board;
+    this._centroid = null;
     this.svg.innerHTML = '';
 
     // Compute viewBox from node positions
@@ -35,6 +36,13 @@ class Board {
     const pad = 40;
     this.svg.setAttribute('viewBox',
       `${minX - pad} ${minY - pad} ${maxX - minX + 2 * pad} ${maxY - minY + 2 * pad}`);
+
+    // Ocean background
+    this.svg.appendChild(this._el('rect', {
+      x: minX - pad, y: minY - pad,
+      width: maxX - minX + 2 * pad, height: maxY - minY + 2 * pad,
+      fill: '#1a5276', rx: 10
+    }));
 
     // Draw tiles
     const tilesG = this._g('tiles');
@@ -99,9 +107,11 @@ class Board {
       }
       for (const nid of frame.buildings[p].cities) {
         const [x, y] = nodes[nid];
-        buildG.appendChild(this._el('rect', {
-          x: x - 7, y: y - 7, width: 14, height: 14,
-          fill: color, stroke: '#fff', 'stroke-width': 1.5
+        // House shape: pointed roof on a wider base
+        const pts = `${x},${y-9} ${x+7},${y-3} ${x+7},${y+7} ${x-7},${y+7} ${x-7},${y-3}`;
+        buildG.appendChild(this._el('polygon', {
+          points: pts,
+          fill: color, stroke: '#111', 'stroke-width': 1
         }));
       }
     }
@@ -241,21 +251,63 @@ class Board {
   }
 
   _drawPort(parent, port, nodes) {
+    const PORT_COLORS = {
+      lumber: '#2d5a27', brick: '#b85c38', wool: '#7ec850',
+      grain: '#e8b430', ore: '#7a7a7a', generic: '#ffffff',
+    };
     const [n0, n1] = port.nodes;
     const [x0, y0] = nodes[n0];
     const [x1, y1] = nodes[n1];
     const mx = (x0 + x1) / 2;
     const my = (y0 + y1) / 2;
+    const color = PORT_COLORS[port.kind] || PORT_COLORS.generic;
+    const ratio = port.kind === 'generic' ? '3:1' : '2:1';
+    const darkText = port.kind === 'grain' || port.kind === 'wool' || port.kind === 'generic';
 
+    // Normal perpendicular to the port edge, pointing outward
+    if (!this._centroid) {
+      let sx = 0, sy = 0;
+      for (const [x, y] of nodes) { sx += x; sy += y; }
+      this._centroid = [sx / nodes.length, sy / nodes.length];
+    }
+    const [cx, cy] = this._centroid;
+    // Edge direction and its perpendicular
+    const ex = x1 - x0, ey = y1 - y0;
+    let nx = -ey, ny = ex;
+    // Pick the normal pointing away from board center
+    const toCenterX = cx - mx, toCenterY = cy - my;
+    if (nx * toCenterX + ny * toCenterY > 0) { nx = -nx; ny = -ny; }
+    const nlen = Math.sqrt(nx * nx + ny * ny) || 1;
+    const offset = 18;
+    const lx = mx + nx / nlen * offset;
+    const ly = my + ny / nlen * offset;
+
+    // Color the tile edge at this port
     parent.appendChild(this._el('line', {
       x1: x0, y1: y0, x2: x1, y2: y1,
-      stroke: '#a0a080', 'stroke-width': 2, 'stroke-dasharray': '3,3'
+      stroke: color, 'stroke-width': 4, 'stroke-linecap': 'round'
+    }));
+    // Dashed line from edge out to label
+    parent.appendChild(this._el('line', {
+      x1: mx, y1: my, x2: lx, y2: ly,
+      stroke: color, 'stroke-width': 1.5, 'stroke-dasharray': '3,3'
+    }));
+    // Colored pill with ratio
+    const isGeneric = port.kind === 'generic';
+    const hw = 10;
+    parent.appendChild(this._el('rect', {
+      x: lx - hw, y: ly - 7, width: hw * 2, height: 14, rx: 3,
+      fill: isGeneric ? '#334' : color,
+      stroke: isGeneric ? color : 'none', 'stroke-width': 1.5,
+      opacity: 0.9
     }));
     const txt = this._el('text', {
-      x: mx, y: my - 4,
-      'text-anchor': 'middle', 'font-size': '7', fill: '#ccc'
+      x: lx, y: ly + 3.5,
+      'text-anchor': 'middle', 'font-size': '8',
+      fill: isGeneric ? '#ddd' : (darkText ? '#222' : '#fff'),
+      'font-weight': '600'
     });
-    txt.textContent = port.kind === 'generic' ? '3:1' : `2:1 ${port.kind}`;
+    txt.textContent = ratio;
     parent.appendChild(txt);
   }
 

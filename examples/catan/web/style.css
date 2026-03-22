@@ -3,10 +3,10 @@
 :root {
   --forest: #2d5a27;
   --hills: #b85c38;
-  --pasture: #7fb069;
-  --fields: #e8c547;
-  --mountains: #6b7b8d;
-  --desert: #d4b896;
+  --pasture: #7ec850;
+  --fields: #e8b430;
+  --mountains: #7a7a7a;
+  --desert: #d4c088;
 }
 
 * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -16,19 +16,24 @@
   border-color: #e94560 !important;
 }
 
-/* Resource chips */
-.resource-chip {
-  display: inline-block;
-  padding: 0.1rem 0.4rem;
+/* Resource cards — always-visible colored rectangles with count */
+.resource-card {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 20px;
   border-radius: 3px;
-  margin: 0.1rem;
+  margin: 1px;
   font-size: 0.7rem;
+  font-weight: 600;
+  color: #fff;
 }
-.resource-chip.lumber { background: var(--forest); }
-.resource-chip.brick { background: var(--hills); }
-.resource-chip.wool { background: var(--pasture); color: #222; }
-.resource-chip.grain { background: var(--fields); color: #222; }
-.resource-chip.ore { background: var(--mountains); }
+.resource-card.lumber { background: var(--forest); }
+.resource-card.brick { background: var(--hills); }
+.resource-card.wool { background: var(--pasture); color: #1a3a10; }
+.resource-card.grain { background: var(--fields); color: #5a4000; }
+.resource-card.ore { background: var(--mountains); }
 
 /* Dev card chips */
 .dev-chip {
