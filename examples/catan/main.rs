@@ -48,6 +48,8 @@ fn main() {
             mcts_sims_start: 400,
             train_batch_size: 4096,
             leaf_batch_size: 32,
+            gumbel_m: 32,
+            explore_moves: 48,
             bench_games: 0,
             warmup_iters: 60,
             ..TrainConfig::default()

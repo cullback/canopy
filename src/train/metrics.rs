@@ -75,6 +75,9 @@ pub(super) struct CsvRow {
     /// distilling search. Jump to ~95%+ early means search isn't contributing.
     #[serde(serialize_with = "round6::f64")]
     pub policy_agreement_avg: f64,
+    /// Policy agreement restricted to positions with ≥6 legal actions.
+    #[serde(serialize_with = "round6::f64")]
+    pub policy_agreement_high_branch_avg: f64,
 
     // ── Value diagnostics ────────────────────────────────────────────
     /// Mean game outcome (Z) from current player's perspective. Near 0 =
@@ -92,11 +95,17 @@ pub(super) struct CsvRow {
     /// value. Should shrink over training but never reach zero.
     #[serde(serialize_with = "round6::f64")]
     pub value_correction_avg: f64,
+    /// Value correction restricted to positions with ≥6 legal actions.
+    #[serde(serialize_with = "round6::f64")]
+    pub value_correction_high_branch_avg: f64,
     /// Std of Q values across visited root children. Measures value head
     /// discriminative power: very small = can't distinguish moves, very
     /// large = playing refutation-style (one good move, rest terrible).
     #[serde(serialize_with = "round6::f64")]
     pub value_q_spread_avg: f64,
+    /// Q spread restricted to positions with ≥6 legal actions.
+    #[serde(serialize_with = "round6::f64")]
+    pub value_q_spread_high_branch_avg: f64,
     /// Mean |Q − Z| for first-half-of-game positions. Compare with late to
     /// catch the failure mode where openings are confidently wrong.
     #[serde(serialize_with = "round6::f64")]
@@ -236,6 +245,7 @@ impl CsvLogger {
     }
 }
 
+#[derive(Default)]
 pub(super) struct IterStats {
     pub policy_entropy_avg: f64,
     pub policy_max_prob_avg: f64,
@@ -245,14 +255,20 @@ pub(super) struct IterStats {
     pub policy_max_prob_high_branch_avg: f64,
     /// Fraction of moves where network top-1 == MCTS selected action.
     pub policy_agreement_avg: f64,
+    /// Policy agreement restricted to high-branch (≥6 legal) positions.
+    pub policy_agreement_high_branch_avg: f64,
     pub value_z_avg: f64,
     pub value_q_avg: f64,
     pub value_z_stddev: f64,
     pub value_q_stddev: f64,
     /// Mean |Q_search - V_network|.
     pub value_correction_avg: f64,
+    /// Value correction restricted to high-branch (≥6 legal) positions.
+    pub value_correction_high_branch_avg: f64,
     /// Mean std of Q across visited root children.
     pub value_q_spread_avg: f64,
+    /// Q spread restricted to high-branch (≥6 legal) positions.
+    pub value_q_spread_high_branch_avg: f64,
     /// Mean |q - z| for early-game samples (move_number <= game_length / 2).
     pub value_error_early_avg: f64,
     /// Mean |q - z| for late-game samples (move_number > game_length / 2).
@@ -264,22 +280,7 @@ pub(super) struct IterStats {
 
 pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     if samples.is_empty() {
-        return IterStats {
-            policy_entropy_avg: 0.0,
-            policy_max_prob_avg: 0.0,
-            policy_entropy_high_branch_avg: 0.0,
-            policy_max_prob_high_branch_avg: 0.0,
-            policy_agreement_avg: 0.0,
-            value_z_avg: 0.0,
-            value_q_avg: 0.0,
-            value_z_stddev: 0.0,
-            value_q_stddev: 0.0,
-            value_correction_avg: 0.0,
-            value_q_spread_avg: 0.0,
-            value_error_early_avg: 0.0,
-            value_error_late_avg: 0.0,
-            value_network_stddev: 0.0,
-        };
+        return IterStats::default();
     }
 
     let n = samples.len() as f64;
@@ -320,6 +321,9 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     // Stats over high-branching positions only (≥6 legal actions)
     let mut hb_entropy_sum = 0.0f64;
     let mut hb_max_prob_sum = 0.0f64;
+    let mut hb_agreement_count = 0u64;
+    let mut hb_correction_sum = 0.0f64;
+    let mut hb_q_spread_sum = 0.0f64;
     let mut hb_count = 0u64;
     for s in samples {
         let legal = s.policy_target.iter().filter(|&&p| p > 0.0).count();
@@ -331,6 +335,11 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
                 .map(|&p| -(p as f64) * (p as f64).ln())
                 .sum::<f64>();
             hb_max_prob_sum += s.policy_target.iter().copied().fold(0.0f32, f32::max) as f64;
+            if s.prior_agrees {
+                hb_agreement_count += 1;
+            }
+            hb_correction_sum += s.value_correction as f64;
+            hb_q_spread_sum += s.q_std as f64;
             hb_count += 1;
         }
     }
@@ -384,12 +393,15 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         policy_entropy_high_branch_avg: hb_entropy_sum / hb_n,
         policy_max_prob_high_branch_avg: hb_max_prob_sum / hb_n,
         policy_agreement_avg: avg_policy_agreement,
+        policy_agreement_high_branch_avg: hb_agreement_count as f64 / hb_n,
         value_z_avg: mean_z,
         value_q_avg: mean_q,
         value_z_stddev: var_z.sqrt(),
         value_q_stddev: var_q.sqrt(),
         value_correction_avg: avg_value_correction,
+        value_correction_high_branch_avg: hb_correction_sum / hb_n,
         value_q_spread_avg: avg_q_std,
+        value_q_spread_high_branch_avg: hb_q_spread_sum / hb_n,
         value_error_early_avg: avg_value_error_early,
         value_error_late_avg: avg_value_error_late,
         value_network_stddev: var_nv.sqrt(),
