@@ -113,6 +113,8 @@ pub struct SearchResult {
     pub children_q: Vec<(usize, f32)>,
     /// Action with highest raw prior (network policy argmax).
     pub prior_top1_action: usize,
+    /// Network prior policy (softmax of root logits), NUM_ACTIONS-sized.
+    pub prior_policy: Vec<f32>,
 }
 
 /// One step of the MCTS state machine.
@@ -404,6 +406,7 @@ impl<G: Game> Search<G> {
                 network_value: 0.0,
                 children_q: vec![],
                 prior_top1_action: 0,
+                prior_policy: vec![0.0; G::NUM_ACTIONS],
             });
         }
 
@@ -1003,6 +1006,15 @@ fn visit_count_result<G: Game>(tree: &Tree, root: NodeId, network_value: f32) ->
         .iter()
         .filter_map(|e| e.child.map(|c| (e.action, tree.q(c))))
         .collect();
+
+    // Prior policy: softmax of edge logits scattered into action-indexed vec
+    let mut edge_logits: Vec<f32> = edges.iter().map(|e| e.logit).collect();
+    softmax(&mut edge_logits);
+    let mut prior_policy = vec![0.0f32; G::NUM_ACTIONS];
+    for (edge, &prob) in edges.iter().zip(&edge_logits) {
+        prior_policy[edge.action] = prob;
+    }
+
     SearchResult {
         policy,
         value: tree.q(root),
@@ -1010,6 +1022,7 @@ fn visit_count_result<G: Game>(tree: &Tree, root: NodeId, network_value: f32) ->
         network_value,
         children_q,
         prior_top1_action,
+        prior_policy,
     }
 }
 
@@ -1067,6 +1080,14 @@ fn extract_gumbel_result<G: Game>(
         .filter_map(|e| e.child.map(|c| (e.action, tree.q(c))))
         .collect();
 
+    // Prior policy: softmax of root logits scattered into action-indexed vec
+    let mut prior_probs = gs.root_logits.clone();
+    softmax(&mut prior_probs);
+    let mut prior_policy = vec![0.0f32; G::NUM_ACTIONS];
+    for (edge, &prob) in ctx.edges.iter().zip(&prior_probs) {
+        prior_policy[edge.action] = prob;
+    }
+
     SearchResult {
         policy,
         value: tree.q(root),
@@ -1074,6 +1095,7 @@ fn extract_gumbel_result<G: Game>(
         network_value,
         children_q,
         prior_top1_action,
+        prior_policy,
     }
 }
 

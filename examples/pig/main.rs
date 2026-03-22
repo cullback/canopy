@@ -75,7 +75,7 @@ fn main() {
     setup.add_evaluator("erkp", strategy::EndRaceKeepPace);
 
     setup.add_encoder("default", Arc::new(encoder::PigEncoder));
-    setup.add_model("default", model::init_pig);
+    setup.add_model("default", |device, _cfg| model::init_pig(device));
     setup.add_config(
         "default",
         TrainConfig {
@@ -87,9 +87,6 @@ fn main() {
             train_batch_size: 128,
             replay_window: 10,
             warmup_iters: 20,
-            bench_games: 100,
-            bench_interval: 1,
-            bench_sims: 200,
             concurrent_games: 10,
             leaf_batch_size: 1,
             explore_moves: 10,

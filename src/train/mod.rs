@@ -1,25 +1,26 @@
-mod benchmark;
 mod burn_backend;
 mod checkpoint;
+pub mod config;
 mod game;
 pub mod inference;
 mod metrics;
 mod self_play;
 
 use std::collections::VecDeque;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
 
-use crate::eval::{Evaluator, Evaluators};
+use crate::eval::Evaluator;
 use crate::game::Game;
 use crate::nn::StateEncoder;
 use crate::utils::HumanDuration;
 
 pub use burn_backend::{BurnTrainableModel, Device, InferBackend, TrainBackend, default_device};
+pub use config::TrainConfig;
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -48,139 +49,12 @@ pub struct Sample {
     pub q_std: f32,
     /// Whether network's top-1 action matches MCTS selected action.
     pub prior_agrees: bool,
-}
-
-#[derive(Clone, Serialize)]
-pub struct TrainConfig {
-    // -- Infrastructure --
-    /// Total training iterations (self-play + train cycles).
-    pub iterations: usize,
-    /// Directory where run folders and checkpoints are written.
-    pub output_dir: PathBuf,
-    /// Resume training from this checkpoint path (e.g. `checkpoints/run/model_iter_10`).
-    #[serde(skip)]
-    pub resume: Option<PathBuf>,
-
-    // -- Training --
-    /// Training epochs over the replay buffer per iteration.
-    pub epochs: usize,
-    /// Mini-batch size for training.
-    pub train_batch_size: usize,
-    /// Peak learning rate (cosine-annealed from here to `lr_min`).
-    pub lr: f64,
-    /// Minimum learning rate at end of cosine cycle (default: `lr / 10`).
-    pub lr_min: f64,
-    /// Number of most-recent iterations kept in the replay buffer.
-    pub replay_window: usize,
-    /// Iterations over which MCTS sims ramp from `mcts_sims_start` to `mcts_sims`
-    /// and the value target transitions from pure Z (game outcome) to pure Q
-    /// (search value). 0 = no ramp (full sims and pure Z from the start).
-    ///
-    /// Both ramps are synchronized because they address the same issue: early in
-    /// training the value head is unreliable, so Q (derived from search) is
-    /// near-zero garbage and extra sims just average more noise. Z (game outcome)
-    /// is noisy but carries real signal. As the network improves, Q becomes a
-    /// better per-position target than Z (averaging many sims vs one game result),
-    /// and deeper search produces higher-quality Q. See "Lessons From AlphaZero
-    /// (part 4): Improving the Training Target" (Abrams, 2018).
-    pub warmup_iters: usize,
-
-    // -- Self-play --
-    /// Self-play games generated per iteration.
-    pub games_per_iter: usize,
-    /// Maximum async game tasks running concurrently during self-play.
-    pub concurrent_games: usize,
-    /// Maximum evaluations per GPU forward pass. Also determines the
-    /// eval request queue capacity (2x this value).
-    pub inference_batch_size: usize,
-    /// Early-game turns where action is sampled from improved policy
-    /// (for exploration diversity). After this, the best action is used deterministically.
-    pub explore_moves: u32,
-    /// Probability of full search per move (playout cap randomization).
-    pub playout_cap_full_prob: f32,
-    /// Simulations for fast (non-full) search moves (playout cap randomization).
-    pub playout_cap_fast_sims: u32,
-
-    // -- MCTS --
-    /// MCTS simulations per move during self-play (full-search budget).
-    pub mcts_sims: u32,
-    /// Starting MCTS simulations for progressive ramp (ramps linearly to `mcts_sims`).
-    /// Set equal to `mcts_sims` for no ramp.
-    pub mcts_sims_start: u32,
-    /// Gumbel-Top-k sampled actions at root. Clamped to the number of
-    /// legal actions, so values larger than `NUM_ACTIONS` are safe.
-    pub gumbel_m: u32,
-    /// Sigma scaling parameter for completed-Q transform.
-    pub c_visit: f32,
-    /// Sigma scaling parameter for completed-Q transform.
-    pub c_scale: f32,
-    /// Leaves to collect per MCTS batch before requesting evaluation.
-    pub leaf_batch_size: u32,
-
-    // -- Checkpointing --
-    /// Save model checkpoint every N iterations (1 = every iteration).
-    /// The final iteration is always checkpointed regardless of this setting.
-    pub checkpoint_interval: usize,
-
-    // -- Benchmark --
-    /// Benchmark games against random-rollout bot (0 = skip).
-    pub bench_games: u32,
-    /// Run benchmark every N iterations (1 = every iteration).
-    pub bench_interval: usize,
-    /// MCTS simulations for the benchmark opponent.
-    pub bench_sims: u32,
-    /// Name of evaluator in the registry to use as benchmark opponent.
-    #[serde(skip)]
-    pub bench_eval: String,
-
-    /// Number of GPU inference workers for self-play and benchmark (default: 1).
-    #[serde(skip)]
-    pub inference_workers: usize,
-}
-
-impl Default for TrainConfig {
-    fn default() -> Self {
-        Self {
-            // Infrastructure
-            iterations: 1000,
-            output_dir: PathBuf::from("checkpoints"),
-            resume: None,
-
-            // Training
-            epochs: 3,
-            train_batch_size: 1024,
-            lr: 0.001,
-            lr_min: 0.0001,
-            replay_window: 10,
-            warmup_iters: 100,
-
-            // Self-play
-            games_per_iter: 200,
-            concurrent_games: 256,
-            inference_batch_size: 1024,
-            explore_moves: 30,
-            playout_cap_full_prob: 0.25,
-            playout_cap_fast_sims: 32,
-
-            // MCTS
-            mcts_sims: 800,
-            mcts_sims_start: 50,
-            gumbel_m: 16,
-            c_visit: 50.0,
-            c_scale: 1.0,
-            leaf_batch_size: 32,
-
-            // Checkpointing
-            checkpoint_interval: 1,
-
-            // Benchmark
-            bench_games: 20,
-            bench_interval: 10,
-            bench_sims: 800,
-            bench_eval: "rollout".to_string(),
-            inference_workers: 1,
-        }
-    }
+    /// Raw KL(MCTS target || network prior). Used for policy surprise weighting.
+    pub policy_surprise: f32,
+    /// Pre-normalized per-game surprise weight (1.0 if disabled).
+    pub surprise_weight: f32,
+    /// Short-term value targets (length = aux_value_horizons.len()).
+    pub aux_targets: Box<[f32]>,
 }
 
 /// Per-iteration config passed to the model's train_step method.
@@ -190,6 +64,16 @@ pub struct TrainStepConfig {
     pub epochs: usize,
     /// Weight of Q in value target: 0.0 = pure Z, 1.0 = pure Q.
     pub q_weight: f32,
+    /// Temperature for soft policy target (0.0 = disabled).
+    pub soft_policy_temperature: f32,
+    /// Weight of soft policy loss.
+    pub soft_policy_weight: f32,
+    /// Fraction of weight budget from surprise (0.0 = disabled).
+    pub surprise_weight_fraction: f32,
+    /// Per-head weight for auxiliary value losses.
+    pub aux_value_weight: f32,
+    /// Number of auxiliary value targets per sample.
+    pub num_aux_targets: usize,
 }
 
 /// Metrics returned from a training step.
@@ -198,6 +82,15 @@ pub struct TrainMetrics {
     pub loss_value_train: f32,
     pub loss_policy_val: f32,
     pub loss_value_val: f32,
+    /// Soft policy loss (0.0 if disabled).
+    pub loss_soft_policy_train: f32,
+    pub loss_soft_policy_val: f32,
+    /// Auxiliary value loss (0.0 if disabled).
+    pub loss_aux_value_train: f32,
+    pub loss_aux_value_val: f32,
+    /// Per-horizon auxiliary value MSE (empty if no aux heads).
+    pub aux_value_losses_train: Vec<f32>,
+    pub aux_value_losses_val: Vec<f32>,
     /// Total gradient steps (optimizer updates) across all epochs
     pub gradient_steps: usize,
 }
@@ -234,15 +127,6 @@ pub trait TrainableModel<G: Game>: Send {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn cosine_lr(config: &TrainConfig, iteration: usize) -> f64 {
-    let t = if config.iterations > 1 {
-        iteration as f64 / (config.iterations - 1) as f64
-    } else {
-        1.0
-    };
-    config.lr_min + 0.5 * (config.lr - config.lr_min) * (1.0 + (std::f64::consts::PI * t).cos())
-}
-
 fn warmup_t(config: &TrainConfig, iteration: usize) -> f64 {
     if config.warmup_iters == 0 {
         return 1.0;
@@ -269,11 +153,9 @@ pub fn run_training<G>(
     model: &mut dyn TrainableModel<G>,
     encoder: Arc<dyn StateEncoder<G>>,
     new_state: impl Fn(u64) -> G + Send + Sync + 'static,
-    evaluators: &Evaluators<G>,
 ) where
     G: Game + 'static,
 {
-    let baseline = evaluators.get_arc(&config.bench_eval);
     let new_state: Arc<dyn Fn(u64) -> G + Send + Sync> = Arc::new(new_state);
     crate::init_logging();
 
@@ -288,7 +170,6 @@ pub fn run_training<G>(
 
     for iteration in start_iteration..config.iterations {
         let iter_start = Instant::now();
-        let effective_lr = cosine_lr(&config, iteration);
         let effective_sims = progressive_sims(&config, iteration);
         let evaluators = model.evaluators(encoder.clone(), config.inference_workers);
 
@@ -321,10 +202,15 @@ pub fn run_training<G>(
         let q_weight = warmup_t(&config, iteration + 1) as f32;
         fastrand::shuffle(&mut samples);
         let step_cfg = TrainStepConfig {
-            lr: effective_lr,
+            lr: config.lr,
             train_batch_size: config.train_batch_size,
             epochs: config.epochs,
             q_weight,
+            soft_policy_temperature: config.soft_policy_temperature,
+            soft_policy_weight: config.soft_policy_weight,
+            surprise_weight_fraction: config.surprise_weight_fraction,
+            aux_value_weight: config.aux_value_weight,
+            num_aux_targets: config.aux_value_horizons.len(),
         };
         let train_metrics = model.train_step(&samples, &step_cfg);
         let train_elapsed = train_start.elapsed();
@@ -335,26 +221,6 @@ pub fn run_training<G>(
         if is_last || iter_num % config.checkpoint_interval == 0 {
             checkpoint::save_checkpoint(model, &run_dir, iter_num, &mut rng);
         }
-
-        // Benchmark
-        let run_bench = config.bench_games > 0
-            && config.bench_interval > 0
-            && iter_num % config.bench_interval == 0;
-        let (bench_wins, bench_losses, bench_draws, bench_elapsed) = if run_bench {
-            let bench_start = Instant::now();
-            let evals = model.evaluators(encoder.clone(), config.inference_workers);
-            let result = benchmark::run_benchmark(
-                evals,
-                encoder.clone(),
-                &config,
-                &mut rng,
-                &new_state,
-                baseline.clone(),
-            );
-            (result.0, result.1, result.2, bench_start.elapsed())
-        } else {
-            (0, 0, 0, std::time::Duration::ZERO)
-        };
 
         // Timing / ETA
         let total_elapsed = training_start.elapsed();
@@ -369,18 +235,8 @@ pub fn run_training<G>(
             0
         };
 
-        let bench_str = if run_bench {
-            format!(
-                " | bench: {}/{} ({:.0}%)",
-                bench_wins,
-                config.bench_games,
-                bench_wins as f64 / config.bench_games as f64 * 100.0,
-            )
-        } else {
-            String::new()
-        };
         info!(
-            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples, entropy={:.6}{} | tasks={}, avg_batch={:.1} | self-play {}, train {}, bench {} | total {}, ETA {}",
+            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples, entropy={:.6} | tasks={}, avg_batch={:.1} | self-play {}, train {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             games_done,
@@ -390,12 +246,10 @@ pub fn run_training<G>(
             avg_turns,
             samples.len(),
             stats.policy_entropy_avg,
-            bench_str,
             num_tasks,
             avg_batch_size,
             HumanDuration(self_play_elapsed),
             HumanDuration(train_elapsed),
-            HumanDuration(bench_elapsed),
             HumanDuration(total_elapsed),
             HumanDuration(eta),
         );
@@ -407,6 +261,8 @@ pub fn run_training<G>(
         } else {
             0.0
         };
+        let aux_t = &train_metrics.aux_value_losses_train;
+        let aux_v = &train_metrics.aux_value_losses_val;
         csv.write_row(&metrics::CsvRow {
             // Core training
             iteration: iters_done,
@@ -414,6 +270,18 @@ pub fn run_training<G>(
             loss_value_train: train_metrics.loss_value_train,
             loss_policy_val: train_metrics.loss_policy_val,
             loss_value_val: train_metrics.loss_value_val,
+            loss_soft_policy_train: train_metrics.loss_soft_policy_train,
+            loss_soft_policy_val: train_metrics.loss_soft_policy_val,
+            loss_aux_value_train: train_metrics.loss_aux_value_train,
+            loss_aux_value_val: train_metrics.loss_aux_value_val,
+            loss_aux_value_0_train: aux_t.first().copied().unwrap_or(0.0),
+            loss_aux_value_0_val: aux_v.first().copied().unwrap_or(0.0),
+            loss_aux_value_1_train: aux_t.get(1).copied().unwrap_or(0.0),
+            loss_aux_value_1_val: aux_v.get(1).copied().unwrap_or(0.0),
+            loss_aux_value_2_train: aux_t.get(2).copied().unwrap_or(0.0),
+            loss_aux_value_2_val: aux_v.get(2).copied().unwrap_or(0.0),
+            loss_aux_value_3_train: aux_t.get(3).copied().unwrap_or(0.0),
+            loss_aux_value_3_val: aux_v.get(3).copied().unwrap_or(0.0),
             gradient_steps: train_metrics.gradient_steps,
             // Self-play game stats
             game_length_avg: avg_game_length,
@@ -430,6 +298,7 @@ pub fn run_training<G>(
             policy_max_prob_high_branch_avg: stats.policy_max_prob_high_branch_avg,
             policy_agreement_avg: stats.policy_agreement_avg,
             policy_agreement_high_branch_avg: stats.policy_agreement_high_branch_avg,
+            policy_surprise_avg: stats.policy_surprise_avg,
             // Value diagnostics
             value_z_avg: stats.value_z_avg,
             value_q_avg: stats.value_q_avg,
@@ -440,21 +309,17 @@ pub fn run_training<G>(
             value_q_spread_avg: stats.value_q_spread_avg,
             value_q_spread_high_branch_avg: stats.value_q_spread_high_branch_avg,
             value_error_early_avg: stats.value_error_early_avg,
+            value_error_mid_avg: stats.value_error_mid_avg,
             value_error_late_avg: stats.value_error_late_avg,
             value_network_stddev: stats.value_network_stddev,
-            // Benchmark
-            bench_wins,
-            bench_losses,
-            bench_draws,
             // Config/infra
-            lr: effective_lr,
+            lr: config.lr,
             q_weight,
             mcts_sims: effective_sims,
             replay_samples: samples.len(),
             samples_iter: samples_this_iter,
             time_selfplay_secs: self_play_elapsed.as_secs_f64(),
             time_train_secs: train_elapsed.as_secs_f64(),
-            time_bench_secs: bench_elapsed.as_secs_f64(),
         });
     }
 }

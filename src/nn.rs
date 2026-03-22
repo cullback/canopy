@@ -17,6 +17,18 @@ pub trait StateEncoder<G: Game>: Send + Sync {
     fn encode(&self, state: &G, out: &mut Vec<f32>);
 }
 
+/// Output of a forward pass through a [`PolicyValueNet`].
+pub struct ForwardOutput<B: Backend> {
+    /// Hard policy logits `[batch, num_actions]` (pre-softmax).
+    pub policy_logits: Tensor<B, 2>,
+    /// Value prediction `[batch, 1]` in `[-1, 1]` (tanh-activated).
+    pub value: Tensor<B, 2>,
+    /// Soft policy logits `[batch, num_actions]` — `None` if model has no soft head.
+    pub soft_policy_logits: Option<Tensor<B, 2>>,
+    /// Auxiliary short-term value predictions `[batch, num_aux]` — `None` if no aux heads.
+    pub aux_values: Option<Tensor<B, 2>>,
+}
+
 /// A neural network with policy and value heads.
 ///
 /// - Input: `[batch, features]` tensor (encoded by [`StateEncoder`])
@@ -24,7 +36,7 @@ pub trait StateEncoder<G: Game>: Send + Sync {
 /// - Value output: `[batch, 1]` in **`[-1, 1]`** (tanh-activated).
 ///   +1 = good for the perspective player encoded in the input.
 pub trait PolicyValueNet<B: Backend> {
-    fn forward(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>);
+    fn forward(&self, input: Tensor<B, 2>) -> ForwardOutput<B>;
 }
 
 /// Wraps a [`PolicyValueNet`] for use as an [`Evaluator`].
@@ -107,7 +119,9 @@ where
         let input =
             Tensor::<B, 2>::from_data(TensorData::new(features, [1, feature_size]), &self.device);
 
-        let (policy_logits_tensor, value_tensor) = self.model.forward(input);
+        let out = self.model.forward(input);
+        let policy_logits_tensor = out.policy_logits;
+        let value_tensor = out.value;
 
         let logits_data: Vec<f32> = policy_logits_tensor
             .into_data()
@@ -195,7 +209,9 @@ where
             &self.device,
         );
 
-        let (policy_tensor, value_tensor) = self.model.forward(input);
+        let out = self.model.forward(input);
+        let policy_tensor = out.policy_logits;
+        let value_tensor = out.value;
 
         let logits: Vec<f32> = policy_tensor
             .into_data()

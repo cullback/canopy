@@ -230,7 +230,7 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameCli<Board>) {
 fn main() {
     let mut setup = GameCli::new("twenty48", "2048 tile-sliding game");
     setup.add_encoder("default", Arc::new(encoder::Twenty48Encoder));
-    setup.add_model("default", model::init_twenty48);
+    setup.add_model("default", |device, _cfg| model::init_twenty48(device));
     setup.add_config(
         "default",
         TrainConfig {
@@ -242,9 +242,6 @@ fn main() {
             train_batch_size: 128,
             replay_window: 10,
             warmup_iters: 20,
-            bench_games: 20,
-            bench_interval: 5,
-            bench_sims: 200,
             concurrent_games: 10,
             leaf_batch_size: 1,
             explore_moves: 0,

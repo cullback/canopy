@@ -2,56 +2,65 @@
 //!
 //! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
 //!
-//! ## Global (117 features)
+//! ## Global (117 = 7 + 49×2 + 12)
 //!
-//! | Block                  | Count | Source                         |
-//! |------------------------|-------|--------------------------------|
-//! | Phase one-hot          |     7 | `encode_phase` (shared)        |
-//! | Per-player nexus × 2   |    98 | `encode_player_nexus`          |
-//! | Dice state             |    12 | `encode_dice` (shared)         |
+//! | Block              | Count |
+//! |--------------------|-------|
+//! | phase              |     7 |
+//! | per-player × 2     |    98 |
+//! | dice               |    12 |
 //!
-//! ### Per-player nexus (49)
+//! ### Per-player (49) — cur player first
 //!
-//! | Feature              | Count | Source                         |
-//! |----------------------|-------|--------------------------------|
-//! | standard             |    22 | `encode_player` (shared)       |
-//! | trade_ratios         |     5 | /4, best maritime ratio        |
-//! | per_number_production|    11 | /10, building_weight per dice  |
-//! | per_resource_prod    |     5 | /35, building_weight×pips/res  |
-//! | dev_bought_this_turn |     5 | /deck_max, exact self, 0 opp   |
-//! | played_dev_this_turn |     1 | binary                         |
+//! | Feature              | Count | Norm      |
+//! |----------------------|-------|-----------|
+//! | resource_count       |     5 | /19       |
+//! | trade_ratio          |     5 | /4        |
+//! | resource_prod        |     5 | /35       |
+//! | number_prod          |    11 | /10       |
+//! | settlement_count     |     1 | /5        |
+//! | city_count           |     1 | /4        |
+//! | road_count           |     1 | /15       |
+//! | longest_road_award   |     1 | binary    |
+//! | longest_road_length  |     1 | /15       |
+//! | largest_army_award   |     1 | binary    |
+//! | victory_points       |     1 | /15       |
+//! | dev_playable         |     5 | /deck_max |
+//! | dev_played           |     5 | /deck_max |
+//! | dev_bought_turn      |     5 | /deck_max |
+//! | dev_played_turn      |     1 | binary    |
 //!
-//! ## Tiles (19 × 9 = 171 features)
+//! ## Tiles (19 × 9 = 171)
 //!
-//! | Feature       | Count | Description                        |
-//! |---------------|-------|------------------------------------|
-//! | resource      |     5 | one-hot                            |
-//! | pips          |     1 | pips / 5                           |
-//! | robber        |     1 | binary                             |
-//! | bldg_wt_cur   |     1 | sum building_weight(own) / 6       |
-//! | bldg_wt_opp   |     1 | sum building_weight(opp) / 6       |
+//! | Feature              | Count | Norm    |
+//! |----------------------|-------|---------|
+//! | resource             |     5 | one-hot |
+//! | pips                 |     1 | /5      |
+//! | robber               |     1 | binary  |
+//! | cur_building_weight  |     1 | /6      |
+//! | opp_building_weight  |     1 | /6      |
 //!
-//! ## Nodes (54 × 19 = 1026 features)
+//! ## Nodes (54 × 19 = 1026)
 //!
-//! | Feature            | Count | Description                        |
-//! |--------------------|-------|------------------------------------|
-//! | building_cur       |     1 | 0/0.5/1.0                          |
-//! | building_opp       |     1 | 0/0.5/1.0                          |
-//! | port_ratios        |     5 | per-resource trade improvement     |
-//! | production         |     5 | sum of pips from adj tiles / 13    |
-//! | blocked_production |     5 | robber-blocked tile pips / 5       |
-//! | dist_to_own_net    |     1 | BFS distance / 6, capped           |
-//! | dist_to_opp_net    |     1 | BFS distance / 6, capped           |
+//! | Feature              | Count | Norm    |
+//! |----------------------|-------|---------|
+//! | cur_building         |     1 | 0/½/1   |
+//! | opp_building         |     1 | 0/½/1   |
+//! | port_ratio           |     5 | .5/.25  |
+//! | resource_prod        |     5 | /13     |
+//! | blocked_prod         |     5 | /5      |
+//! | cur_network_dist     |     1 | /6      |
+//! | opp_network_dist     |     1 | /6      |
 
 use canopy::nn::StateEncoder;
 
 use crate::game::state::GameState;
 
 use super::{
-    PIPS, compute_network_distances, encode_dice, encode_node_blocked_production,
+    ORIGINAL_DECK, PIPS, compute_network_distances, encode_dice, encode_node_blocked_production,
     encode_node_production, encode_per_number_production, encode_per_resource_production,
-    encode_phase, encode_player, encode_player_dev_extra, encode_port_ratios,
-    encode_tile_building_weights, node_value, tile_numbers,
+    encode_phase, encode_port_ratios, encode_tile_building_weights, node_value,
+    opponent_expected_dev_cards, self_dev_cards_playable, tile_numbers,
 };
 
 pub struct NexusEncoder;
@@ -64,29 +73,95 @@ impl NexusEncoder {
     pub const NODES_F: usize = 19;
 }
 
-/// Push 49 unified per-player features: std(22) + trade(5) + number_prod(11) + resource_prod(5) + dev_extra(6).
+/// Push 49 per-player features grouped by category.
+///
+/// Economy (26): resource_count(5), trade_ratio(5), resource_prod(5), number_prod(11)
+/// Board (7): settlement_count(1), city_count(1), road_count(1),
+///            longest_road_award(1), longest_road_length(1), largest_army_award(1), victory_points(1)
+/// Dev cards (16): dev_playable(5), dev_played(5), dev_bought_turn(5), dev_played_turn(1)
 fn encode_player_nexus(
     state: &GameState,
     player: canopy::player::Player,
     tile_numbers: &[u8; 19],
     out: &mut Vec<f32>,
 ) {
-    // Standard (22)
-    encode_player(state, player, out);
+    let p = &state.players[player];
+    let is_cur = player == state.current_player;
 
-    // Trade ratios (5): (4 - ratio) / 4, so better = higher
-    for &ratio in &state.players[player].trade_ratios {
+    // ── Economy (26) ─────────────────────────────────────────────────
+
+    // resource_count (5): per resource, /19
+    for &r in &crate::game::resource::ALL_RESOURCES {
+        out.push(p.hand[r] as f32 / 19.0);
+    }
+
+    // trade_ratio (5): (4 − ratio) / 4, higher = better
+    for &ratio in &p.trade_ratios {
         out.push((4 - ratio.min(4)) as f32 / 4.0);
     }
 
-    // Per-number production (11)
-    encode_per_number_production(&state.boards[player], &state.topology, tile_numbers, out);
-
-    // Per-resource production (5)
+    // resource_prod (5): building_wt × pips per resource, /35
     encode_per_resource_production(&state.boards[player], &state.topology, tile_numbers, out);
 
-    // Dev extra (6)
-    encode_player_dev_extra(state, player, out);
+    // number_prod (11): building_wt per dice value 2-12, /10
+    encode_per_number_production(&state.boards[player], &state.topology, tile_numbers, out);
+
+    // ── Board (7) ────────────────────────────────────────────────────
+
+    // settlement_count (1): remaining, /5
+    out.push(p.settlements_left as f32 / 5.0);
+
+    // city_count (1): remaining, /4
+    out.push(p.cities_left as f32 / 4.0);
+
+    // road_count (1): remaining, /15
+    out.push(p.roads_left as f32 / 15.0);
+
+    // longest_road_award (1): binary
+    let has_lr = state.longest_road.is_some_and(|(pid, _)| pid == player);
+    out.push(f32::from(has_lr));
+
+    // longest_road_length (1): /15
+    out.push(state.boards[player].road_network.longest_road() as f32 / 15.0);
+
+    // largest_army_award (1): binary
+    let has_la = state.largest_army.is_some_and(|(pid, _)| pid == player);
+    out.push(f32::from(has_la));
+
+    // victory_points (1): /15, total for cur, public for opp
+    let vps = if is_cur {
+        state.total_vps(player)
+    } else {
+        state.public_vps(player)
+    };
+    out.push(vps as f32 / 15.0);
+
+    // ── Dev cards (16) ───────────────────────────────────────────────
+
+    // dev_playable (5): per type, /deck_max, exact for cur / hypergeo for opp
+    let playable = if is_cur {
+        self_dev_cards_playable(state, player)
+    } else {
+        opponent_expected_dev_cards(state, player.opponent(), player)
+    };
+    out.extend_from_slice(&playable);
+
+    // dev_played (5): per type, /deck_max, visible both
+    for (count, max) in p.dev_cards_played.0.iter().zip(&ORIGINAL_DECK) {
+        out.push(*count as f32 / max);
+    }
+
+    // dev_bought_turn (5): per type, /deck_max, exact for cur / 0 for opp
+    for (i, max) in ORIGINAL_DECK.iter().enumerate() {
+        if is_cur {
+            out.push(p.dev_cards_bought_this_turn.0[i] as f32 / max);
+        } else {
+            out.push(0.0);
+        }
+    }
+
+    // dev_played_turn (1): binary, visible both
+    out.push(f32::from(p.has_played_dev_card_this_turn));
 }
 
 impl StateEncoder<GameState> for NexusEncoder {
@@ -116,17 +191,17 @@ impl StateEncoder<GameState> for NexusEncoder {
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);
 
-        // === Tile stream (19 × 9 = 171) ===
-        let cur_board = &state.boards[current];
-        let opp_board = &state.boards[opp];
+        // === Tiles (19 × 9 = 171) ===
+        let cur_boards = &state.boards[current];
+        let opp_boards = &state.boards[opp];
 
         for (i, tile) in topo.tiles.iter().enumerate() {
-            // Resource one-hot (5)
+            // resource (5): one-hot
             let resource_idx = tile.terrain.resource().map(|r| r as usize);
             for ri in 0..5 {
                 out.push(f32::from(resource_idx == Some(ri)));
             }
-            // Pips / 5 (1)
+            // pips (1): /5
             let number = tile_numbers[i];
             let pips = if number > 0 {
                 PIPS[number as usize] as f32 / 5.0
@@ -134,34 +209,34 @@ impl StateEncoder<GameState> for NexusEncoder {
                 0.0
             };
             out.push(pips);
-            // Robber (1)
+            // robber (1): binary
             out.push(f32::from(state.robber == tile.id));
-            // Building weights (2)
-            encode_tile_building_weights(tile, cur_board, opp_board, out);
+            // cur_building_weight, opp_building_weight (2): /6
+            encode_tile_building_weights(tile, cur_boards, opp_boards, out);
         }
 
-        // === Node stream (54 × 19 = 1026) ===
-        let own_dist = compute_network_distances(&topo.adj, cur_board);
-        let opp_dist = compute_network_distances(&topo.adj, opp_board);
+        // === Nodes (54 × 19 = 1026) ===
+        let cur_dist = compute_network_distances(&topo.adj, cur_boards);
+        let opp_dist = compute_network_distances(&topo.adj, opp_boards);
 
         for i in 0..54u8 {
             let node = &topo.nodes[i as usize];
 
-            // building_cur, building_opp (2)
-            out.push(node_value(cur_board, i));
-            out.push(node_value(opp_board, i));
+            // cur_building, opp_building (2)
+            out.push(node_value(cur_boards, i));
+            out.push(node_value(opp_boards, i));
 
-            // port_ratios (5)
+            // port_ratio (5)
             encode_port_ratios(node, out);
 
-            // production (5)
+            // resource_prod (5)
             encode_node_production(node, topo, &tile_numbers, state.robber, out);
 
-            // blocked_production (5)
+            // blocked_prod (5)
             encode_node_blocked_production(node, topo, &tile_numbers, state.robber, out);
 
-            // network distances (2)
-            out.push(own_dist[i as usize]);
+            // cur_network_dist, opp_network_dist (2)
+            out.push(cur_dist[i as usize]);
             out.push(opp_dist[i as usize]);
         }
 
@@ -495,17 +570,17 @@ mod tests {
         let mut features = Vec::new();
         NexusEncoder.encode(&state, &mut features);
 
-        // Global: phase(7) + player_nexus cur starts at 7
-        // Inside player_nexus: std(22) then trade ratios at offset 22
-        let cur_trade = 7 + 22;
+        // Global: phase(7) + cur player starts at 7
+        // Inside per-player: resource_count(5) then trade_ratio at offset 5
+        let cur_trade = 7 + 5;
         assert_eq!(features[cur_trade + 0], 0.5, "lumber 2:1 → 0.5");
         assert_eq!(features[cur_trade + 1], 0.25, "brick 3:1 → 0.25");
         assert_eq!(features[cur_trade + 2], 0.25, "wool 3:1 → 0.25");
         assert_eq!(features[cur_trade + 3], 0.0, "grain 4:1 → 0.0");
         assert_eq!(features[cur_trade + 4], 0.0, "ore 4:1 → 0.0");
 
-        // Opp player_nexus starts at 7 + 49 = 56, trade ratios at 56 + 22 = 78
-        let opp_trade = 56 + 22;
+        // Opp per-player starts at 7 + 49 = 56, trade_ratio at 56 + 5 = 61
+        let opp_trade = 56 + 5;
         for i in 0..5 {
             assert_eq!(features[opp_trade + i], 0.0, "opp all 4:1 → 0.0");
         }

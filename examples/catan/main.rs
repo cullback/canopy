@@ -23,7 +23,7 @@ mod visualize;
 
 use encoder::NexusEncoder;
 use game::dice::Dice;
-use model::init_nexus_with;
+use model::init_nexus;
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
@@ -33,7 +33,9 @@ fn main() {
     setup.add_encoder("nexus", Arc::new(NexusEncoder));
 
     // Models
-    setup.add_model("nexus", init_nexus_with);
+    setup.add_model("nexus", |device, cfg| {
+        init_nexus(device, cfg.aux_value_horizons.len())
+    });
 
     // Configs
     setup.add_config(
@@ -43,15 +45,15 @@ fn main() {
             games_per_iter: 500,
             epochs: 1,
             lr: 0.0005,
-            replay_window: 10,
+            replay_window: 6,
             mcts_sims: 3000,
-            mcts_sims_start: 400,
+            mcts_sims_start: 200,
             train_batch_size: 4096,
             leaf_batch_size: 32,
             gumbel_m: 32,
             explore_moves: 48,
-            bench_games: 0,
             warmup_iters: 60,
+            aux_value_horizons: vec![4, 10, 30],
             ..TrainConfig::default()
         },
     );

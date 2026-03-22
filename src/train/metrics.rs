@@ -22,7 +22,6 @@ mod round6 {
 /// - **Self-play game stats**: game lengths, win/draw counts
 /// - **Policy diagnostics**: entropy, confidence, network-vs-search agreement
 /// - **Value diagnostics**: Z/Q targets, search correction, phase-split error
-/// - **Benchmark**: win/loss/draw vs baseline opponent
 /// - **Config/infra**: hyperparams and timing
 #[derive(Default, serde::Serialize)]
 pub(super) struct CsvRow {
@@ -38,6 +37,31 @@ pub(super) struct CsvRow {
     /// Validation value loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub loss_value_val: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_soft_policy_train: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_soft_policy_val: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_train: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_val: f32,
+    /// Per-horizon auxiliary value MSE (0.0 if slot unused).
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_0_train: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_0_val: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_1_train: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_1_val: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_2_train: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_2_val: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_3_train: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_aux_value_3_val: f32,
     /// Total optimizer updates across all epochs this iteration.
     pub gradient_steps: usize,
 
@@ -78,6 +102,9 @@ pub(super) struct CsvRow {
     /// Policy agreement restricted to positions with ≥6 legal actions.
     #[serde(serialize_with = "round6::f64")]
     pub policy_agreement_high_branch_avg: f64,
+    /// Mean KL(MCTS target || network prior) for full-search samples.
+    #[serde(serialize_with = "round6::f64")]
+    pub policy_surprise_avg: f64,
 
     // ── Value diagnostics ────────────────────────────────────────────
     /// Mean game outcome (Z) from current player's perspective. Near 0 =
@@ -106,11 +133,13 @@ pub(super) struct CsvRow {
     /// Q spread restricted to positions with ≥6 legal actions.
     #[serde(serialize_with = "round6::f64")]
     pub value_q_spread_high_branch_avg: f64,
-    /// Mean |Q − Z| for first-half-of-game positions. Compare with late to
-    /// catch the failure mode where openings are confidently wrong.
+    /// Mean |Q − Z| for early-game positions (first third of game length).
     #[serde(serialize_with = "round6::f64")]
     pub value_error_early_avg: f64,
-    /// Mean |Q − Z| for second-half-of-game positions.
+    /// Mean |Q − Z| for mid-game positions (middle third of game length).
+    #[serde(serialize_with = "round6::f64")]
+    pub value_error_mid_avg: f64,
+    /// Mean |Q − Z| for late-game positions (final third of game length).
     #[serde(serialize_with = "round6::f64")]
     pub value_error_late_avg: f64,
     /// Stddev of raw network value outputs. Near zero = value head outputs
@@ -118,13 +147,7 @@ pub(super) struct CsvRow {
     #[serde(serialize_with = "round6::f64")]
     pub value_network_stddev: f64,
 
-    // ── Benchmark ────────────────────────────────────────────────────
-    pub bench_wins: u32,
-    pub bench_losses: u32,
-    pub bench_draws: u32,
-
     // ── Config/infra ─────────────────────────────────────────────────
-    /// Cosine-annealed learning rate for this iteration.
     #[serde(serialize_with = "round6::f64")]
     pub lr: f64,
     /// Weight of Q in value target blend (0 = pure Z, 1 = pure Q).
@@ -141,8 +164,6 @@ pub(super) struct CsvRow {
     pub time_selfplay_secs: f64,
     #[serde(serialize_with = "round6::f64")]
     pub time_train_secs: f64,
-    #[serde(serialize_with = "round6::f64")]
-    pub time_bench_secs: f64,
 }
 
 pub(super) struct CsvLogger {
@@ -257,6 +278,8 @@ pub(super) struct IterStats {
     pub policy_agreement_avg: f64,
     /// Policy agreement restricted to high-branch (≥6 legal) positions.
     pub policy_agreement_high_branch_avg: f64,
+    /// Mean KL(MCTS target || network prior) for full-search samples.
+    pub policy_surprise_avg: f64,
     pub value_z_avg: f64,
     pub value_q_avg: f64,
     pub value_z_stddev: f64,
@@ -269,9 +292,11 @@ pub(super) struct IterStats {
     pub value_q_spread_avg: f64,
     /// Q spread restricted to high-branch (≥6 legal) positions.
     pub value_q_spread_high_branch_avg: f64,
-    /// Mean |q - z| for early-game samples (move_number <= game_length / 2).
+    /// Mean |q - z| for early-game samples (move_number in first third of game).
     pub value_error_early_avg: f64,
-    /// Mean |q - z| for late-game samples (move_number > game_length / 2).
+    /// Mean |q - z| for mid-game samples (move_number in middle third of game).
+    pub value_error_mid_avg: f64,
+    /// Mean |q - z| for late-game samples (move_number in final third of game).
     pub value_error_late_avg: f64,
     /// Stddev of raw network value outputs. Near zero means the value head
     /// is outputting a constant; healthy spread means it differentiates positions.
@@ -346,6 +371,17 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     let hb_n = hb_count.max(1) as f64;
 
     let avg_policy_agreement = samples.iter().filter(|s| s.prior_agrees).count() as f64 / n;
+    let full_search_count = samples.iter().filter(|s| s.full_search).count();
+    let policy_surprise_avg = if full_search_count > 0 {
+        samples
+            .iter()
+            .filter(|s| s.full_search)
+            .map(|s| s.policy_surprise as f64)
+            .sum::<f64>()
+            / full_search_count as f64
+    } else {
+        0.0
+    };
     let avg_value_correction = samples
         .iter()
         .map(|s| s.value_correction as f64)
@@ -353,16 +389,25 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         / n;
     let avg_q_std = samples.iter().map(|s| s.q_std as f64).sum::<f64>() / n;
 
-    // Value error stratified by game phase
+    // Value error stratified by game phase (thirds)
     let mut early_err_sum = 0.0f64;
     let mut early_count = 0u64;
+    let mut mid_err_sum = 0.0f64;
+    let mut mid_count = 0u64;
     let mut late_err_sum = 0.0f64;
     let mut late_count = 0u64;
     for s in samples {
         let err = (s.q - s.z).abs() as f64;
-        if s.game_length > 0 && s.move_number <= s.game_length / 2 {
+        if s.game_length == 0 {
+            continue;
+        }
+        let third = s.game_length / 3;
+        if s.move_number <= third {
             early_err_sum += err;
             early_count += 1;
+        } else if s.move_number <= 2 * third {
+            mid_err_sum += err;
+            mid_count += 1;
         } else {
             late_err_sum += err;
             late_count += 1;
@@ -370,6 +415,11 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     }
     let avg_value_error_early = if early_count > 0 {
         early_err_sum / early_count as f64
+    } else {
+        0.0
+    };
+    let avg_value_error_mid = if mid_count > 0 {
+        mid_err_sum / mid_count as f64
     } else {
         0.0
     };
@@ -394,6 +444,7 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         policy_max_prob_high_branch_avg: hb_max_prob_sum / hb_n,
         policy_agreement_avg: avg_policy_agreement,
         policy_agreement_high_branch_avg: hb_agreement_count as f64 / hb_n,
+        policy_surprise_avg,
         value_z_avg: mean_z,
         value_q_avg: mean_q,
         value_z_stddev: var_z.sqrt(),
@@ -403,6 +454,7 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         value_q_spread_avg: avg_q_std,
         value_q_spread_high_branch_avg: hb_q_spread_sum / hb_n,
         value_error_early_avg: avg_value_error_early,
+        value_error_mid_avg: avg_value_error_mid,
         value_error_late_avg: avg_value_error_late,
         value_network_stddev: var_nv.sqrt(),
     }

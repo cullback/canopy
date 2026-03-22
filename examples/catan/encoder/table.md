@@ -11,42 +11,69 @@
 
 ## Per-player (49 × 2 = 98)
 
-| Feature             | Count | Norm      | Notes              |
-| ------------------- | ----- | --------- | ------------------ |
-| Resources           | 5     | /19       | per resource       |
-| Trade ratios        | 5     | /4        | (4−ratio)/4        |
-| Number production   | 11    | /10       | bldg_wt per number |
-| Resource production | 5     | /35       | bldg_wt×pips/res   |
-| Victory points      | 1     | /15       | total / public     |
-| Settlements left    | 1     | /5        |                    |
-| Cities left         | 1     | /4        |                    |
-| Roads left          | 1     | /15       |                    |
-| Longest road award  | 1     | binary    |                    |
-| Longest road length | 1     | /15       |                    |
-| Largest army award  | 1     | binary    |                    |
-| Dev playable        | 5     | /deck_max | exact / hypergeo   |
-| Dev played          | 5     | /deck_max | visible both       |
-| Dev bought          | 5     | /deck_max | exact / 0          |
-| Played dev turn     | 1     | binary    |                    |
+### Economy (26)
+
+| Feature        | Count | Norm | Notes                |
+| -------------- | ----- | ---- | -------------------- |
+| resource_count | 5     | /19  | per resource         |
+| trade_ratio    | 5     | /4   | (4−ratio)/4          |
+| resource_prod  | 5     | /35  | bldg_wt × pips / res |
+| number_prod    | 11    | /10  | bldg_wt per number   |
+
+### Board (7)
+
+| Feature             | Count | Norm   | Notes          |
+| ------------------- | ----- | ------ | -------------- |
+| settlement_count    | 1     | /5     | remaining      |
+| city_count          | 1     | /4     | remaining      |
+| road_count          | 1     | /15    | remaining      |
+| longest_road_award  | 1     | binary |                |
+| longest_road_length | 1     | /15    |                |
+| largest_army_award  | 1     | binary |                |
+| victory_points      | 1     | /15    | total / public |
+
+### Dev cards (16)
+
+| Feature         | Count | Norm      | Notes            |
+| --------------- | ----- | --------- | ---------------- |
+| dev_playable    | 5     | /deck_max | exact / hypergeo |
+| dev_played      | 5     | /deck_max | visible both     |
+| dev_bought_turn | 5     | /deck_max | exact / 0        |
+| dev_played_turn | 1     | binary    |                  |
 
 ## Tiles (19 × 9 = 171)
 
 | Feature             | Count | Norm    | Notes                   |
 | ------------------- | ----- | ------- | ----------------------- |
-| Resource            | 5     | one-hot |                         |
-| Pips                | 1     | /5      |                         |
-| Robber              | 1     | binary  |                         |
-| Own building weight | 1     | /6      | sum of bldg_wt, 6 nodes |
-| Opp building weight | 1     | /6      | sum of bldg_wt, 6 nodes |
+| resource            | 5     | one-hot |                         |
+| pips                | 1     | /5      |                         |
+| robber              | 1     | binary  |                         |
+| cur_building_weight | 1     | /6      | sum of bldg_wt, 6 nodes |
+| opp_building_weight | 1     | /6      | sum of bldg_wt, 6 nodes |
 
 ## Nodes (54 × 19 = 1026)
 
-| Feature             | Count | Norm  | Notes                |
-| ------------------- | ----- | ----- | -------------------- |
-| Building cur        | 1     | 0/½/1 |                      |
-| Building opp        | 1     | 0/½/1 |                      |
-| Port ratios         | 5     |       | .5 specific, .25 gen |
-| Production          | 5     | /13   | adj tile pips/res    |
-| Blocked production  | 5     | /5    | robber tiles only    |
-| Dist to own network | 1     | /6    | BFS, capped at 6     |
-| Dist to opp network | 1     | /6    | BFS, capped at 6     |
+| Feature          | Count | Norm  | Notes                |
+| ---------------- | ----- | ----- | -------------------- |
+| cur_building     | 1     | 0/½/1 |                      |
+| opp_building     | 1     | 0/½/1 |                      |
+| port_ratio       | 5     |       | .5 specific, .25 gen |
+| resource_prod    | 5     | /13   | adj tile pips / res  |
+| blocked_prod     | 5     | /5    | robber tiles only    |
+| cur_network_dist | 1     | /6    | BFS, capped at 6     |
+| opp_network_dist | 1     | /6    | BFS, capped at 6     |
+
+## Normalization reference
+
+| Divisor | Meaning                           |
+| ------- | --------------------------------- |
+| 19      | max resource cards of one type    |
+| 14/5/2  | original deck count per dev type  |
+| 5       | max settlements / max tile pips   |
+| 4       | max cities                        |
+| 15      | max roads / win threshold (VP)    |
+| 13      | max pips at a single node (5+4+4) |
+| 35      | max per-resource production       |
+| 10      | max per-number production         |
+| 6       | max tile corner nodes / BFS cap   |
+| 36      | balanced dice deck size           |

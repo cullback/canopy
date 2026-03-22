@@ -163,6 +163,9 @@ where
             playout_cap_full_prob: config.playout_cap_full_prob,
             playout_cap_fast_sims: fast_sims,
             effective_sims,
+            num_aux_targets: config.aux_value_horizons.len(),
+            aux_value_horizons: config.aux_value_horizons.clone(),
+            surprise_weight_fraction: config.surprise_weight_fraction,
         }),
     });
 

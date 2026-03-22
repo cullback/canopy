@@ -234,11 +234,6 @@ pub fn train_command() -> Command {
         )
         .arg(Arg::new("lr").long("lr").default_value(d.lr.to_string()))
         .arg(
-            Arg::new("lr-min")
-                .long("lr-min")
-                .help("Minimum learning rate at end of cosine schedule (default: lr/10)"),
-        )
-        .arg(
             Arg::new("replay-window")
                 .long("replay-window")
                 .default_value(d.replay_window.to_string()),
@@ -264,18 +259,6 @@ pub fn train_command() -> Command {
                 .long("checkpoint-interval")
                 .default_value(d.checkpoint_interval.to_string())
                 .help("Save model checkpoint every N iterations (last iteration always saved)"),
-        )
-        .arg(
-            Arg::new("bench-games")
-                .long("bench-games")
-                .default_value(d.bench_games.to_string())
-                .help("Benchmark games vs rollout bot (0 to skip)"),
-        )
-        .arg(
-            Arg::new("bench-interval")
-                .long("bench-interval")
-                .default_value(d.bench_interval.to_string())
-                .help("Run benchmark every N iterations"),
         )
         .arg(
             Arg::new("gumbel-m")
@@ -324,18 +307,6 @@ pub fn train_command() -> Command {
                 .help("Starting MCTS sims for progressive ramp (ramps linearly to --simulations)"),
         )
         .arg(
-            Arg::new("bench-sims")
-                .long("bench-sims")
-                .default_value(d.bench_sims.to_string())
-                .help("MCTS simulations for benchmark opponent"),
-        )
-        .arg(
-            Arg::new("bench-eval")
-                .long("bench-eval")
-                .default_value("rollout")
-                .help("Evaluator name for benchmark opponent"),
-        )
-        .arg(
             Arg::new("gpus")
                 .long("gpus")
                 .default_value("1")
@@ -363,7 +334,8 @@ fn registry_arg(cmd: Command, id: &str, help: &str, names: &[String]) -> Command
 }
 
 #[cfg(feature = "nn")]
-type ModelFactory<G> = Box<dyn Fn() -> Box<dyn crate::train::TrainableModel<G>> + Send>;
+type ModelFactory<G> =
+    Box<dyn Fn(&crate::train::TrainConfig) -> Box<dyn crate::train::TrainableModel<G>> + Send>;
 
 #[cfg(feature = "nn")]
 pub struct GameCli<G: Game> {
@@ -429,7 +401,10 @@ impl<G: Game + 'static> GameCli<G> {
     pub fn add_model<M>(
         &mut self,
         name: impl Into<String>,
-        model_init: impl Fn(&crate::train::Device) -> M + Send + Sync + 'static,
+        model_init: impl Fn(&crate::train::Device, &crate::train::TrainConfig) -> M
+        + Send
+        + Sync
+        + 'static,
     ) where
         M: burn::module::AutodiffModule<crate::train::TrainBackend>
             + crate::nn::PolicyValueNet<crate::train::TrainBackend>
@@ -439,9 +414,12 @@ impl<G: Game + 'static> GameCli<G> {
         let init = std::sync::Arc::new(model_init);
         self.models.push((
             name.into(),
-            Box::new(move || {
+            Box::new(move |cfg: &crate::train::TrainConfig| {
+                let cfg = cfg.clone();
                 let init = init.clone();
-                Box::new(crate::train::BurnTrainableModel::new(move |d| init(d)))
+                Box::new(crate::train::BurnTrainableModel::new(move |d| {
+                    init(d, &cfg)
+                }))
             }),
         ));
     }
@@ -544,6 +522,9 @@ impl<G: Game + 'static> GameCli<G> {
             .1
             .clone();
 
+        // Look up config (for model shape — e.g. number of aux heads)
+        let config = &self.configs[0].1;
+
         // Look up model factory and build
         let model_name = matches
             .get_one::<String>("model")
@@ -559,7 +540,7 @@ impl<G: Game + 'static> GameCli<G> {
             })
             .1;
 
-        let mut trainable = factory();
+        let mut trainable = factory(config);
         trainable.load_weights(checkpoint_dir, iteration);
         let evaluator = trainable.evaluator(encoder.clone());
         self.evaluators.add_arc("nn", evaluator);
@@ -621,14 +602,8 @@ impl<G: Game + 'static> GameCli<G> {
             })
             .1;
 
-        let mut trainable = factory();
-        crate::train::run_training(
-            config,
-            trainable.as_mut(),
-            encoder,
-            new_state,
-            &self.evaluators,
-        );
+        let mut trainable = factory(&config);
+        crate::train::run_training(config, trainable.as_mut(), encoder, new_state);
     }
 
     /// Dispatch to train or tournament based on subcommand.
@@ -782,13 +757,6 @@ pub fn parse_train_config(
     }
     if set("lr") {
         config.lr = val("lr").parse().unwrap();
-        // Recalculate lr_min unless it was also explicitly set
-        if !set("lr-min") {
-            config.lr_min = config.lr / 10.0;
-        }
-    }
-    if set("lr-min") {
-        config.lr_min = val("lr-min").parse().unwrap();
     }
     if set("replay-window") {
         config.replay_window = val("replay-window").parse().unwrap();
@@ -804,12 +772,6 @@ pub fn parse_train_config(
     }
     if set("checkpoint-interval") {
         config.checkpoint_interval = val("checkpoint-interval").parse().unwrap();
-    }
-    if set("bench-games") {
-        config.bench_games = val("bench-games").parse().unwrap();
-    }
-    if set("bench-interval") {
-        config.bench_interval = val("bench-interval").parse().unwrap();
     }
     if set("gumbel-m") {
         config.gumbel_m = val("gumbel-m").parse().unwrap();
@@ -834,12 +796,6 @@ pub fn parse_train_config(
     }
     if set("simulations-start") {
         config.mcts_sims_start = val("simulations-start").parse().unwrap();
-    }
-    if set("bench-sims") {
-        config.bench_sims = val("bench-sims").parse().unwrap();
-    }
-    if set("bench-eval") {
-        config.bench_eval = val("bench-eval");
     }
     if set("gpus") {
         config.inference_workers = val("gpus").parse().unwrap();

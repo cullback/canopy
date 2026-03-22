@@ -9,7 +9,7 @@ use burn::nn::{LayerNorm, LayerNormConfig, Linear, LinearConfig};
 use burn::prelude::*;
 use burn::tensor::activation::{relu, tanh};
 use canopy::game::Game;
-use canopy::nn::PolicyValueNet;
+use canopy::nn::{ForwardOutput, PolicyValueNet};
 
 use crate::game::state::GameState;
 use crate::game::topology::Topology;
@@ -26,9 +26,9 @@ const NF: usize = 19;
 const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
-const HIDDEN: usize = 192;
+const HIDDEN: usize = 256;
 const GLOBAL_HIDDEN: usize = 96;
-const NUM_LAYERS: usize = 4;
+const NUM_LAYERS: usize = 6;
 
 // Action layout (must match action.rs ACTION_SPACE = 249):
 //   [settlement 0..54 | road 54..126 | city 126..180 | other_pre 180..205 | robber 205..224 | other_post 224..249]
@@ -239,13 +239,25 @@ pub struct CatanNexusModel<B: Backend> {
     policy_robber1: Linear<B>,
     policy_robber2: Linear<B>,
 
+    // Soft policy heads (separate final projections, share intermediate features
+    // with hard policy; trained against softened MCTS target as regularizer)
+    soft_policy_settlement: Linear<B>,
+    soft_policy_road2: Linear<B>,
+    soft_policy_city: Linear<B>,
+    soft_policy_other2: Linear<B>,
+    soft_policy_robber2: Linear<B>,
+
     // Value head
     value1: Linear<B>,
     value2: Linear<B>,
     value3: Linear<B>,
+
+    // Auxiliary short-term value heads (None if num_aux_heads == 0)
+    aux_value_hidden: Option<Linear<B>>,
+    aux_value_out: Option<Linear<B>>,
 }
 
-pub fn init_nexus_with<B: Backend>(device: &B::Device) -> CatanNexusModel<B> {
+pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> CatanNexusModel<B> {
     let graph = nexus_graph_data();
 
     // Build constant graph tensors
@@ -308,14 +320,31 @@ pub fn init_nexus_with<B: Backend>(device: &B::Device) -> CatanNexusModel<B> {
         policy_robber1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
         policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
 
+        soft_policy_settlement: LinearConfig::new(HIDDEN, 1).init(device),
+        soft_policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
+        soft_policy_city: LinearConfig::new(HIDDEN, 1).init(device),
+        soft_policy_other2: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
+        soft_policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
+
         value1: LinearConfig::new(pool_dim, HIDDEN).init(device),
         value2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
         value3: LinearConfig::new(HIDDEN, 1).init(device),
+
+        aux_value_hidden: if num_aux_heads > 0 {
+            Some(LinearConfig::new(pool_dim, HIDDEN).init(device))
+        } else {
+            None
+        },
+        aux_value_out: if num_aux_heads > 0 {
+            Some(LinearConfig::new(HIDDEN, num_aux_heads).init(device))
+        } else {
+            None
+        },
     }
 }
 
 impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
-    fn forward(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    fn forward(&self, input: Tensor<B, 2>) -> ForwardOutput<B> {
         let [batch, _] = input.dims();
 
         // ── Split input: [global | tiles | nodes] ────────────────────
@@ -397,12 +426,13 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         let h_src = h_node.clone().select(1, self.edge_src.clone());
         let h_dst = h_node.clone().select(1, self.edge_dst.clone());
         let edge_feats = Tensor::cat(vec![h_src, h_dst], 2);
+        let edge_feats_hidden = relu(
+            self.policy_road1
+                .forward(edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2])),
+        );
         let road_logits = self
             .policy_road2
-            .forward(relu(
-                self.policy_road1
-                    .forward(edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2])),
-            ))
+            .forward(edge_feats_hidden.clone())
             .reshape([batch, NUM_EDGES]);
 
         // ── Policy: City (actions 126-179) ───────────────────────────
@@ -412,25 +442,25 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
             .reshape([batch, NUM_NODES]);
 
         // ── Pooled features (shared by other-policy and value heads) ─
-        let node_pool = h_node.mean_dim(1).reshape([batch, HIDDEN]);
+        let node_pool = h_node.clone().mean_dim(1).reshape([batch, HIDDEN]);
         let tile_pool = h_tile.clone().mean_dim(1).reshape([batch, HIDDEN]);
         let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1); // [batch, 480]
 
         // ── Policy: Other (50 non-robber actions) ────────────────────
-        let other_logits = self
-            .policy_other2
-            .forward(relu(self.policy_other1.forward(pooled.clone())));
+        let other_hidden = relu(self.policy_other1.forward(pooled.clone()));
+        let other_logits = self.policy_other2.forward(other_hidden.clone());
         // Split into pre-robber [25] and post-robber [25]
         let other_pre = other_logits.clone().narrow(1, 0, NUM_OTHER_PRE);
         let other_post = other_logits.narrow(1, NUM_OTHER_PRE, NUM_OTHER_POST);
 
         // ── Policy: Robber (actions 205-223) ─────────────────────────
+        let robber_hidden = relu(
+            self.policy_robber1
+                .forward(h_tile.clone().reshape([batch * NUM_TILES, HIDDEN])),
+        );
         let robber_logits = self
             .policy_robber2
-            .forward(relu(
-                self.policy_robber1
-                    .forward(h_tile.reshape([batch * NUM_TILES, HIDDEN])),
-            ))
+            .forward(robber_hidden.clone())
             .reshape([batch, NUM_TILES]);
 
         // ── Concatenate: [settlement(54)|road(72)|city(54)|other_pre(25)|robber(19)|other_post(25)]
@@ -446,11 +476,58 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
             1,
         );
 
+        // ── Soft policy (shares intermediate features, separate final projections) ──
+        let soft_settlement = self
+            .soft_policy_settlement
+            .forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN]))
+            .reshape([batch, NUM_NODES]);
+        let soft_road = self
+            .soft_policy_road2
+            .forward(edge_feats_hidden.reshape([batch * NUM_EDGES, HIDDEN]))
+            .reshape([batch, NUM_EDGES]);
+        let soft_city = self
+            .soft_policy_city
+            .forward(h_node.reshape([batch * NUM_NODES, HIDDEN]))
+            .reshape([batch, NUM_NODES]);
+        let soft_other = self.soft_policy_other2.forward(other_hidden);
+        let soft_other_pre = soft_other.clone().narrow(1, 0, NUM_OTHER_PRE);
+        let soft_other_post = soft_other.narrow(1, NUM_OTHER_PRE, NUM_OTHER_POST);
+        let soft_robber = self
+            .soft_policy_robber2
+            .forward(robber_hidden.reshape([batch * NUM_TILES, HIDDEN]))
+            .reshape([batch, NUM_TILES]);
+        let soft_policy_logits = Tensor::cat(
+            vec![
+                soft_settlement,
+                soft_road,
+                soft_city,
+                soft_other_pre,
+                soft_robber,
+                soft_other_post,
+            ],
+            1,
+        );
+
         // ── Value head ───────────────────────────────────────────────
-        let v = relu(self.value1.forward(pooled));
+        let v = relu(self.value1.forward(pooled.clone()));
         let v = relu(self.value2.forward(v));
         let value = tanh(self.value3.forward(v));
 
-        (policy, value)
+        // ── Auxiliary value heads ────────────────────────────────────
+        let aux_values = if let (Some(aux_hidden), Some(aux_out)) =
+            (&self.aux_value_hidden, &self.aux_value_out)
+        {
+            let h = relu(aux_hidden.forward(pooled));
+            Some(tanh(aux_out.forward(h))) // [batch, num_aux]
+        } else {
+            None
+        };
+
+        ForwardOutput {
+            policy_logits: policy,
+            value,
+            soft_policy_logits: Some(soft_policy_logits),
+            aux_values,
+        }
     }
 }

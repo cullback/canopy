@@ -13,6 +13,9 @@ pub(super) struct ActorConfig {
     pub playout_cap_full_prob: f32,
     pub playout_cap_fast_sims: u32,
     pub effective_sims: u32,
+    pub num_aux_targets: usize,
+    pub aux_value_horizons: Vec<u32>,
+    pub surprise_weight_fraction: f32,
 }
 
 /// Result of a single self-play game.
@@ -54,6 +57,16 @@ where
 
         // Terminal check
         if let Status::Terminal(reward) = search.state().status() {
+            // Compute short-term value EMA targets before z *= reward
+            if !actor_config.aux_value_horizons.is_empty() {
+                compute_short_term_values(&mut samples, &actor_config.aux_value_horizons);
+            }
+
+            // Normalize surprise weights per-game
+            if actor_config.surprise_weight_fraction > 0.0 {
+                normalize_surprise_weights(&mut samples, actor_config.surprise_weight_fraction);
+            }
+
             for s in &mut samples {
                 s.z *= reward;
                 s.game_length = turn_count;
@@ -148,6 +161,13 @@ where
         };
         let prior_agrees = result.prior_top1_action == result.selected_action;
 
+        // Compute raw KL(target || prior) for policy surprise weighting
+        let policy_surprise = if is_full_search {
+            compute_kl(&result.policy, &result.prior_policy)
+        } else {
+            0.0
+        };
+
         samples.push(Sample {
             features: features_buf.into_boxed_slice(),
             policy_target: result.policy.into_boxed_slice(),
@@ -160,9 +180,75 @@ where
             value_correction,
             q_std,
             prior_agrees,
+            policy_surprise,
+            surprise_weight: 1.0,
+            aux_targets: vec![0.0; actor_config.num_aux_targets].into_boxed_slice(),
         });
 
         search.apply_action(chosen);
+    }
+}
+
+/// Compute KL(target || prior) = Σ target[a] * ln(target[a] / prior[a]).
+fn compute_kl(target: &[f32], prior: &[f32]) -> f32 {
+    const EPSILON: f32 = 1e-8;
+    let mut kl = 0.0f32;
+    for (&t, &p) in target.iter().zip(prior.iter()) {
+        if t > 0.0 {
+            kl += t * (t / p.max(EPSILON)).ln();
+        }
+    }
+    kl
+}
+
+/// Normalize surprise weights across a game's samples.
+///
+/// Full-search samples: w = (1-f)/N + f * kl / total_kl
+/// Fast-search samples: w = (1-f)/N
+fn normalize_surprise_weights(samples: &mut [Sample], fraction: f32) {
+    let n_full = samples.iter().filter(|s| s.full_search).count();
+    if n_full == 0 {
+        return;
+    }
+    let total_kl: f32 = samples
+        .iter()
+        .filter(|s| s.full_search)
+        .map(|s| s.policy_surprise)
+        .sum();
+    let n = n_full as f32;
+    let uniform = (1.0 - fraction) / n;
+    for s in samples.iter_mut() {
+        if s.full_search {
+            let surprise_part = if total_kl > 0.0 {
+                fraction * s.policy_surprise / total_kl
+            } else {
+                fraction / n
+            };
+            s.surprise_weight = uniform + surprise_part;
+        } else {
+            s.surprise_weight = (1.0 - fraction) / n;
+        }
+    }
+}
+
+/// Compute EMA short-term value targets, backwards through the game.
+///
+/// For each horizon h: alpha = 1 - exp(-1/h)
+/// Backwards: ema_p1 = alpha * q_p1[t] + (1-alpha) * ema_p1
+/// Store in current-player perspective: aux_targets[h_idx] = ema_p1 * z
+///
+/// Called before z *= reward, so z still holds the player sign.
+fn compute_short_term_values(samples: &mut [Sample], horizons: &[u32]) {
+    for (h_idx, &h) in horizons.iter().enumerate() {
+        let alpha = 1.0 - (-1.0 / h as f32).exp();
+        let mut ema_p1 = 0.0f32;
+        for i in (0..samples.len()).rev() {
+            // Convert Q to P1 perspective: q_p1 = q * z (z is the player sign)
+            let q_p1 = samples[i].q * samples[i].z;
+            ema_p1 = alpha * q_p1 + (1.0 - alpha) * ema_p1;
+            // Store in current-player perspective
+            samples[i].aux_targets[h_idx] = ema_p1 * samples[i].z;
+        }
     }
 }
 

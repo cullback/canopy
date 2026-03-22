@@ -1,7 +1,7 @@
 use burn::nn::{Linear, LinearConfig};
 use burn::prelude::*;
 use canopy::game::Game;
-use canopy::nn::PolicyValueNet;
+use canopy::nn::{ForwardOutput, PolicyValueNet};
 
 use crate::encoder::Twenty48Encoder;
 use crate::game::Board;
@@ -28,7 +28,7 @@ pub fn init_twenty48<B: Backend>(device: &B::Device) -> Twenty48Model<B> {
 }
 
 impl<B: Backend> PolicyValueNet<B> for Twenty48Model<B> {
-    fn forward(&self, input: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 2>) {
+    fn forward(&self, input: Tensor<B, 2>) -> ForwardOutput<B> {
         let x = burn::tensor::activation::relu(self.fc1.forward(input));
         let x = burn::tensor::activation::relu(self.fc2.forward(x));
 
@@ -37,6 +37,11 @@ impl<B: Backend> PolicyValueNet<B> for Twenty48Model<B> {
         let v = self.value_head.forward(x);
         let value = burn::tensor::activation::tanh(v);
 
-        (policy, value)
+        ForwardOutput {
+            policy_logits: policy,
+            value,
+            soft_policy_logits: None,
+            aux_values: None,
+        }
     }
 }

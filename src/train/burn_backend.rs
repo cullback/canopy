@@ -12,7 +12,7 @@ use burn::tensor::activation::log_softmax;
 use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use crate::game::Game;
-use crate::nn::{NeuralEvaluator, PolicyValueNet, StateEncoder};
+use crate::nn::{ForwardOutput, NeuralEvaluator, PolicyValueNet, StateEncoder};
 
 use super::{Sample, TrainMetrics, TrainStepConfig, TrainableModel};
 
@@ -64,21 +64,29 @@ pub fn inference_device(index: usize) -> Device {
     }
 }
 
+/// All batch tensors needed for loss computation.
+struct BatchTensors<B: Backend> {
+    features: Tensor<B, 2>,
+    policy_targets: Tensor<B, 2>,
+    value_targets: Tensor<B, 2>,
+    mask: Tensor<B, 2>,
+    num_full: usize,
+    /// Soft policy target (raised to 1/T and renormalized). None if T=0.
+    soft_policy_targets: Option<Tensor<B, 2>>,
+    /// Surprise weights [batch, 1]. None if surprise weighting disabled.
+    surprise_weights: Option<Tensor<B, 2>>,
+    /// Auxiliary value targets [batch, num_aux]. None if no aux heads.
+    aux_value_targets: Option<Tensor<B, 2>>,
+}
+
 /// Prepare batch tensors from a slice of samples.
-/// Returns (features, policy_targets, value_targets, mask, num_full) tensors.
 fn prepare_batch<B: Backend>(
     samples: &[&Sample],
-    q_weight: f32,
+    cfg: &TrainStepConfig,
     feature_size: usize,
     num_actions: usize,
     device: &B::Device,
-) -> (
-    Tensor<B, 2>,
-    Tensor<B, 2>,
-    Tensor<B, 2>,
-    Tensor<B, 2>,
-    usize,
-) {
+) -> BatchTensors<B> {
     let bs = samples.len();
 
     let features: Vec<f32> = samples
@@ -97,7 +105,7 @@ fn prepare_batch<B: Backend>(
 
     let value_targets: Vec<f32> = samples
         .iter()
-        .map(|s| (1.0 - q_weight) * s.z + q_weight * s.q)
+        .map(|s| (1.0 - cfg.q_weight) * s.z + cfg.q_weight * s.q)
         .collect();
     let value_tensor = Tensor::<B, 2>::from_data(TensorData::new(value_targets, [bs, 1]), device);
 
@@ -109,38 +117,187 @@ fn prepare_batch<B: Backend>(
 
     let num_full = samples.iter().filter(|s| s.full_search).count();
 
-    (
-        features_tensor,
-        policy_tensor,
-        value_tensor,
-        mask_tensor,
+    // Soft policy target: policy_target^(1/T) renormalized
+    let soft_policy_targets = if cfg.soft_policy_temperature > 0.0 {
+        let inv_t = 1.0 / cfg.soft_policy_temperature;
+        let mut soft_data = Vec::with_capacity(bs * num_actions);
+        for s in samples {
+            let mut row = Vec::with_capacity(num_actions);
+            let mut sum = 0.0f32;
+            for &p in s.policy_target.iter() {
+                let v = if p > 0.0 { p.powf(inv_t) } else { 0.0 };
+                row.push(v);
+                sum += v;
+            }
+            if sum > 0.0 {
+                for v in &mut row {
+                    *v /= sum;
+                }
+            }
+            soft_data.extend_from_slice(&row);
+        }
+        Some(Tensor::<B, 2>::from_data(
+            TensorData::new(soft_data, [bs, num_actions]),
+            device,
+        ))
+    } else {
+        None
+    };
+
+    // Surprise weights
+    let surprise_weights = if cfg.surprise_weight_fraction > 0.0 {
+        let w_data: Vec<f32> = samples.iter().map(|s| s.surprise_weight).collect();
+        Some(Tensor::<B, 2>::from_data(
+            TensorData::new(w_data, [bs, 1]),
+            device,
+        ))
+    } else {
+        None
+    };
+
+    // Auxiliary value targets
+    let aux_value_targets = if cfg.num_aux_targets > 0 {
+        let aux_data: Vec<f32> = samples
+            .iter()
+            .flat_map(|s| s.aux_targets.iter().copied())
+            .collect();
+        Some(Tensor::<B, 2>::from_data(
+            TensorData::new(aux_data, [bs, cfg.num_aux_targets]),
+            device,
+        ))
+    } else {
+        None
+    };
+
+    BatchTensors {
+        features: features_tensor,
+        policy_targets: policy_tensor,
+        value_targets: value_tensor,
+        mask: mask_tensor,
         num_full,
-    )
+        soft_policy_targets,
+        surprise_weights,
+        aux_value_targets,
+    }
 }
 
-/// Compute policy and value losses from model output and batch tensors.
+/// Losses returned from a single batch forward pass.
+struct BatchLosses<B: Backend> {
+    total: Tensor<B, 1>,
+    policy: f32,
+    value: f32,
+    soft_policy: f32,
+    aux_value: f32,
+    /// Per-horizon auxiliary value MSE (empty if no aux heads).
+    aux_value_per_horizon: Vec<f32>,
+}
+
+/// Compute all losses from model output and batch tensors.
 fn compute_batch_losses<B: Backend>(
-    policy_logits: Tensor<B, 2>,
-    value_pred: Tensor<B, 2>,
-    policy_tensor: Tensor<B, 2>,
-    value_tensor: Tensor<B, 2>,
-    mask_tensor: Tensor<B, 2>,
-    num_full: usize,
-) -> (Tensor<B, 1>, f32, f32) {
+    output: ForwardOutput<B>,
+    batch: &BatchTensors<B>,
+    cfg: &TrainStepConfig,
+) -> BatchLosses<B> {
+    let policy_logits = output.policy_logits;
+    let value_pred = output.value;
+
     // Per-sample cross-entropy, masked by full_search (playout cap)
     let log_probs = log_softmax(policy_logits, 1);
-    let per_sample_ce = policy_tensor.mul(log_probs).sum_dim(1).neg();
-    let denom = if num_full > 0 { num_full as f32 } else { 1.0 };
-    let policy_loss = per_sample_ce.mul(mask_tensor).sum().div_scalar(denom);
+    let per_sample_ce = batch.policy_targets.clone().mul(log_probs).sum_dim(1).neg(); // [batch, 1]
+    let denom = if batch.num_full > 0 {
+        batch.num_full as f32
+    } else {
+        1.0
+    };
 
-    let value_diff = value_pred.sub(value_tensor);
-    let value_loss = value_diff.powf_scalar(2.0).mean();
+    // Apply surprise weights if enabled
+    let weighted_ce = if let Some(ref sw) = batch.surprise_weights {
+        per_sample_ce.mul(sw.clone())
+    } else {
+        per_sample_ce
+    };
+    let policy_loss = weighted_ce.mul(batch.mask.clone()).sum().div_scalar(denom);
+
+    // Value loss with surprise weights
+    let value_diff = value_pred.sub(batch.value_targets.clone());
+    let per_sample_mse = value_diff.powf_scalar(2.0); // [batch, 1]
+    let value_loss = if let Some(ref sw) = batch.surprise_weights {
+        per_sample_mse.mul(sw.clone()).mean()
+    } else {
+        per_sample_mse.mean()
+    };
 
     let pl = policy_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
     let vl = value_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
 
-    let loss = policy_loss.add(value_loss).reshape([1]);
-    (loss, pl, vl)
+    let mut total_loss = policy_loss.add(value_loss);
+
+    // Soft policy loss
+    let soft_pl = if let (Some(soft_targets), Some(soft_logits)) =
+        (&batch.soft_policy_targets, output.soft_policy_logits)
+    {
+        let soft_log_probs = log_softmax(soft_logits, 1);
+        let soft_ce = soft_targets.clone().mul(soft_log_probs).sum_dim(1).neg(); // [batch, 1]
+        let soft_ce_weighted = if let Some(ref sw) = batch.surprise_weights {
+            soft_ce.mul(sw.clone())
+        } else {
+            soft_ce
+        };
+        let soft_loss = soft_ce_weighted
+            .mul(batch.mask.clone())
+            .sum()
+            .div_scalar(denom);
+        let sl = soft_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
+        total_loss = total_loss.add(soft_loss.mul_scalar(cfg.soft_policy_weight));
+        sl
+    } else {
+        0.0
+    };
+
+    // Auxiliary value loss
+    let (aux_vl, aux_vl_per_horizon) = if let (Some(aux_targets), Some(aux_preds)) =
+        (&batch.aux_value_targets, output.aux_values)
+    {
+        let diff = aux_preds.sub(aux_targets.clone()); // [batch, num_aux]
+        let sq_diff = diff.powf_scalar(2.0); // [batch, num_aux]
+        let per_sample_aux_mse = sq_diff.clone().mean_dim(1); // [batch, 1]
+        let aux_loss = if let Some(ref sw) = batch.surprise_weights {
+            per_sample_aux_mse.mul(sw.clone()).mean()
+        } else {
+            per_sample_aux_mse.mean()
+        };
+        let al = aux_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
+        total_loss = total_loss.add(aux_loss.mul_scalar(cfg.aux_value_weight));
+        // Per-horizon MSE (mean over batch)
+        let per_horizon = sq_diff.mean_dim(0); // [1, num_aux]
+        let per_horizon_vec = per_horizon
+            .reshape([cfg.num_aux_targets])
+            .into_data()
+            .to_vec::<f32>()
+            .unwrap();
+        (al, per_horizon_vec)
+    } else {
+        (0.0, vec![])
+    };
+
+    BatchLosses {
+        total: total_loss.reshape([1]),
+        policy: pl,
+        value: vl,
+        soft_policy: soft_pl,
+        aux_value: aux_vl,
+        aux_value_per_horizon: aux_vl_per_horizon,
+    }
+}
+
+/// Aggregated losses from one epoch of training or validation.
+#[derive(Default)]
+struct EpochLosses {
+    policy: f32,
+    value: f32,
+    soft_policy: f32,
+    aux_value: f32,
+    aux_value_per_horizon: Vec<f32>,
 }
 
 pub struct BurnTrainableModel<G, M>
@@ -188,7 +345,7 @@ where
         samples: &[&Sample],
         cfg: &TrainStepConfig,
         span: &tracing::Span,
-    ) -> (f32, f32, usize) {
+    ) -> (EpochLosses, usize) {
         let feature_size = samples[0].features.len();
         let mut model = std::mem::replace(&mut self.model, (self.model_init)(&self.device));
 
@@ -197,6 +354,9 @@ where
 
         let mut total_policy_loss = 0.0f32;
         let mut total_value_loss = 0.0f32;
+        let mut total_soft_policy_loss = 0.0f32;
+        let mut total_aux_value_loss = 0.0f32;
+        let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
         let mut num_batches = 0usize;
 
         for batch_start in (0..indices.len()).step_by(cfg.train_batch_size) {
@@ -207,30 +367,30 @@ where
             }
 
             let batch_samples: Vec<&Sample> = batch_indices.iter().map(|&i| samples[i]).collect();
-            let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
-                prepare_batch::<TrainBackend>(
-                    &batch_samples,
-                    cfg.q_weight,
-                    feature_size,
-                    G::NUM_ACTIONS,
-                    &self.device,
-                );
-
-            let (policy_logits, value_pred) = model.forward(features_tensor);
-            let (loss, pl, vl) = compute_batch_losses(
-                policy_logits,
-                value_pred,
-                policy_tensor,
-                value_tensor,
-                mask_tensor,
-                num_full,
+            let batch = prepare_batch::<TrainBackend>(
+                &batch_samples,
+                cfg,
+                feature_size,
+                G::NUM_ACTIONS,
+                &self.device,
             );
 
-            total_policy_loss += pl;
-            total_value_loss += vl;
+            let output = model.forward(batch.features.clone());
+            let losses = compute_batch_losses(output, &batch, cfg);
+
+            total_policy_loss += losses.policy;
+            total_value_loss += losses.value;
+            total_soft_policy_loss += losses.soft_policy;
+            total_aux_value_loss += losses.aux_value;
+            for (acc, &v) in total_aux_per_horizon
+                .iter_mut()
+                .zip(losses.aux_value_per_horizon.iter())
+            {
+                *acc += v;
+            }
             num_batches += 1;
 
-            let grads = loss.backward();
+            let grads = losses.total.backward();
             let grads = GradientsParams::from_grads(grads, &model);
             model = self.optimizer.step(cfg.lr, model, grads);
             span.pb_inc(1);
@@ -238,69 +398,75 @@ where
 
         self.model = model;
 
-        let avg_policy = if num_batches > 0 {
-            total_policy_loss / num_batches as f32
-        } else {
-            0.0
-        };
-        let avg_value = if num_batches > 0 {
-            total_value_loss / num_batches as f32
-        } else {
-            0.0
-        };
-        (avg_policy, avg_value, num_batches)
+        let nb = num_batches.max(1) as f32;
+        for v in &mut total_aux_per_horizon {
+            *v /= nb;
+        }
+        (
+            EpochLosses {
+                policy: total_policy_loss / nb,
+                value: total_value_loss / nb,
+                soft_policy: total_soft_policy_loss / nb,
+                aux_value: total_aux_value_loss / nb,
+                aux_value_per_horizon: total_aux_per_horizon,
+            },
+            num_batches,
+        )
     }
 
-    fn validate(&self, samples: &[&Sample], cfg: &TrainStepConfig) -> (f32, f32) {
+    fn validate(&self, samples: &[&Sample], cfg: &TrainStepConfig) -> EpochLosses {
         let feature_size = samples[0].features.len();
         let model = self.model.valid();
 
         let mut total_policy_loss = 0.0f32;
         let mut total_value_loss = 0.0f32;
+        let mut total_soft_policy_loss = 0.0f32;
+        let mut total_aux_value_loss = 0.0f32;
+        let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
         let mut num_batches = 0usize;
 
         for batch_start in (0..samples.len()).step_by(cfg.train_batch_size) {
             let batch_end = (batch_start + cfg.train_batch_size).min(samples.len());
-            let batch = &samples[batch_start..batch_end];
-            if batch.is_empty() {
+            let batch_samples = &samples[batch_start..batch_end];
+            if batch_samples.is_empty() {
                 continue;
             }
 
-            let (features_tensor, policy_tensor, value_tensor, mask_tensor, num_full) =
-                prepare_batch::<InferBackend>(
-                    batch,
-                    cfg.q_weight,
-                    feature_size,
-                    G::NUM_ACTIONS,
-                    &self.device,
-                );
-
-            let (policy_logits, value_pred) = model.forward(features_tensor);
-            let (_loss, pl, vl) = compute_batch_losses(
-                policy_logits,
-                value_pred,
-                policy_tensor,
-                value_tensor,
-                mask_tensor,
-                num_full,
+            let batch = prepare_batch::<InferBackend>(
+                batch_samples,
+                cfg,
+                feature_size,
+                G::NUM_ACTIONS,
+                &self.device,
             );
 
-            total_policy_loss += pl;
-            total_value_loss += vl;
+            let output = model.forward(batch.features.clone());
+            let losses = compute_batch_losses(output, &batch, cfg);
+
+            total_policy_loss += losses.policy;
+            total_value_loss += losses.value;
+            total_soft_policy_loss += losses.soft_policy;
+            total_aux_value_loss += losses.aux_value;
+            for (acc, &v) in total_aux_per_horizon
+                .iter_mut()
+                .zip(losses.aux_value_per_horizon.iter())
+            {
+                *acc += v;
+            }
             num_batches += 1;
         }
 
-        let avg_policy = if num_batches > 0 {
-            total_policy_loss / num_batches as f32
-        } else {
-            0.0
-        };
-        let avg_value = if num_batches > 0 {
-            total_value_loss / num_batches as f32
-        } else {
-            0.0
-        };
-        (avg_policy, avg_value)
+        let nb = num_batches.max(1) as f32;
+        for v in &mut total_aux_per_horizon {
+            *v /= nb;
+        }
+        EpochLosses {
+            policy: total_policy_loss / nb,
+            value: total_value_loss / nb,
+            soft_policy: total_soft_policy_loss / nb,
+            aux_value: total_aux_value_loss / nb,
+            aux_value_per_horizon: total_aux_per_horizon,
+        }
     }
 }
 
@@ -358,39 +524,41 @@ where
         span.pb_set_message("training");
         span.pb_start();
 
-        let mut final_train_ploss = 0.0f32;
-        let mut final_train_vloss = 0.0f32;
-        let mut final_val_ploss = 0.0f32;
-        let mut final_val_vloss = 0.0f32;
+        let mut final_train = EpochLosses::default();
+        let mut final_val = EpochLosses::default();
         let mut total_gradient_steps = 0usize;
 
         for epoch in 0..cfg.epochs {
-            let (ploss, vloss, steps) = self.train_epoch(train_samples, cfg, &span);
+            let (train_losses, steps) = self.train_epoch(train_samples, cfg, &span);
             total_gradient_steps += steps;
 
-            let (val_ploss, val_vloss) = self.validate(val_samples, cfg);
-
-            final_train_ploss = ploss;
-            final_train_vloss = vloss;
-            final_val_ploss = val_ploss;
-            final_val_vloss = val_vloss;
+            let val_losses = self.validate(val_samples, cfg);
 
             span.pb_set_message(&format!(
                 "epoch {}/{} p={:.4} v={:.4} val_p={:.4} val_v={:.4}",
                 epoch + 1,
                 cfg.epochs,
-                ploss,
-                vloss,
-                val_ploss,
-                val_vloss
+                train_losses.policy,
+                train_losses.value,
+                val_losses.policy,
+                val_losses.value
             ));
+
+            final_train = train_losses;
+            final_val = val_losses;
         }
 
         TrainMetrics {
-            loss_policy_train: final_train_ploss,
-            loss_value_train: final_train_vloss,
-            loss_policy_val: final_val_ploss,
-            loss_value_val: final_val_vloss,
+            loss_policy_train: final_train.policy,
+            loss_value_train: final_train.value,
+            loss_policy_val: final_val.policy,
+            loss_value_val: final_val.value,
+            loss_soft_policy_train: final_train.soft_policy,
+            loss_soft_policy_val: final_val.soft_policy,
+            loss_aux_value_train: final_train.aux_value,
+            loss_aux_value_val: final_val.aux_value,
+            aux_value_losses_train: final_train.aux_value_per_horizon,
+            aux_value_losses_val: final_val.aux_value_per_horizon,
             gradient_steps: total_gradient_steps,
         }
     }

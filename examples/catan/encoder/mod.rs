@@ -54,7 +54,6 @@ use canopy::player::Player;
 
 use crate::game::board::{Node, Port};
 use crate::game::dice::Dice;
-use crate::game::resource::ALL_RESOURCES;
 use crate::game::state::{GameState, Phase, PlayerBoards};
 use crate::game::topology::Topology;
 
@@ -89,69 +88,9 @@ pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
     }
 }
 
-/// Push per-player features (22).
-///
-/// Dev card playable values are exact (held − bought this turn) for self,
-/// or hypergeometric expected values for the opponent.
-/// VP is total (including hidden VP cards) for self, public-only for opponent.
-pub(crate) fn encode_player(state: &GameState, player_to_encode: Player, out: &mut Vec<f32>) {
-    let player = &state.players[player_to_encode];
-    let is_self = player_to_encode == state.current_player;
-
-    // Resources (5)
-    for &r in &ALL_RESOURCES {
-        out.push(player.hand[r] as f32 / 19.0);
-    }
-
-    // Dev cards playable (5) — exact for self, expected for opponent
-    let dev_cards_playable = if is_self {
-        self_dev_cards_playable(state, player_to_encode)
-    } else {
-        opponent_expected_dev_cards(state, player_to_encode.opponent(), player_to_encode)
-    };
-    out.extend_from_slice(&dev_cards_playable);
-
-    // Dev cards played — exact counts, visible for both (5)
-    for (count, max) in player.dev_cards_played.0.iter().zip(&ORIGINAL_DECK) {
-        out.push(*count as f32 / max);
-    }
-
-    // Settlements left (1)
-    out.push(player.settlements_left as f32 / 5.0);
-
-    // Cities left (1)
-    out.push(player.cities_left as f32 / 4.0);
-
-    // Roads left (1)
-    out.push(player.roads_left as f32 / 15.0);
-
-    // Has longest road award (1)
-    let has_lr = state
-        .longest_road
-        .is_some_and(|(lr_pid, _)| lr_pid == player_to_encode);
-    out.push(f32::from(has_lr));
-
-    // Has largest army award (1)
-    let has_la = state
-        .largest_army
-        .is_some_and(|(la_pid, _)| la_pid == player_to_encode);
-    out.push(f32::from(has_la));
-
-    // Longest road path length (1)
-    out.push(state.boards[player_to_encode].road_network.longest_road() as f32 / 15.0);
-
-    // Victory points (1) — total for self, public-only for opponent
-    let vps = if is_self {
-        state.total_vps(player_to_encode)
-    } else {
-        state.public_vps(player_to_encode)
-    };
-    out.push(vps as f32 / 15.0);
-}
-
 /// Compute normalized playable dev card values for the perspective player (exact).
 /// Playable = held − bought this turn (cards bought this turn can't be played yet).
-fn self_dev_cards_playable(state: &GameState, pid: Player) -> [f32; 5] {
+pub(super) fn self_dev_cards_playable(state: &GameState, pid: Player) -> [f32; 5] {
     let player = &state.players[pid];
     let mut out = [0.0; 5];
     for (i, max) in ORIGINAL_DECK.iter().enumerate() {
@@ -163,7 +102,11 @@ fn self_dev_cards_playable(state: &GameState, pid: Player) -> [f32; 5] {
 
 /// Compute normalized expected dev card held values for the opponent
 /// using hypergeometric proportions over the unknown card pool.
-fn opponent_expected_dev_cards(state: &GameState, perspective: Player, opp: Player) -> [f32; 5] {
+pub(super) fn opponent_expected_dev_cards(
+    state: &GameState,
+    perspective: Player,
+    opp: Player,
+) -> [f32; 5] {
     let self_player = &state.players[perspective];
     let opp_player = &state.players[opp];
 
@@ -184,30 +127,6 @@ fn opponent_expected_dev_cards(state: &GameState, perspective: Player, opp: Play
         }
     }
     out
-}
-
-/// Push 6 extra dev card features per player:
-/// - Dev cards bought this turn (5): exact for self, 0 for opponent
-/// - Has played dev card this turn (1): binary, visible for both
-pub(crate) fn encode_player_dev_extra(
-    state: &GameState,
-    player_to_encode: Player,
-    out: &mut Vec<f32>,
-) {
-    let player = &state.players[player_to_encode];
-    let is_self = player_to_encode == state.current_player;
-
-    // Dev cards bought this turn (5) — exact for self, 0 for opponent
-    for (i, max) in ORIGINAL_DECK.iter().enumerate() {
-        if is_self {
-            out.push(player.dev_cards_bought_this_turn.0[i] as f32 / max);
-        } else {
-            out.push(0.0);
-        }
-    }
-
-    // Has played dev card this turn (1)
-    out.push(f32::from(player.has_played_dev_card_this_turn));
 }
 
 /// Building value for a single node.

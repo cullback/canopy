@@ -85,7 +85,7 @@ fn main() {
     setup.add_evaluator("optimal-defender", strategy::OptimalDefender);
 
     setup.add_encoder("default", Arc::new(encoder::TenureEncoder));
-    setup.add_model("default", model::init_tenure);
+    setup.add_model("default", |device, _cfg| model::init_tenure(device));
     setup.add_config(
         "default",
         TrainConfig {
@@ -97,9 +97,6 @@ fn main() {
             train_batch_size: 256,
             replay_window: 8,
             warmup_iters: 15,
-            bench_games: 200,
-            bench_interval: 10,
-            bench_sims: 500,
             concurrent_games: 20,
             leaf_batch_size: 8,
             explore_moves: 10,
