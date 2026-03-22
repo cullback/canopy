@@ -65,6 +65,10 @@ class MCTSPanel {
     this.treeViewEl.appendChild(this._renderNode(tree, 0));
   }
 
+  showProgress(done, total) {
+    this.simsEl.textContent = `${done} / ${total} sims`;
+  }
+
   clear() {
     this.barsEl.innerHTML = '';
     this.simsEl.textContent = '0 sims';

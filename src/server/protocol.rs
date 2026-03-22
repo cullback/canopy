@@ -72,6 +72,13 @@ pub enum ServerMsg {
         action: usize,
         label: String,
         snapshot: Option<SearchSnapshot>,
+        action_labels: Vec<String>,
+    },
+    /// Live search progress update.
+    SearchProgress {
+        snapshot: SearchSnapshot,
+        action_labels: Vec<String>,
+        sims_total: u32,
     },
     /// Error message.
     Error { message: String },

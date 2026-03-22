@@ -1,9 +1,9 @@
 use std::sync::Arc;
 
-use crate::eval::Evaluator;
+use crate::eval::{Evaluation, Evaluator};
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
-use crate::mcts::{Config, Search, Step};
+use crate::mcts::{Config, Search, SearchResult, SearchSnapshot, Step};
 
 use super::protocol::{ActionInfo, ClientMsg, ServerMsg};
 use super::traits::GamePresenter;
@@ -145,6 +145,10 @@ impl<G: Game + 'static> GameSession<G> {
                 let action = result.selected_action;
                 let label = self.presenter.action_label(self.search.state(), action);
                 let snapshot = self.search.snapshot();
+                let action_labels = snapshot
+                    .as_ref()
+                    .map(|s| self.edge_labels(&s.edges))
+                    .unwrap_or_default();
                 self.apply_action(action);
                 self.auto_resolve_chance();
                 vec![
@@ -152,6 +156,7 @@ impl<G: Game + 'static> GameSession<G> {
                         action,
                         label,
                         snapshot,
+                        action_labels,
                     },
                     self.state_msg(),
                 ]
@@ -423,6 +428,100 @@ impl<G: Game + 'static> GameSession<G> {
                 Step::Done(result) => return result,
             }
         }
+    }
+
+    /// Validate state and prepare search for streaming.
+    /// Returns `Ok(sims_total)` or `Err(error_msgs)`.
+    pub fn begin_search(&mut self, msg: &ClientMsg) -> Result<u32, Vec<ServerMsg>> {
+        match msg {
+            ClientMsg::BotMove { simulations } => {
+                if self.is_terminal() {
+                    return Err(vec![ServerMsg::Error {
+                        message: "Game is over".into(),
+                    }]);
+                }
+                if self.is_chance() {
+                    return Err(vec![ServerMsg::Error {
+                        message: "Current state is a chance node".into(),
+                    }]);
+                }
+                let player_idx = self.current_player_idx();
+                let sims = simulations.unwrap_or(self.configs[player_idx].simulations);
+                self.search.set_num_simulations(sims);
+                Ok(sims)
+            }
+            ClientMsg::RunSims { count } => {
+                if self.is_terminal() || self.is_chance() {
+                    return Err(vec![ServerMsg::Error {
+                        message: "Cannot run sims on chance/terminal state".into(),
+                    }]);
+                }
+                self.search.set_num_simulations(*count);
+                Ok(*count)
+            }
+            _ => Err(vec![ServerMsg::Error {
+                message: "begin_search called with non-search message".into(),
+            }]),
+        }
+    }
+
+    /// Run one step of MCTS. Returns `Some(result)` when search is complete.
+    pub fn search_tick(&mut self, evals: &mut Vec<Evaluation>) -> Option<SearchResult> {
+        match self.search.step(evals, &mut self.rng) {
+            Step::NeedsEval(states) => {
+                let refs: Vec<&G> = states.iter().collect();
+                *evals = self.evaluator.evaluate_batch(&refs, &mut self.rng);
+                None
+            }
+            Step::Done(result) => Some(result),
+        }
+    }
+
+    /// Finish a streaming search: apply action (BotMove) or return snapshot (RunSims).
+    pub fn finish_search(&mut self, msg: &ClientMsg, result: SearchResult) -> Vec<ServerMsg> {
+        match msg {
+            ClientMsg::BotMove { .. } => {
+                let action = result.selected_action;
+                let label = self.presenter.action_label(self.search.state(), action);
+                let snapshot = self.search.snapshot();
+                let action_labels = snapshot
+                    .as_ref()
+                    .map(|s| self.edge_labels(&s.edges))
+                    .unwrap_or_default();
+                self.apply_action(action);
+                self.auto_resolve_chance();
+                vec![
+                    ServerMsg::BotAction {
+                        action,
+                        label,
+                        snapshot,
+                        action_labels,
+                    },
+                    self.state_msg(),
+                ]
+            }
+            ClientMsg::RunSims { .. } => match self.search.snapshot() {
+                Some(snap) => {
+                    let labels = self.edge_labels(&snap.edges);
+                    vec![ServerMsg::Snapshot {
+                        snapshot: snap,
+                        action_labels: labels,
+                    }]
+                }
+                None => vec![ServerMsg::Error {
+                    message: "No snapshot available".into(),
+                }],
+            },
+            _ => vec![],
+        }
+    }
+
+    /// Get current snapshot with action labels.
+    pub fn snapshot_with_labels(&self) -> Option<(SearchSnapshot, Vec<String>)> {
+        self.search.snapshot().map(|snap| {
+            let labels = self.edge_labels(&snap.edges);
+            (snap, labels)
+        })
     }
 
     /// Get action labels for edge snapshots.

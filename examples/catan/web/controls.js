@@ -5,8 +5,18 @@ class Controls {
     this.session = session;
     this.autoplayInterval = null;
     this.autoplayDelay = 500;
+    this.searching = false;
 
     this._bind();
+  }
+
+  setSearching(active) {
+    this.searching = active;
+    const runBtn = document.getElementById('btn-run-sims');
+    const botBtn = document.getElementById('btn-bot-move');
+    runBtn.disabled = active;
+    botBtn.disabled = active;
+    runBtn.textContent = active ? 'Searching...' : 'Run Sims';
   }
 
   _bind() {
@@ -26,17 +36,17 @@ class Controls {
     });
 
     document.getElementById('btn-bot-move').addEventListener('click', () => {
+      if (this.searching) return;
       const sims = parseInt(document.getElementById('sims-slider').value);
+      this.setSearching(true);
       this.session.send({ type: 'BotMove', simulations: sims || null });
     });
 
     document.getElementById('btn-run-sims').addEventListener('click', () => {
+      if (this.searching) return;
       const count = parseInt(document.getElementById('sims-slider').value);
+      this.setSearching(true);
       this.session.send({ type: 'RunSims', count });
-    });
-
-    document.getElementById('btn-snapshot').addEventListener('click', () => {
-      this.session.send({ type: 'GetSnapshot' });
     });
 
     // Sims slider
@@ -87,6 +97,7 @@ class Controls {
     if (this.autoplayInterval) return;
     const tick = () => {
       const sims = parseInt(document.getElementById('sims-slider').value);
+      this.setSearching(true);
       this.session.send({ type: 'BotMove', simulations: sims || null });
     };
     tick();

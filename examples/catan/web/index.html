@@ -87,16 +87,15 @@ tailwind.config = {
     <button id="btn-new-game" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">New Game</button>
     <button id="btn-undo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Undo</button>
     <button id="btn-redo" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default" disabled>Redo</button>
-    <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Bot Move</button>
+    <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Bot Move</button>
     <div class="flex items-center gap-1.5 text-xs text-gray-300">
       <label class="flex items-center gap-1">Sims:
         <input type="range" id="sims-slider" min="0" max="2000" value="200" step="10" class="w-20 accent-accent">
         <span id="sims-value">200</span>
       </label>
     </div>
-    <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Run Sims</button>
-    <button id="btn-snapshot" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors">Snapshot</button>
-    <div class="flex items-center gap-2 text-xs text-gray-300">
+    <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Run Sims</button>
+<div class="flex items-center gap-2 text-xs text-gray-300">
       <label class="flex items-center gap-1 cursor-pointer">
         <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Autoplay
       </label>

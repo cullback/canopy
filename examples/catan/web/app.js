@@ -18,9 +18,13 @@ session.on('GameState', (msg) => {
   const state = msg.state;
 
   // Initialize board on first state (or after new game).
-  if (state.board && (!currentBoard || !board.boardData)) {
-    currentBoard = state.board;
-    board.initBoard(currentBoard);
+  if (state.board) {
+    const boardChanged = !currentBoard ||
+      JSON.stringify(state.board) !== JSON.stringify(currentBoard);
+    if (boardChanged) {
+      currentBoard = state.board;
+      board.initBoard(currentBoard);
+    }
   }
 
   // Update frame
@@ -101,6 +105,7 @@ session.on('GameState', (msg) => {
 });
 
 session.on('Snapshot', (msg) => {
+  controls.setSearching(false);
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
 });
 
@@ -108,13 +113,20 @@ session.on('Subtree', (msg) => {
   mctsPanel.showSubtree(msg.tree);
 });
 
+session.on('SearchProgress', (msg) => {
+  mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
+  mctsPanel.showProgress(msg.snapshot.total_simulations, msg.sims_total);
+});
+
 session.on('BotAction', (msg) => {
+  controls.setSearching(false);
   if (msg.snapshot) {
-    mctsPanel.updateSnapshot(msg.snapshot, []);
+    mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || []);
   }
 });
 
 session.on('Error', (msg) => {
+  controls.setSearching(false);
   console.error('Server error:', msg.message);
 });
 
