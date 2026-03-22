@@ -371,6 +371,12 @@ impl<G: Game + 'static> GameSession<G> {
         } else {
             self.presenter.chance_label(state, action)
         };
+        // If the next history entry matches this action, preserve redo history.
+        if self.cursor < self.history.len() && self.history[self.cursor].action == action {
+            self.cursor += 1;
+            self.search.apply_action(action);
+            return;
+        }
         // Truncate redo future and push new entry.
         self.history.truncate(self.cursor);
         self.history.push(HistoryEntry {
@@ -389,6 +395,13 @@ impl<G: Game + 'static> GameSession<G> {
         loop {
             if self.is_terminal() {
                 break;
+            }
+            // If the log is still intact and the next entry is a chance action,
+            // replay it instead of re-sampling to avoid state divergence.
+            if self.cursor < self.history.len() && self.history[self.cursor].is_chance {
+                let a = self.history[self.cursor].action;
+                self.apply_action(a);
+                continue;
             }
             let action = self.search.state().sample_chance(&mut self.rng);
             match action {
