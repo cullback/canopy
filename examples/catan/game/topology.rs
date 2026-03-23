@@ -11,9 +11,6 @@ pub struct Topology {
     pub dice_to_tiles: [Vec<TileId>; 13],
     pub robber_start: TileId,
     pub adj: AdjacencyBitboards,
-    /// Port resource types in fixed position order (matching PORT_SPECS).
-    /// `None` = generic 3:1 port, `Some(r)` = specific 2:1 port.
-    pub port_types: [Option<Resource>; 9],
 }
 
 /// For a hex, corner i is shared with specific corners of adjacent hexes.
@@ -431,7 +428,6 @@ impl Topology {
             dice_to_tiles,
             robber_start,
             adj,
-            port_types: port_resources,
         }
     }
 }
