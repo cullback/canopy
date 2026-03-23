@@ -1,4 +1,4 @@
-//! # NexusEncoder (1314 features)
+//! # NexusEncoder (1441 features)
 //!
 //! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
 //!
@@ -30,17 +30,18 @@
 //! | dev_bought_turn      |     5 | /deck_max |
 //! | dev_played_turn      |     1 | binary    |
 //!
-//! ## Tiles (19 × 9 = 171)
+//! ## Tiles (19 × 10 = 190)
 //!
 //! | Feature              | Count | Norm    |
 //! |----------------------|-------|---------|
 //! | resource             |     5 | one-hot |
 //! | pips                 |     1 | /5      |
+//! | roll_prob            |     1 | raw     |
 //! | robber               |     1 | binary  |
 //! | cur_building_weight  |     1 | /6      |
 //! | opp_building_weight  |     1 | /6      |
 //!
-//! ## Nodes (54 × 19 = 1026)
+//! ## Nodes (54 × 21 = 1134)
 //!
 //! | Feature              | Count | Norm    |
 //! |----------------------|-------|---------|
@@ -49,6 +50,8 @@
 //! | port_ratio           |     5 | .5/.25  |
 //! | resource_prod        |     5 | /13     |
 //! | blocked_prod         |     5 | /5      |
+//! | cur_road_count       |     1 | /3      |
+//! | opp_road_count       |     1 | /3      |
 //! | cur_network_dist     |     1 | /6      |
 //! | opp_network_dist     |     1 | /6      |
 
@@ -60,17 +63,17 @@ use super::{
     ORIGINAL_DECK, PIPS, compute_network_distances, encode_dice, encode_node_blocked_production,
     encode_node_production, encode_per_number_production, encode_per_resource_production,
     encode_phase, encode_port_ratios, encode_tile_building_weights, node_value,
-    opponent_expected_dev_cards, self_dev_cards_playable, tile_numbers,
+    opponent_expected_dev_cards, roll_probabilities, self_dev_cards_playable, tile_numbers,
 };
 
 pub struct NexusEncoder;
 
 #[allow(dead_code)]
 impl NexusEncoder {
-    pub const FEATURE_SIZE: usize = 1314;
+    pub const FEATURE_SIZE: usize = 1441;
     pub const GLOBAL_LEN: usize = 117;
-    pub const TILES_F: usize = 9;
-    pub const NODES_F: usize = 19;
+    pub const TILES_F: usize = 10;
+    pub const NODES_F: usize = 21;
 }
 
 /// Push 49 per-player features grouped by category.
@@ -191,9 +194,10 @@ impl StateEncoder<GameState> for NexusEncoder {
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);
 
-        // === Tiles (19 × 9 = 171) ===
+        // === Tiles (19 × 10 = 190) ===
         let cur_boards = &state.boards[current];
         let opp_boards = &state.boards[opp];
+        let roll_probs = roll_probabilities(state);
 
         for (i, tile) in topo.tiles.iter().enumerate() {
             // resource (5): one-hot
@@ -209,13 +213,20 @@ impl StateEncoder<GameState> for NexusEncoder {
                 0.0
             };
             out.push(pips);
+            // roll_prob (1): current probability of this tile's number (raw)
+            let roll_prob = if number > 0 {
+                roll_probs[(number - 2) as usize]
+            } else {
+                0.0
+            };
+            out.push(roll_prob);
             // robber (1): binary
             out.push(f32::from(state.robber == tile.id));
             // cur_building_weight, opp_building_weight (2): /6
             encode_tile_building_weights(tile, cur_boards, opp_boards, out);
         }
 
-        // === Nodes (54 × 19 = 1026) ===
+        // === Nodes (54 × 21 = 1134) ===
         let cur_dist = compute_network_distances(&topo.adj, cur_boards);
         let opp_dist = compute_network_distances(&topo.adj, opp_boards);
 
@@ -234,6 +245,11 @@ impl StateEncoder<GameState> for NexusEncoder {
 
             // blocked_prod (5)
             encode_node_blocked_production(node, topo, &tile_numbers, state.robber, out);
+
+            // cur_road_count, opp_road_count (2): incident roads at this node, /3
+            let adj_edges = topo.adj.node_adj_edges[i as usize];
+            out.push((adj_edges & cur_boards.road_network.roads).count_ones() as f32 / 3.0);
+            out.push((adj_edges & opp_boards.road_network.roads).count_ones() as f32 / 3.0);
 
             // cur_network_dist, opp_network_dist (2)
             out.push(cur_dist[i as usize]);
@@ -340,11 +356,11 @@ mod tests {
     const GLOBAL_OFF: usize = 117;
 
     fn tile_feat(t: usize, f: usize) -> usize {
-        GLOBAL_OFF + t * 9 + f
+        GLOBAL_OFF + t * 10 + f
     }
 
     fn node_feat(n: usize, f: usize) -> usize {
-        GLOBAL_OFF + 19 * 9 + n * 19 + f
+        GLOBAL_OFF + 19 * 10 + n * 21 + f
     }
 
     fn make_main_state() -> GameState {
@@ -382,9 +398,9 @@ mod tests {
                 0.0
             };
             assert_eq!(features[tile_feat(i, 5)], expected_pips, "tile {i} pips");
-            // Robber
+            // Robber (offset 7, after roll_prob)
             assert_eq!(
-                features[tile_feat(i, 6)],
+                features[tile_feat(i, 7)],
                 f32::from(state.robber == tile.id),
                 "tile {i} robber"
             );
@@ -453,17 +469,17 @@ mod tests {
         let mut features = Vec::new();
         NexusEncoder.encode(&state, &mut features);
 
-        // Network distance at per-node offset 17-18 (2 + 5 + 5 + 5 = 17)
+        // Network distance at per-node offset 19-20 (2 + 5 + 5 + 5 + 2 = 19)
         // Node 10 is on-network → own_dist = 0.0
         assert_eq!(
-            features[node_feat(10, 17)],
+            features[node_feat(10, 19)],
             0.0,
             "on-network node should have dist 0.0"
         );
 
         // Player::Two has no buildings → all opp distances = 1.0 (no network)
         assert_eq!(
-            features[node_feat(10, 18)],
+            features[node_feat(10, 20)],
             1.0,
             "no opp network → dist 1.0"
         );
@@ -472,7 +488,7 @@ mod tests {
         let topo = &state.topology;
         let adj_node = topo.nodes[10].adjacent_nodes[0].0 as usize;
         assert_eq!(
-            features[node_feat(adj_node, 17)],
+            features[node_feat(adj_node, 19)],
             1.0 / 6.0,
             "adjacent to network → dist 1/6"
         );

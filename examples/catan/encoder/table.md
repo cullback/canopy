@@ -1,4 +1,4 @@
-# NexusEncoder — 1314 features
+# NexusEncoder — 1441 features
 
 ## Global (117 = 7 + 49×2 + 12)
 
@@ -41,17 +41,18 @@
 | dev_bought_turn | 5     | /deck_max | exact / 0        |
 | dev_played_turn | 1     | binary    |                  |
 
-## Tiles (19 × 9 = 171)
+## Tiles (19 × 10 = 190)
 
-| Feature             | Count | Norm    | Notes                   |
-| ------------------- | ----- | ------- | ----------------------- |
-| resource            | 5     | one-hot |                         |
-| pips                | 1     | /5      |                         |
-| robber              | 1     | binary  |                         |
-| cur_building_weight | 1     | /6      | sum of bldg_wt, 6 nodes |
-| opp_building_weight | 1     | /6      | sum of bldg_wt, 6 nodes |
+| Feature             | Count | Norm    | Notes                        |
+| ------------------- | ----- | ------- | ---------------------------- |
+| resource            | 5     | one-hot |                              |
+| pips                | 1     | /5      | long-run structural strength |
+| roll_prob           | 1     | raw     | current balanced-dice prob   |
+| robber              | 1     | binary  |                              |
+| cur_building_weight | 1     | /6      | sum of bldg_wt, 6 nodes      |
+| opp_building_weight | 1     | /6      | sum of bldg_wt, 6 nodes      |
 
-## Nodes (54 × 19 = 1026)
+## Nodes (54 × 21 = 1134)
 
 | Feature          | Count | Norm  | Notes                |
 | ---------------- | ----- | ----- | -------------------- |
@@ -60,6 +61,8 @@
 | port_ratio       | 5     |       | .5 specific, .25 gen |
 | resource_prod    | 5     | /13   | adj tile pips / res  |
 | blocked_prod     | 5     | /5    | robber tiles only    |
+| cur_road_count   | 1     | /3    | incident roads       |
+| opp_road_count   | 1     | /3    | incident roads       |
 | cur_network_dist | 1     | /6    | BFS, capped at 6     |
 | opp_network_dist | 1     | /6    | BFS, capped at 6     |
 
@@ -73,7 +76,9 @@
 | 4       | max cities                        |
 | 15      | max roads / win threshold (VP)    |
 | 13      | max pips at a single node (5+4+4) |
+|         | roll_prob is raw probability      |
 | 35      | max per-resource production       |
 | 10      | max per-number production         |
+| 3       | max incident roads at a node      |
 | 6       | max tile corner nodes / BFS cap   |
 | 36      | balanced dice deck size           |

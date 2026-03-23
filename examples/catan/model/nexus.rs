@@ -21,8 +21,8 @@ const _: () = assert!(
 );
 
 const GL: usize = 117;
-const TF: usize = 9;
-const NF: usize = 19;
+const TF: usize = 10;
+const NF: usize = 21;
 const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
@@ -230,10 +230,12 @@ pub struct CatanNexusModel<B: Backend> {
     edge_dst: Tensor<B, 1, Int>,
 
     // Policy heads
-    policy_settlement: Linear<B>,
+    policy_settlement1: Linear<B>,
+    policy_settlement2: Linear<B>,
     policy_road1: Linear<B>,
     policy_road2: Linear<B>,
-    policy_city: Linear<B>,
+    policy_city1: Linear<B>,
+    policy_city2: Linear<B>,
     policy_other1: Linear<B>,
     policy_other2: Linear<B>,
     policy_robber1: Linear<B>,
@@ -241,9 +243,9 @@ pub struct CatanNexusModel<B: Backend> {
 
     // Soft policy heads (separate final projections, share intermediate features
     // with hard policy; trained against softened MCTS target as regularizer)
-    soft_policy_settlement: Linear<B>,
+    soft_policy_settlement2: Linear<B>,
     soft_policy_road2: Linear<B>,
-    soft_policy_city: Linear<B>,
+    soft_policy_city2: Linear<B>,
     soft_policy_other2: Linear<B>,
     soft_policy_robber2: Linear<B>,
 
@@ -310,18 +312,20 @@ pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Catan
         edge_src,
         edge_dst,
 
-        policy_settlement: LinearConfig::new(HIDDEN, 1).init(device),
+        policy_settlement1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        policy_settlement2: LinearConfig::new(HIDDEN, 1).init(device),
         policy_road1: LinearConfig::new(HIDDEN * 2, HIDDEN).init(device),
         policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
-        policy_city: LinearConfig::new(HIDDEN, 1).init(device),
+        policy_city1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        policy_city2: LinearConfig::new(HIDDEN, 1).init(device),
         policy_other1: LinearConfig::new(pool_dim, HIDDEN).init(device),
         policy_other2: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
         policy_robber1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
         policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
 
-        soft_policy_settlement: LinearConfig::new(HIDDEN, 1).init(device),
+        soft_policy_settlement2: LinearConfig::new(HIDDEN, 1).init(device),
         soft_policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
-        soft_policy_city: LinearConfig::new(HIDDEN, 1).init(device),
+        soft_policy_city2: LinearConfig::new(HIDDEN, 1).init(device),
         soft_policy_other2: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
         soft_policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
 
@@ -416,9 +420,13 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         // h_node: [batch, 54, HIDDEN], h_tile: [batch, 19, HIDDEN]
 
         // ── Policy: Settlement (actions 0-53) ────────────────────────
+        let settlement_hidden = relu(
+            self.policy_settlement1
+                .forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN])),
+        );
         let settlement_logits = self
-            .policy_settlement
-            .forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN]))
+            .policy_settlement2
+            .forward(settlement_hidden.clone())
             .reshape([batch, NUM_NODES]);
 
         // ── Policy: Road (actions 54-125) ────────────────────────────
@@ -437,9 +445,13 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
             .reshape([batch, NUM_EDGES]);
 
         // ── Policy: City (actions 126-179) ───────────────────────────
+        let city_hidden = relu(
+            self.policy_city1
+                .forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN])),
+        );
         let city_logits = self
-            .policy_city
-            .forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN]))
+            .policy_city2
+            .forward(city_hidden.clone())
             .reshape([batch, NUM_NODES]);
 
         // ── Pooled features (shared by other-policy and value heads) ─
@@ -479,16 +491,16 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
 
         // ── Soft policy (shares intermediate features, separate final projections) ──
         let soft_settlement = self
-            .soft_policy_settlement
-            .forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN]))
+            .soft_policy_settlement2
+            .forward(settlement_hidden)
             .reshape([batch, NUM_NODES]);
         let soft_road = self
             .soft_policy_road2
             .forward(edge_feats_hidden.reshape([batch * NUM_EDGES, HIDDEN]))
             .reshape([batch, NUM_EDGES]);
         let soft_city = self
-            .soft_policy_city
-            .forward(h_node.reshape([batch * NUM_NODES, HIDDEN]))
+            .soft_policy_city2
+            .forward(city_hidden)
             .reshape([batch, NUM_NODES]);
         let soft_other = self.soft_policy_other2.forward(other_hidden);
         let soft_other_pre = soft_other.clone().narrow(1, 0, NUM_OTHER_PRE);

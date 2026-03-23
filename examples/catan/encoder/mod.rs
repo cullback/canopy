@@ -41,14 +41,14 @@
 //! |---------|-----------------------------------|
 //! |      19 | max resource cards of one type    |
 //! |  14/5/2 | original deck count per dev type  |
-//! |       5 | max settlements                   |
+//! |       5 | max settlements / max tile pips   |
 //! |       4 | max cities                        |
 //! |      15 | max roads / win threshold (VP)    |
 //! |      13 | max pips at a single node (5+4+4) |
-//! |       5 | max single-tile pips (for 6 or 8) |
+//! |         | roll_prob is raw probability       |
 //! |      35 | max per-resource production       |
+//! |       3 | max incident roads at a node      |
 //! |       6 | max tile corner nodes / BFS cap   |
-//! |    5/36 | max single-tile dice probability  |
 
 use canopy::player::Player;
 
@@ -110,8 +110,8 @@ pub(super) fn opponent_expected_dev_cards(
     let self_player = &state.players[perspective];
     let opp_player = &state.players[opp];
 
-    let opp_hand_size: f32 = opp_player.dev_cards.0.iter().sum::<u8>() as f32
-        + opp_player.dev_cards_bought_this_turn.0.iter().sum::<u8>() as f32;
+    // dev_cards already includes bought_this_turn (both incremented on buy)
+    let opp_hand_size: f32 = opp_player.dev_cards.0.iter().sum::<u8>() as f32;
     let deck_remaining = state.dev_deck.remaining() as f32;
     let total_unknown = deck_remaining + opp_hand_size;
 
@@ -120,7 +120,6 @@ pub(super) fn opponent_expected_dev_cards(
         for t in 0..5 {
             let unknown_of_type = ORIGINAL_DECK[t]
                 - self_player.dev_cards.0[t] as f32
-                - self_player.dev_cards_bought_this_turn.0[t] as f32
                 - self_player.dev_cards_played.0[t] as f32
                 - opp_player.dev_cards_played.0[t] as f32;
             out[t] = (unknown_of_type * opp_hand_size / total_unknown) / ORIGINAL_DECK[t];
@@ -397,25 +396,33 @@ pub(crate) const RANDOM_DICE_PROBS: [f32; 11] = [
 /// Maximum building weight on tiles sharing a dice number (~10).
 pub(crate) const MAX_NUMBER_PRODUCTION: f32 = 10.0;
 
-/// Push dice state features (12): roll probabilities (11) + deck fraction (1).
-pub(crate) fn encode_dice(state: &GameState, out: &mut Vec<f32>) {
+/// Compute normalized roll probability for each dice sum 2..=12.
+/// Returns probabilities indexed 0..11 (sum 2 at index 0, sum 12 at index 10).
+pub(crate) fn roll_probabilities(state: &GameState) -> [f32; 11] {
     match &state.dice {
-        Dice::Random => {
-            out.extend_from_slice(&RANDOM_DICE_PROBS);
-            out.push(1.0);
-        }
+        Dice::Random => RANDOM_DICE_PROBS,
         Dice::Balanced(b) => {
             let ws = b.weights(state.current_player);
             let total: u32 = ws.iter().map(|(_, w)| w).sum();
             if total > 0 {
                 let inv = 1.0 / total as f32;
-                for &(_, w) in &ws {
-                    out.push(w as f32 * inv);
+                let mut probs = [0.0f32; 11];
+                for &(i, w) in &ws {
+                    probs[i] = w as f32 * inv;
                 }
+                probs
             } else {
-                out.extend_from_slice(&RANDOM_DICE_PROBS);
+                RANDOM_DICE_PROBS
             }
-            out.push(b.cards_left() as f32 / 36.0);
         }
+    }
+}
+
+/// Push dice state features (12): roll probabilities (11) + deck fraction (1).
+pub(crate) fn encode_dice(state: &GameState, out: &mut Vec<f32>) {
+    out.extend_from_slice(&roll_probabilities(state));
+    match &state.dice {
+        Dice::Random => out.push(1.0),
+        Dice::Balanced(b) => out.push(b.cards_left() as f32 / 36.0),
     }
 }

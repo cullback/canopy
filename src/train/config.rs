@@ -136,7 +136,7 @@ impl Default for TrainConfig {
 
             // Soft policy
             soft_policy_temperature: 4.0,
-            soft_policy_weight: 0.5,
+            soft_policy_weight: 8.0,
 
             // Policy surprise weighting
             surprise_weight_fraction: 0.5,
