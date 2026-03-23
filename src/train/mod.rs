@@ -127,11 +127,17 @@ pub trait TrainableModel<G: Game>: Send {
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn warmup_t(config: &TrainConfig, iteration: usize) -> f64 {
+/// Linear ramp from 0 to 1 over warmup_iters, uncapped.
+fn warmup_frac(config: &TrainConfig, iteration: usize) -> f64 {
     if config.warmup_iters == 0 {
-        return config.q_weight_max as f64;
+        return 1.0;
     }
-    (iteration as f64 / config.warmup_iters as f64).min(config.q_weight_max as f64)
+    (iteration as f64 / config.warmup_iters as f64).min(1.0)
+}
+
+/// Q-weight for value target mixing: ramps from 0 to q_weight_max.
+fn q_weight(config: &TrainConfig, iteration: usize) -> f64 {
+    warmup_frac(config, iteration) * config.q_weight_max as f64
 }
 
 fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
@@ -139,7 +145,7 @@ fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
     if start >= config.mcts_sims {
         return config.mcts_sims;
     }
-    let t = warmup_t(config, iteration);
+    let t = warmup_frac(config, iteration);
     let sims = start as f64 + t * (config.mcts_sims - start) as f64;
     (sims.round() as u32).max(1)
 }
@@ -199,7 +205,7 @@ pub fn run_training<G>(
             replay_buffer.pop_front();
         }
         let mut samples: Vec<&Sample> = replay_buffer.iter().flat_map(|v| v.iter()).collect();
-        let q_weight = warmup_t(&config, iteration + 1) as f32;
+        let q_weight = q_weight(&config, iteration + 1) as f32;
         fastrand::shuffle(&mut samples);
         let step_cfg = TrainStepConfig {
             lr: config.lr,
