@@ -5,7 +5,7 @@
 //!
 //! ```text
 //! cargo run --example pig -- --p1-sims 1000 --p2-sims 5000
-//! cargo run --example pig -- train --iterations 5 --games 20
+//! cargo run --example pig -- train --iterations 5
 //! ```
 
 use canopy::cli::GameCli;
