@@ -16,10 +16,12 @@ mod self_play;
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::Ordering::Relaxed;
 use std::time::Instant;
 
 use serde::{Deserialize, Serialize};
 use tracing::info;
+use tracing_indicatif::span_ext::IndicatifSpanExt;
 
 use crate::eval::Evaluator;
 use crate::game::Game;
@@ -270,6 +272,25 @@ pub fn run_training<G>(
         let iter_start = Instant::now();
         let effective_sims = progressive_sims(&config, iteration);
 
+        // Progress bar for self-play collection
+        let sp_span = tracing::info_span!("self_play");
+        sp_span.pb_set_style(
+            &indicatif::ProgressStyle::with_template(
+                "{bar:40.cyan/dim} {pos}/{len} samples  {msg}  [{elapsed} < {eta}]",
+            )
+            .unwrap(),
+        );
+        sp_span.pb_set_length(config.train_samples_per_iter as u64);
+        sp_span.pb_set_message(&format!(
+            "iter {}/{} sims={}",
+            iteration + 1,
+            config.iterations,
+            effective_sims
+        ));
+        sp_span.pb_start();
+
+        let stats_start_evals: u64 = servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+
         // Keep work queues fed
         refill_work_queues(&work_txs, effective_sims, &mut rng);
 
@@ -282,6 +303,20 @@ pub fn run_training<G>(
                     fresh_samples += record.samples.len();
                     record.iteration_analyzed = iteration;
                     collected_games.push(record);
+                    sp_span.pb_set_position(fresh_samples as u64);
+                    let elapsed_secs = iter_start.elapsed().as_secs_f64();
+                    if elapsed_secs > 0.5 {
+                        let evals_now: u64 =
+                            servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+                        let evals_per_sec = (evals_now - stats_start_evals) as f64 / elapsed_secs;
+                        sp_span.pb_set_message(&format!(
+                            "iter {}/{} sims={} | {:.0} evals/s",
+                            iteration + 1,
+                            config.iterations,
+                            effective_sims,
+                            evals_per_sec
+                        ));
+                    }
                 }
                 Some(self_play::WorkResult::Reanalyze { game_id, samples }) => {
                     replay_buffer.replace_samples(game_id, samples, iteration);
@@ -292,6 +327,7 @@ pub fn run_training<G>(
             refill_work_queues(&work_txs, effective_sims, &mut rng);
         }
         // No drain. In-flight results buffer in the channel for next iteration.
+        drop(sp_span);
 
         let self_play_elapsed = iter_start.elapsed();
         let games_done = collected_games.len();

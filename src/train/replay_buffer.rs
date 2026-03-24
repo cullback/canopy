@@ -5,6 +5,8 @@
 //! staleness-prioritized selection for reanalyze: games with high value
 //! correction and stale analysis are chosen more often.
 
+use std::collections::VecDeque;
+
 use super::Sample;
 
 /// A completed game stored in the replay buffer.
@@ -25,17 +27,19 @@ pub struct GameRecord {
 
 /// Sample-capped replay buffer with monotonic game IDs.
 pub struct ReplayBuffer {
-    games: Vec<GameRecord>,
+    games: VecDeque<GameRecord>,
     max_samples: usize,
     next_id: u64,
+    cached_samples: usize,
 }
 
 impl ReplayBuffer {
     pub fn new(max_samples: usize) -> Self {
         Self {
-            games: Vec::new(),
+            games: VecDeque::new(),
             max_samples,
             next_id: 0,
+            cached_samples: 0,
         }
     }
 
@@ -44,7 +48,8 @@ impl ReplayBuffer {
         for mut game in games {
             game.id = self.next_id;
             self.next_id += 1;
-            self.games.push(game);
+            self.cached_samples += game.samples.len();
+            self.games.push_back(game);
         }
         self.evict();
     }
@@ -52,6 +57,8 @@ impl ReplayBuffer {
     /// Replace samples for a game by ID (after reanalyze). No-op if evicted.
     pub fn replace_samples(&mut self, game_id: u64, new_samples: Vec<Sample>, iteration: usize) {
         if let Some(game) = self.games.iter_mut().find(|g| g.id == game_id) {
+            self.cached_samples -= game.samples.len();
+            self.cached_samples += new_samples.len();
             let mean_vc = if new_samples.is_empty() {
                 0.0
             } else {
@@ -70,14 +77,14 @@ impl ReplayBuffer {
     }
 
     pub fn total_samples(&self) -> usize {
-        self.games.iter().map(|g| g.samples.len()).sum()
+        self.cached_samples
     }
 
     pub fn len(&self) -> usize {
         self.games.len()
     }
 
-    pub fn games(&self) -> &[GameRecord] {
+    pub fn games(&self) -> &VecDeque<GameRecord> {
         &self.games
     }
 
@@ -110,9 +117,6 @@ impl ReplayBuffer {
         let mut selected = Vec::with_capacity(count);
 
         for _ in 0..count {
-            if weights.is_empty() {
-                break;
-            }
             let mut roll = rng.f32() * total_weight;
             let mut pick = weights.len() - 1;
             for (i, &(_, w)) in weights.iter().enumerate() {
@@ -125,7 +129,6 @@ impl ReplayBuffer {
             let (game_idx, _) = weights[pick];
             let g = &self.games[game_idx];
             selected.push((g.id, g.seed, g.actions.clone(), g.reward));
-            // Allow duplicates — just pick again with same weights
         }
 
         selected
@@ -133,8 +136,12 @@ impl ReplayBuffer {
 
     /// Evict oldest games until total samples <= max_samples.
     fn evict(&mut self) {
-        while self.total_samples() > self.max_samples && !self.games.is_empty() {
-            self.games.remove(0);
+        while self.cached_samples > self.max_samples {
+            if let Some(game) = self.games.pop_front() {
+                self.cached_samples -= game.samples.len();
+            } else {
+                break;
+            }
         }
     }
 }

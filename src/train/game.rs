@@ -10,7 +10,7 @@ use std::future::Future;
 
 use crate::eval::{Evaluation, flip_wdl};
 use crate::game::{Game, Status};
-use crate::mcts::{Search, Step};
+use crate::mcts::{Search, SearchResult, Step};
 use crate::nn::StateEncoder;
 
 use super::Sample;
@@ -32,6 +32,145 @@ pub(super) struct GameResult {
     pub actions: Vec<usize>,
     pub seed: u64,
 }
+
+// ---------------------------------------------------------------------------
+// Shared helpers
+// ---------------------------------------------------------------------------
+
+/// Run MCTS search from the current position, returning the search result.
+///
+/// Handles the step → encode → infer → parse loop that is shared between
+/// self-play and reanalyze.
+async fn run_search<G, F, Fut>(
+    search: &mut Search<G>,
+    encoder: &dyn StateEncoder<G>,
+    encode_buf: &mut Vec<f32>,
+    infer: &F,
+    rng: &mut fastrand::Rng,
+) -> SearchResult
+where
+    G: Game,
+    F: Fn(Vec<f32>, usize) -> Fut,
+    Fut: Future<Output = (Vec<f32>, Vec<f32>)>,
+{
+    let feature_size = encoder.feature_size();
+    let mut evals: Vec<Evaluation> = vec![];
+    loop {
+        match search.step(&evals, rng) {
+            Step::NeedsEval(states) => {
+                let batch_size = states.len();
+                let mut signs = Vec::with_capacity(batch_size);
+                let mut flat_features = Vec::with_capacity(batch_size * feature_size);
+                for pending_state in states {
+                    let sign = match pending_state.status() {
+                        Status::Ongoing => pending_state.current_sign(),
+                        Status::Terminal(_) => 1.0,
+                    };
+                    signs.push(sign);
+                    encode_buf.clear();
+                    encoder.encode(pending_state, encode_buf);
+                    flat_features.extend_from_slice(encode_buf);
+                }
+                let (flat_logits, flat_wdl) = infer(flat_features, batch_size).await;
+                evals.clear();
+                let num_actions = G::NUM_ACTIONS;
+                for (i, &sign) in signs.iter().enumerate() {
+                    let logits_start = i * num_actions;
+                    let policy_logits =
+                        flat_logits[logits_start..logits_start + num_actions].to_vec();
+                    let wdl_start = i * 3;
+                    let wdl_raw = &flat_wdl[wdl_start..wdl_start + 3];
+                    let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
+                    let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
+                    evals.push(Evaluation { policy_logits, wdl });
+                }
+            }
+            Step::Done(result) => return result,
+        }
+    }
+}
+
+/// Create a training sample from a search result.
+fn make_sample(
+    result: SearchResult,
+    features: Vec<f32>,
+    sign: f32,
+    is_full_search: bool,
+    turn_count: u32,
+    num_aux_targets: usize,
+) -> Sample {
+    let q_wdl = if sign > 0.0 {
+        result.wdl
+    } else {
+        flip_wdl(result.wdl)
+    };
+    debug_assert!(q_wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
+    debug_assert!((q_wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+
+    let root_v = result.wdl[0] - result.wdl[2];
+    let value_correction = (root_v - result.network_value).abs();
+    let q_std = if result.children_q.len() >= 2 {
+        let mean =
+            result.children_q.iter().map(|&(_, q)| q).sum::<f32>() / result.children_q.len() as f32;
+        let var = result
+            .children_q
+            .iter()
+            .map(|&(_, q)| (q - mean).powi(2))
+            .sum::<f32>()
+            / result.children_q.len() as f32;
+        var.sqrt()
+    } else {
+        0.0
+    };
+    let prior_agrees = result.prior_top1_action == result.selected_action;
+    let policy_surprise = if is_full_search {
+        compute_kl(&result.policy, &result.prior_policy)
+    } else {
+        0.0
+    };
+
+    Sample {
+        features: features.into_boxed_slice(),
+        policy_target: result.policy.into_boxed_slice(),
+        z: sign,
+        q_wdl,
+        full_search: is_full_search,
+        move_number: turn_count,
+        game_length: 0, // backfilled at game end
+        network_value: result.network_value * sign,
+        value_correction,
+        q_std,
+        prior_agrees,
+        policy_surprise,
+        surprise_weight: 1.0,
+        aux_targets: vec![0.0; num_aux_targets].into_boxed_slice(),
+    }
+}
+
+/// Post-process samples after game completion: short-term value targets,
+/// surprise weights, and z *= reward.
+fn finalize_samples(
+    samples: &mut [Sample],
+    reward: f32,
+    turn_count: u32,
+    aux_value_horizons: &[u32],
+    surprise_weight_fraction: f32,
+) {
+    if !aux_value_horizons.is_empty() {
+        compute_short_term_values(samples, aux_value_horizons);
+    }
+    if surprise_weight_fraction > 0.0 {
+        normalize_surprise_weights(samples, surprise_weight_fraction);
+    }
+    for s in samples {
+        s.z *= reward;
+        s.game_length = turn_count;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Self-play
+// ---------------------------------------------------------------------------
 
 /// Play one full self-play game, returning collected training samples.
 ///
@@ -71,20 +210,13 @@ where
 
         // Terminal check
         if let Status::Terminal(reward) = search.state().status() {
-            // Compute short-term value EMA targets before z *= reward
-            if !actor_config.aux_value_horizons.is_empty() {
-                compute_short_term_values(&mut samples, &actor_config.aux_value_horizons);
-            }
-
-            // Normalize surprise weights per-game
-            if actor_config.surprise_weight_fraction > 0.0 {
-                normalize_surprise_weights(&mut samples, actor_config.surprise_weight_fraction);
-            }
-
-            for s in &mut samples {
-                s.z *= reward;
-                s.game_length = turn_count;
-            }
+            finalize_samples(
+                &mut samples,
+                reward,
+                turn_count,
+                &actor_config.aux_value_horizons,
+                actor_config.surprise_weight_fraction,
+            );
             return GameResult {
                 samples,
                 reward,
@@ -122,105 +254,33 @@ where
         let mut features_buf = Vec::with_capacity(feature_size);
         encoder.encode(search.state(), &mut features_buf);
 
-        // MCTS search with eval requests sent via infer closure
-        let mut evals: Vec<Evaluation> = vec![];
-        let result = loop {
-            match search.step(&evals, rng) {
-                Step::NeedsEval(states) => {
-                    let batch_size = states.len();
-                    let mut signs = Vec::with_capacity(batch_size);
-                    let mut flat_features = Vec::with_capacity(batch_size * feature_size);
-                    for pending_state in states {
-                        let sign = match pending_state.status() {
-                            Status::Ongoing => pending_state.current_sign(),
-                            Status::Terminal(_) => 1.0,
-                        };
-                        signs.push(sign);
-                        encode_buf.clear();
-                        encoder.encode(pending_state, &mut encode_buf);
-                        flat_features.extend_from_slice(&encode_buf);
-                    }
-                    let (flat_logits, flat_wdl) = infer(flat_features, batch_size).await;
-                    evals.clear();
-                    let num_actions = G::NUM_ACTIONS;
-                    for (i, &sign) in signs.iter().enumerate() {
-                        let logits_start = i * num_actions;
-                        let policy_logits =
-                            flat_logits[logits_start..logits_start + num_actions].to_vec();
-                        let wdl_start = i * 3;
-                        let wdl_raw = &flat_wdl[wdl_start..wdl_start + 3];
-                        // Sign-flip for P1 perspective (swap W/L when sign < 0)
-                        let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
-                        let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
-                        debug_assert!(wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
-                        debug_assert!((wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
-                        evals.push(Evaluation { policy_logits, wdl });
-                    }
-                }
-                Step::Done(result) => break result,
-            }
-        };
+        // MCTS search
+        let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
 
-        // Create training sample
-        // result.wdl is P1 perspective; flip to current player (swap W/L when sign < 0)
-        let q_wdl = if sign > 0.0 {
-            result.wdl
-        } else {
-            flip_wdl(result.wdl)
-        };
-        debug_assert!(q_wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
-        debug_assert!((q_wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        // Choose action (exploration vs exploitation)
         let chosen = if turn_count <= actor_config.explore_moves {
             sample_from_policy(&result.policy, rng)
         } else {
             result.selected_action
         };
 
-        let root_v = result.wdl[0] - result.wdl[2];
-        let value_correction = (root_v - result.network_value).abs();
-        let q_std = if result.children_q.len() >= 2 {
-            let mean = result.children_q.iter().map(|&(_, q)| q).sum::<f32>()
-                / result.children_q.len() as f32;
-            let var = result
-                .children_q
-                .iter()
-                .map(|&(_, q)| (q - mean).powi(2))
-                .sum::<f32>()
-                / result.children_q.len() as f32;
-            var.sqrt()
-        } else {
-            0.0
-        };
-        let prior_agrees = result.prior_top1_action == result.selected_action;
-
-        // Compute raw KL(target || prior) for policy surprise weighting
-        let policy_surprise = if is_full_search {
-            compute_kl(&result.policy, &result.prior_policy)
-        } else {
-            0.0
-        };
-
-        samples.push(Sample {
-            features: features_buf.into_boxed_slice(),
-            policy_target: result.policy.into_boxed_slice(),
-            z: sign,
-            q_wdl,
-            full_search: is_full_search,
-            move_number: turn_count,
-            game_length: 0, // backfilled at game end
-            network_value: result.network_value * sign,
-            value_correction,
-            q_std,
-            prior_agrees,
-            policy_surprise,
-            surprise_weight: 1.0,
-            aux_targets: vec![0.0; actor_config.num_aux_targets].into_boxed_slice(),
-        });
+        samples.push(make_sample(
+            result,
+            features_buf,
+            sign,
+            is_full_search,
+            turn_count,
+            actor_config.num_aux_targets,
+        ));
 
         all_actions.push(chosen);
         search.apply_action(chosen);
     }
 }
+
+// ---------------------------------------------------------------------------
+// Reanalyze
+// ---------------------------------------------------------------------------
 
 /// Reanalyze a previously played game with the current network.
 ///
@@ -229,14 +289,12 @@ where
 pub(super) async fn reanalyze_game<G, F, Fut>(
     search: &mut Search<G>,
     effective_sims: u32,
+    actor_config: &ActorConfig,
     encoder: &dyn StateEncoder<G>,
     infer: F,
     rng: &mut fastrand::Rng,
     actions: &[usize],
     reward: f32,
-    num_aux_targets: usize,
-    aux_value_horizons: &[u32],
-    surprise_weight_fraction: f32,
 ) -> Vec<Sample>
 where
     G: Game,
@@ -280,13 +338,12 @@ where
             last_sign = Some(sign);
         }
 
-        // Skip forced moves (single legal action)
+        // Skip forced moves
         actions_buf.clear();
         search.state().legal_actions(&mut actions_buf);
         if actions_buf.len() == 1 {
-            let action = actions[action_idx];
             action_idx += 1;
-            search.apply_action(action);
+            search.apply_action(actions_buf[0]);
             continue;
         }
 
@@ -298,103 +355,37 @@ where
         encoder.encode(search.state(), &mut features_buf);
 
         // MCTS search
-        let mut evals: Vec<Evaluation> = vec![];
-        let result = loop {
-            match search.step(&evals, rng) {
-                Step::NeedsEval(states) => {
-                    let batch_size = states.len();
-                    let mut signs = Vec::with_capacity(batch_size);
-                    let mut flat_features = Vec::with_capacity(batch_size * feature_size);
-                    for pending_state in states {
-                        let s = match pending_state.status() {
-                            Status::Ongoing => pending_state.current_sign(),
-                            Status::Terminal(_) => 1.0,
-                        };
-                        signs.push(s);
-                        encode_buf.clear();
-                        encoder.encode(pending_state, &mut encode_buf);
-                        flat_features.extend_from_slice(&encode_buf);
-                    }
-                    let (flat_logits, flat_wdl) = infer(flat_features, batch_size).await;
-                    evals.clear();
-                    let num_actions = G::NUM_ACTIONS;
-                    for (i, &sign) in signs.iter().enumerate() {
-                        let logits_start = i * num_actions;
-                        let policy_logits =
-                            flat_logits[logits_start..logits_start + num_actions].to_vec();
-                        let wdl_start = i * 3;
-                        let wdl_raw = &flat_wdl[wdl_start..wdl_start + 3];
-                        let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
-                        let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
-                        evals.push(Evaluation { policy_logits, wdl });
-                    }
-                }
-                Step::Done(result) => break result,
-            }
-        };
+        let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
 
-        // Create training sample — always full_search: true
-        let q_wdl = if sign > 0.0 {
-            result.wdl
-        } else {
-            flip_wdl(result.wdl)
-        };
+        samples.push(make_sample(
+            result,
+            features_buf,
+            sign,
+            true,
+            turn_count,
+            actor_config.num_aux_targets,
+        ));
 
-        let root_v = result.wdl[0] - result.wdl[2];
-        let value_correction = (root_v - result.network_value).abs();
-        let q_std = if result.children_q.len() >= 2 {
-            let mean = result.children_q.iter().map(|&(_, q)| q).sum::<f32>()
-                / result.children_q.len() as f32;
-            let var = result
-                .children_q
-                .iter()
-                .map(|&(_, q)| (q - mean).powi(2))
-                .sum::<f32>()
-                / result.children_q.len() as f32;
-            var.sqrt()
-        } else {
-            0.0
-        };
-        let prior_agrees = result.prior_top1_action == result.selected_action;
-        let policy_surprise = compute_kl(&result.policy, &result.prior_policy);
-
-        samples.push(Sample {
-            features: features_buf.into_boxed_slice(),
-            policy_target: result.policy.into_boxed_slice(),
-            z: sign,
-            q_wdl,
-            full_search: true,
-            move_number: turn_count,
-            game_length: 0,
-            network_value: result.network_value * sign,
-            value_correction,
-            q_std,
-            prior_agrees,
-            policy_surprise,
-            surprise_weight: 1.0,
-            aux_targets: vec![0.0; num_aux_targets].into_boxed_slice(),
-        });
-
-        // Apply the predetermined action
+        // Apply predetermined action
         let action = actions[action_idx];
         action_idx += 1;
         search.apply_action(action);
     }
 
-    // Post-process: short-term values, surprise weights, z *= reward
-    if !aux_value_horizons.is_empty() {
-        compute_short_term_values(&mut samples, aux_value_horizons);
-    }
-    if surprise_weight_fraction > 0.0 {
-        normalize_surprise_weights(&mut samples, surprise_weight_fraction);
-    }
-    for s in &mut samples {
-        s.z *= reward;
-        s.game_length = turn_count;
-    }
+    finalize_samples(
+        &mut samples,
+        reward,
+        turn_count,
+        &actor_config.aux_value_horizons,
+        actor_config.surprise_weight_fraction,
+    );
 
     samples
 }
+
+// ---------------------------------------------------------------------------
+// Utility functions
+// ---------------------------------------------------------------------------
 
 /// Compute KL(target || prior) = Σ target[a] * ln(target[a] / prior[a]).
 fn compute_kl(target: &[f32], prior: &[f32]) -> f32 {

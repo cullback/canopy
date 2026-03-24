@@ -207,6 +207,7 @@ pub(super) async fn worker_loop<G: Game + 'static>(
                 let samples = reanalyze_game(
                     s,
                     effective_sims,
+                    &actor_config,
                     &*encoder,
                     |flat_features, batch_size| {
                         let tx = tx.clone();
@@ -226,9 +227,6 @@ pub(super) async fn worker_loop<G: Game + 'static>(
                     &mut rng,
                     &actions,
                     reward,
-                    actor_config.num_aux_targets,
-                    &actor_config.aux_value_horizons,
-                    actor_config.surprise_weight_fraction,
                 )
                 .await;
 
