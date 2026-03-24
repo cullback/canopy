@@ -323,7 +323,10 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         / n;
 
     let sum_z: f64 = samples.iter().map(|s| s.z as f64).sum();
-    let sum_q: f64 = samples.iter().map(|s| s.q as f64).sum();
+    let sum_q: f64 = samples
+        .iter()
+        .map(|s| (s.q_wdl[0] - s.q_wdl[2]) as f64)
+        .sum();
     let mean_z = sum_z / n;
     let mean_q = sum_q / n;
     let var_z: f64 = samples
@@ -333,7 +336,7 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
         / n;
     let var_q: f64 = samples
         .iter()
-        .map(|s| (s.q as f64 - mean_q).powi(2))
+        .map(|s| ((s.q_wdl[0] - s.q_wdl[2]) as f64 - mean_q).powi(2))
         .sum::<f64>()
         / n;
 
@@ -397,7 +400,7 @@ pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
     let mut late_err_sum = 0.0f64;
     let mut late_count = 0u64;
     for s in samples {
-        let err = (s.q - s.z).abs() as f64;
+        let err = ((s.q_wdl[0] - s.q_wdl[2]) - s.z).abs() as f64;
         if s.game_length == 0 {
             continue;
         }

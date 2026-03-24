@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use burn::prelude::*;
 
-use crate::eval::{Evaluation, Evaluator};
+use crate::eval::{Evaluation, Evaluator, flip_wdl};
 use crate::game::{Game, Status};
 
 /// Encodes a game state into a fixed-size feature vector for neural network input.
@@ -21,7 +21,8 @@ pub trait StateEncoder<G: Game>: Send + Sync {
 pub struct ForwardOutput<B: Backend> {
     /// Hard policy logits `[batch, num_actions]` (pre-softmax).
     pub policy_logits: Tensor<B, 2>,
-    /// Value prediction `[batch, 1]` in `[-1, 1]` (tanh-activated).
+    /// WDL logits `[batch, 3]` (pre-softmax). Softmax → `[win, draw, loss]`
+    /// probabilities from the current player's perspective.
     pub value: Tensor<B, 2>,
     /// Soft policy logits `[batch, num_actions]` — `None` if model has no soft head.
     pub soft_policy_logits: Option<Tensor<B, 2>>,
@@ -33,8 +34,8 @@ pub struct ForwardOutput<B: Backend> {
 ///
 /// - Input: `[batch, features]` tensor (encoded by [`StateEncoder`])
 /// - Policy output: `[batch, num_actions]` **raw logits** (pre-softmax).
-/// - Value output: `[batch, 1]` in **`[-1, 1]`** (tanh-activated).
-///   +1 = good for the perspective player encoded in the input.
+/// - Value output: `[batch, 3]` **WDL logits** (pre-softmax).
+///   Softmax → `[win, draw, loss]` from the current player's perspective.
 pub trait PolicyValueNet<B: Backend> {
     fn forward(&self, input: Tensor<B, 2>) -> ForwardOutput<B>;
 }
@@ -121,26 +122,25 @@ where
 
         let out = self.model.forward(input);
         let policy_logits_tensor = out.policy_logits;
-        let value_tensor = out.value;
 
         let logits_data: Vec<f32> = policy_logits_tensor
             .into_data()
             .to_vec()
             .expect("policy tensor to_vec");
 
-        let value_data: Vec<f32> = value_tensor
-            .into_data()
-            .to_vec()
-            .expect("value tensor to_vec");
+        // Apply softmax to WDL logits → probabilities
+        let wdl_probs = burn::tensor::activation::softmax(out.value, 1);
+        let wdl_data: Vec<f32> = wdl_probs.into_data().to_vec().expect("value tensor to_vec");
 
-        // NN outputs value in [-1, 1] from perspective player's view.
-        // Convert to P1's perspective by multiplying by current player's sign.
-        let raw_value = value_data[0];
-        let value = raw_value * sign;
+        // WDL from current player's perspective; sign-flip for P1 (swap W/L)
+        let wdl_cp = [wdl_data[0], wdl_data[1], wdl_data[2]];
+        let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
+        debug_assert!(wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        debug_assert!((wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
 
         Evaluation {
             policy_logits: logits_data,
-            value,
+            wdl,
         }
     }
 
@@ -182,16 +182,26 @@ where
             features.extend_from_slice(&buf);
         }
 
-        let (all_logits, all_values) = self.infer_features(features, n, feature_size);
+        let (all_logits, all_wdl) = self.infer_features(features, n, feature_size);
 
         // Split outputs per state and apply sign correction
         for (j, &i) in nn_indices.iter().enumerate() {
             let logits_start = j * G::NUM_ACTIONS;
             let logits = all_logits[logits_start..logits_start + G::NUM_ACTIONS].to_vec();
-            let value = all_values[j] * signs[j];
+            let wdl_start = j * 3;
+            let wdl_raw = &all_wdl[wdl_start..wdl_start + 3];
+            // Sign-flip for P1 perspective (swap W/L when sign < 0)
+            let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
+            let wdl = if signs[j] > 0.0 {
+                wdl_cp
+            } else {
+                flip_wdl(wdl_cp)
+            };
+            debug_assert!(wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
+            debug_assert!((wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
             results[i] = Some(Evaluation {
                 policy_logits: logits,
-                value,
+                wdl,
             });
         }
 
@@ -211,17 +221,20 @@ where
 
         let out = self.model.forward(input);
         let policy_tensor = out.policy_logits;
-        let value_tensor = out.value;
+        // Apply softmax to WDL logits → probabilities
+        let wdl_tensor = burn::tensor::activation::softmax(out.value, 1);
 
         let logits: Vec<f32> = policy_tensor
             .into_data()
             .to_vec()
             .expect("policy tensor to_vec");
-        let values: Vec<f32> = value_tensor
+        let wdl: Vec<f32> = wdl_tensor
             .into_data()
             .to_vec()
             .expect("value tensor to_vec");
 
-        (logits, values)
+        debug_assert_eq!(wdl.len(), batch_size * 3);
+
+        (logits, wdl)
     }
 }

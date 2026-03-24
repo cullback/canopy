@@ -23,7 +23,7 @@ pub fn init_twenty48<B: Backend>(device: &B::Device) -> Twenty48Model<B> {
         fc1: LinearConfig::new(FEATURE_SIZE, HIDDEN).init(device),
         fc2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
         policy_head: LinearConfig::new(HIDDEN, NUM_ACTIONS).init(device),
-        value_head: LinearConfig::new(HIDDEN, 1).init(device),
+        value_head: LinearConfig::new(HIDDEN, 3).init(device),
     }
 }
 
@@ -34,8 +34,7 @@ impl<B: Backend> PolicyValueNet<B> for Twenty48Model<B> {
 
         let policy = self.policy_head.forward(x.clone());
 
-        let v = self.value_head.forward(x);
-        let value = burn::tensor::activation::tanh(v);
+        let value = self.value_head.forward(x);
 
         ForwardOutput {
             policy_logits: policy,

@@ -1,4 +1,4 @@
-use canopy::eval::{Evaluation, Evaluator};
+use canopy::eval::{Evaluation, Evaluator, wdl_from_scalar};
 
 use crate::game::{DESTROY_A, DESTROY_B, DONE, K, NUM_ACTIONS, Phase, TenureGame, optimal_value};
 
@@ -31,7 +31,7 @@ impl Evaluator<TenureGame> for OptimalDefender {
 
         Evaluation {
             policy_logits: logits,
-            value: 0.0,
+            wdl: wdl_from_scalar(0.0),
         }
     }
 }
@@ -78,7 +78,7 @@ impl Evaluator<TenureGame> for BalancedAttacker {
 
         Evaluation {
             policy_logits: logits,
-            value: 0.0,
+            wdl: wdl_from_scalar(0.0),
         }
     }
 }

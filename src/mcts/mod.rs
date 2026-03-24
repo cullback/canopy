@@ -1,7 +1,7 @@
 mod seq_halving;
 mod tree;
 
-use crate::eval::Evaluation;
+use crate::eval::{Evaluation, wdl_from_scalar};
 use crate::game::{Game, Status};
 
 use seq_halving::Schedule;
@@ -29,8 +29,8 @@ pub struct EdgeSnapshot {
 #[derive(Clone, Debug)]
 #[cfg_attr(feature = "serde", derive(serde::Serialize))]
 pub struct SearchSnapshot {
-    /// Root Q value (P1 perspective).
-    pub root_q: f32,
+    /// Root WDL (P1 perspective).
+    pub root_wdl: [f32; 3],
     /// Raw network value at root (P1 perspective).
     pub network_value: f32,
     /// Total simulations completed so far.
@@ -48,8 +48,8 @@ pub struct TreeNodeSnapshot {
     /// Label for this node (game-specific, set by caller).
     #[cfg_attr(feature = "serde", serde(skip_serializing_if = "Option::is_none"))]
     pub label: Option<String>,
-    /// Q value of this node.
-    pub q: f32,
+    /// WDL of this node (P1 perspective).
+    pub wdl: [f32; 3],
     /// Total visits.
     pub visits: u32,
     /// Node kind label: "decision", "chance", or "terminal".
@@ -103,8 +103,8 @@ impl Default for Config {
 pub struct SearchResult {
     /// Improved policy over `[0, NUM_ACTIONS)` (training target).
     pub policy: Vec<f32>,
-    /// Root value estimate from P1's perspective.
-    pub value: f32,
+    /// Root WDL (P1 perspective).
+    pub wdl: [f32; 3],
     /// The action selected by Sequential Halving to play.
     pub selected_action: usize,
     /// Raw network value (P1 perspective) before search corrections.
@@ -316,7 +316,7 @@ impl<G: Game> Search<G> {
             .collect();
 
         Some(SearchSnapshot {
-            root_q: self.tree.q(root),
+            root_wdl: self.tree.wdl(root),
             network_value: self.root_network_value,
             total_simulations,
             edges: edge_snapshots,
@@ -401,7 +401,7 @@ impl<G: Game> Search<G> {
             self.search_active = false;
             return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
-                value: reward,
+                wdl: wdl_from_scalar(reward),
                 selected_action: 0,
                 network_value: 0.0,
                 children_q: vec![],
@@ -415,8 +415,8 @@ impl<G: Game> Search<G> {
             let new_root = self.tree.compact(old_root);
             self.root = Some(new_root);
 
-            let root_value = self.tree.utility(new_root);
-            self.root_network_value = root_value;
+            self.root_network_value = self.tree.utility(new_root);
+            let root_value = self.root_network_value;
             let root_sign = match *self.tree.kind(new_root) {
                 NodeKind::Decision(sign) => sign,
                 _ => return self.run_vanilla_sims(rng),
@@ -466,13 +466,13 @@ impl<G: Game> Search<G> {
                     let state_key = self.root_state.state_key();
                     let root = self.tree.complete_expand(eval, &actions, sign, state_key);
                     self.root = Some(root);
-                    self.root_network_value = eval.value;
+                    self.root_network_value = eval.wdl[0] - eval.wdl[2];
 
                     // Initialize Gumbel state for root
                     self.gumbel = Some(init_gumbel(
                         &self.tree,
                         root,
-                        eval.value,
+                        self.root_network_value,
                         sign,
                         &self.config,
                         rng,
@@ -1017,7 +1017,7 @@ fn visit_count_result<G: Game>(tree: &Tree, root: NodeId, network_value: f32) ->
 
     SearchResult {
         policy,
-        value: tree.q(root),
+        wdl: tree.wdl(root),
         selected_action: best_action,
         network_value,
         children_q,
@@ -1090,7 +1090,7 @@ fn extract_gumbel_result<G: Game>(
 
     SearchResult {
         policy,
-        value: tree.q(root),
+        wdl: tree.wdl(root),
         selected_action,
         network_value,
         children_q,
@@ -1142,7 +1142,7 @@ fn snapshot_node(
     TreeNodeSnapshot {
         action,
         label: None,
-        q: data.q,
+        wdl: data.wdl,
         visits: data.total_visits,
         kind: kind_str,
         player: parent_player,
@@ -1329,7 +1329,7 @@ mod tests {
         );
         match search.step(&[], &mut rng) {
             Step::Done(result) => {
-                assert_eq!(result.value, 1.0);
+                assert_eq!(result.wdl, [1.0, 0.0, 0.0]);
                 assert!(result.policy.iter().all(|&p| p == 0.0));
             }
             Step::NeedsEval(_) => panic!("terminal root should not need eval"),

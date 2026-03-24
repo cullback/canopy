@@ -118,7 +118,8 @@ mod tests {
         };
         let mut rng = fastrand::Rng::with_seed(0);
         let out = eval.evaluate(&state, &mut rng);
-        assert!(out.value >= -1.0 && out.value <= 1.0);
+        let v = out.wdl[0] - out.wdl[2];
+        assert!(v >= -1.0 && v <= 1.0);
         assert_eq!(out.policy_logits.len(), GameState::NUM_ACTIONS);
     }
 

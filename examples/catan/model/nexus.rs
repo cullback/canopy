@@ -331,7 +331,7 @@ pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Catan
 
         value1: LinearConfig::new(pool_dim, HIDDEN).init(device),
         value2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-        value3: LinearConfig::new(HIDDEN, 1).init(device),
+        value3: LinearConfig::new(HIDDEN, 3).init(device),
 
         aux_value_hidden: if num_aux_heads > 0 {
             Some(LinearConfig::new(pool_dim, HIDDEN).init(device))
@@ -524,7 +524,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         // ── Value head ───────────────────────────────────────────────
         let v = relu(self.value1.forward(pooled.clone()));
         let v = relu(self.value2.forward(v));
-        let value = tanh(self.value3.forward(v));
+        let value = self.value3.forward(v);
 
         // ── Auxiliary value heads ────────────────────────────────────
         let aux_values = if let (Some(aux_hidden), Some(aux_out)) =

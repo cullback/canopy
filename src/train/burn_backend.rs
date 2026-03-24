@@ -103,11 +103,26 @@ fn prepare_batch<B: Backend>(
     let policy_tensor =
         Tensor::<B, 2>::from_data(TensorData::new(policy_targets, [bs, num_actions]), device);
 
+    // WDL value targets: blend one-hot z_wdl with search-refined q_wdl
     let value_targets: Vec<f32> = samples
         .iter()
-        .map(|s| (1.0 - cfg.q_weight) * s.z + cfg.q_weight * s.q)
+        .flat_map(|s| {
+            let z_wdl = if s.z > 0.0 {
+                [1.0, 0.0, 0.0]
+            } else if s.z < 0.0 {
+                [0.0, 0.0, 1.0]
+            } else {
+                [0.0, 1.0, 0.0]
+            };
+            let alpha = cfg.q_weight;
+            [
+                (1.0 - alpha) * z_wdl[0] + alpha * s.q_wdl[0],
+                (1.0 - alpha) * z_wdl[1] + alpha * s.q_wdl[1],
+                (1.0 - alpha) * z_wdl[2] + alpha * s.q_wdl[2],
+            ]
+        })
         .collect();
-    let value_tensor = Tensor::<B, 2>::from_data(TensorData::new(value_targets, [bs, 1]), device);
+    let value_tensor = Tensor::<B, 2>::from_data(TensorData::new(value_targets, [bs, 3]), device);
 
     let mask_data: Vec<f32> = samples
         .iter()
@@ -218,13 +233,13 @@ fn compute_batch_losses<B: Backend>(
     };
     let policy_loss = weighted_ce.mul(batch.mask.clone()).sum().div_scalar(denom);
 
-    // Value loss with surprise weights
-    let value_diff = value_pred.sub(batch.value_targets.clone());
-    let per_sample_mse = value_diff.powf_scalar(2.0); // [batch, 1]
+    // Value loss: cross-entropy with WDL target
+    let log_wdl = log_softmax(value_pred, 1); // [batch, 3]
+    let per_sample_ce_value = batch.value_targets.clone().mul(log_wdl).sum_dim(1).neg(); // [batch, 1]
     let value_loss = if let Some(ref sw) = batch.surprise_weights {
-        per_sample_mse.mul(sw.clone()).mean()
+        per_sample_ce_value.mul(sw.clone()).mean()
     } else {
-        per_sample_mse.mean()
+        per_sample_ce_value.mean()
     };
 
     let pl = policy_loss.clone().into_data().to_vec::<f32>().unwrap()[0];

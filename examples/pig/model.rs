@@ -20,7 +20,7 @@ pub fn init_pig<B: Backend>(device: &B::Device) -> PigModel<B> {
     PigModel {
         fc1: LinearConfig::new(FEATURE_SIZE, 32).init(device),
         policy_head: LinearConfig::new(32, NUM_ACTIONS).init(device),
-        value_head: LinearConfig::new(32, 1).init(device),
+        value_head: LinearConfig::new(32, 3).init(device),
     }
 }
 
@@ -30,8 +30,7 @@ impl<B: Backend> PolicyValueNet<B> for PigModel<B> {
 
         let policy = self.policy_head.forward(x.clone());
 
-        let v = self.value_head.forward(x);
-        let value = burn::tensor::activation::tanh(v);
+        let value = self.value_head.forward(x);
 
         ForwardOutput {
             policy_logits: policy,

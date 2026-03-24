@@ -13,7 +13,8 @@ class MCTSPanel {
   // Update the analysis panel with a search snapshot.
   updateSnapshot(snapshot, labels) {
     this.simsEl.textContent = `${snapshot.total_simulations} sims`;
-    this.rootQEl.textContent = `Q: ${snapshot.root_q.toFixed(3)}`;
+    const rootQ = snapshot.root_wdl[0] - snapshot.root_wdl[2];
+    this.rootQEl.textContent = `Q: ${rootQ.toFixed(3)}`;
     this.netValEl.textContent = `Net: ${snapshot.network_value.toFixed(3)}`;
 
     // Build sorted edge data
@@ -86,7 +87,7 @@ class MCTSPanel {
     const playerPrefix = node.player != null ? `P${node.player + 1}: ` : '';
     const actionLabel = node.label || (node.action != null ? `Action ${node.action}` : 'Root');
     const visits = node.visits;
-    const q = node.q.toFixed(3);
+    const q = (node.wdl[0] - node.wdl[2]).toFixed(3);
     const kind = node.kind;
 
     const branch = depth === 0 ? '' : (isLast ? '└─' : '├─');

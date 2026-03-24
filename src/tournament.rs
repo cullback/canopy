@@ -271,7 +271,7 @@ impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
         states: &[&G],
         _rng: &mut fastrand::Rng,
     ) -> Vec<crate::eval::Evaluation> {
-        use crate::eval::Evaluation;
+        use crate::eval::{Evaluation, flip_wdl};
         use crate::train::inference::{InferRequest, InferResponse};
 
         let feature_size = self.encoder.feature_size();
@@ -323,10 +323,18 @@ impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
         for (j, &i) in nn_indices.iter().enumerate() {
             let logits_start = j * num_actions;
             let logits = resp.flat_policy_logits[logits_start..logits_start + num_actions].to_vec();
-            let value = resp.values[j] * signs[j];
+            let wdl_start = j * 3;
+            let wdl_raw = &resp.flat_wdl[wdl_start..wdl_start + 3];
+            // Sign-flip for P1 perspective (swap W/L when sign < 0)
+            let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
+            let wdl = if signs[j] > 0.0 {
+                wdl_cp
+            } else {
+                flip_wdl(wdl_cp)
+            };
             results[i] = Some(Evaluation {
                 policy_logits: logits,
-                value,
+                wdl,
             });
         }
 

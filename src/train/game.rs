@@ -1,6 +1,6 @@
 use std::future::Future;
 
-use crate::eval::Evaluation;
+use crate::eval::{Evaluation, flip_wdl};
 use crate::game::{Game, Status};
 use crate::mcts::{Search, Step};
 use crate::nn::StateEncoder;
@@ -120,17 +120,21 @@ where
                         encoder.encode(pending_state, &mut encode_buf);
                         flat_features.extend_from_slice(&encode_buf);
                     }
-                    let (flat_logits, values) = infer(flat_features, batch_size).await;
+                    let (flat_logits, flat_wdl) = infer(flat_features, batch_size).await;
                     evals.clear();
                     let num_actions = G::NUM_ACTIONS;
                     for (i, &sign) in signs.iter().enumerate() {
                         let logits_start = i * num_actions;
                         let policy_logits =
                             flat_logits[logits_start..logits_start + num_actions].to_vec();
-                        evals.push(Evaluation {
-                            policy_logits,
-                            value: values[i] * sign,
-                        });
+                        let wdl_start = i * 3;
+                        let wdl_raw = &flat_wdl[wdl_start..wdl_start + 3];
+                        // Sign-flip for P1 perspective (swap W/L when sign < 0)
+                        let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
+                        let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
+                        debug_assert!(wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
+                        debug_assert!((wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+                        evals.push(Evaluation { policy_logits, wdl });
                     }
                 }
                 Step::Done(result) => break result,
@@ -138,14 +142,22 @@ where
         };
 
         // Create training sample
-        let q = result.value * sign;
+        // result.wdl is P1 perspective; flip to current player (swap W/L when sign < 0)
+        let q_wdl = if sign > 0.0 {
+            result.wdl
+        } else {
+            flip_wdl(result.wdl)
+        };
+        debug_assert!(q_wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
+        debug_assert!((q_wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
         let chosen = if turn_count <= actor_config.explore_moves {
             sample_from_policy(&result.policy, rng)
         } else {
             result.selected_action
         };
 
-        let value_correction = (result.value - result.network_value).abs();
+        let root_v = result.wdl[0] - result.wdl[2];
+        let value_correction = (root_v - result.network_value).abs();
         let q_std = if result.children_q.len() >= 2 {
             let mean = result.children_q.iter().map(|&(_, q)| q).sum::<f32>()
                 / result.children_q.len() as f32;
@@ -172,7 +184,7 @@ where
             features: features_buf.into_boxed_slice(),
             policy_target: result.policy.into_boxed_slice(),
             z: sign,
-            q,
+            q_wdl,
             full_search: is_full_search,
             move_number: turn_count,
             game_length: 0, // backfilled at game end
@@ -243,8 +255,9 @@ fn compute_short_term_values(samples: &mut [Sample], horizons: &[u32]) {
         let alpha = 1.0 - (-1.0 / h as f32).exp();
         let mut ema_p1 = 0.0f32;
         for i in (0..samples.len()).rev() {
-            // Convert Q to P1 perspective: q_p1 = q * z (z is the player sign)
-            let q_p1 = samples[i].q * samples[i].z;
+            // Convert Q to P1 perspective: q_cp * sign (z is the player sign)
+            let q_cp = samples[i].q_wdl[0] - samples[i].q_wdl[2];
+            let q_p1 = q_cp * samples[i].z;
             ema_p1 = alpha * q_p1 + (1.0 - alpha) * ema_p1;
             // Store in current-player perspective
             samples[i].aux_targets[h_idx] = ema_p1 * samples[i].z;

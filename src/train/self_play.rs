@@ -242,7 +242,7 @@ where
                                 .await
                                 .unwrap();
                                 let resp = resp_rx.await.unwrap();
-                                (resp.flat_policy_logits, resp.values)
+                                (resp.flat_policy_logits, resp.flat_wdl)
                             }
                         },
                         &mut rng,

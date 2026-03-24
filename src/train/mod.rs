@@ -33,8 +33,8 @@ pub struct Sample {
     /// During self-play construction this temporarily holds the player's sign,
     /// then is multiplied by the terminal reward once the game ends.
     pub z: f32,
-    /// Root Q from current player's perspective, in [-1, 1]
-    pub q: f32,
+    /// Root WDL from current player's perspective (search-refined).
+    pub q_wdl: [f32; 3],
     /// Whether this position used full search (for playout cap randomization)
     pub full_search: bool,
     /// Turn number when this sample was generated (1-indexed).

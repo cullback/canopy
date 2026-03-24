@@ -19,8 +19,8 @@ pub struct InferRequest {
 pub struct InferResponse {
     /// Flat policy logits for all samples in the request.
     pub flat_policy_logits: Vec<f32>,
-    /// One value per sample.
-    pub values: Vec<f32>,
+    /// WDL probabilities, 3 per sample (current player's perspective).
+    pub flat_wdl: Vec<f32>,
 }
 
 /// Sender half of the bounded inference request channel.
@@ -125,16 +125,17 @@ pub fn gpu_worker_loop(
 ) {
     while let Ok(batch) = batches.recv() {
         let total_samples: usize = batch.responses.iter().map(|(_, n)| n).sum();
-        let (flat_logits, flat_values) =
+        let (flat_logits, flat_wdl) =
             infer_fn(batch.flat_features, total_samples, batch.feature_size);
+        debug_assert_eq!(flat_wdl.len(), total_samples * 3);
 
         let mut offset = 0;
         for (response_tx, count) in batch.responses {
             let logits = flat_logits[offset * num_actions..(offset + count) * num_actions].to_vec();
-            let values = flat_values[offset..offset + count].to_vec();
+            let wdl = flat_wdl[offset * 3..(offset + count) * 3].to_vec();
             let _ = response_tx.send(InferResponse {
                 flat_policy_logits: logits,
-                values,
+                flat_wdl: wdl,
             });
             offset += count;
         }

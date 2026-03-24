@@ -2,12 +2,27 @@ use std::sync::Arc;
 
 use crate::game::{Game, Status};
 
+/// Convert a scalar value in [-1, 1] to a WDL distribution.
+///
+/// Linear mapping: w = (1+v)/2, d = 0, l = (1-v)/2.
+/// Works for any terminal reward in [-1, 1], not just {-1, 0, 1}.
+pub fn wdl_from_scalar(v: f32) -> [f32; 3] {
+    let w = ((1.0 + v) / 2.0).clamp(0.0, 1.0);
+    let l = ((1.0 - v) / 2.0).clamp(0.0, 1.0);
+    [w, 0.0, l]
+}
+
+/// Flip a WDL distribution: swap Win and Loss (perspective change).
+pub fn flip_wdl(wdl: [f32; 3]) -> [f32; 3] {
+    [wdl[2], wdl[1], wdl[0]]
+}
+
 /// Policy logits and value estimate produced by any [`Evaluator`].
 pub struct Evaluation {
     /// Logits over the full action space `[0, NUM_ACTIONS)`.
     pub policy_logits: Vec<f32>,
-    /// Value estimate from P1's perspective.
-    pub value: f32,
+    /// Win/Draw/Loss probabilities from P1's perspective.
+    pub wdl: [f32; 3],
 }
 
 impl Evaluation {
@@ -19,7 +34,7 @@ impl Evaluation {
     pub fn uniform(num_actions: usize, value: f32) -> Self {
         Self {
             policy_logits: vec![0.0; num_actions],
-            value,
+            wdl: wdl_from_scalar(value),
         }
     }
 }
@@ -39,7 +54,7 @@ pub trait Evaluator<G: Game>: Send {
     /// Run raw inference on pre-encoded features.
     ///
     /// Takes flat features `[batch_size * feature_size]` and returns
-    /// `(flat_policy_logits, flat_values)`. Only supported by neural evaluators.
+    /// `(flat_policy_logits, flat_wdl)`. Only supported by neural evaluators.
     fn infer_features(
         &self,
         _features: Vec<f32>,
