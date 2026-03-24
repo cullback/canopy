@@ -6,7 +6,7 @@
 //! ```text
 //! cargo run --example twenty48 -- solo -n 10 --simulations 100 --eval rollout
 //! cargo run --example twenty48 -- --p1-sims 200 --p2-sims 200
-//! cargo run --example twenty48 -- train --iterations 5 --games 20
+//! cargo run --example twenty48 -- train --iterations 5
 //! ```
 
 use std::collections::HashMap;
