@@ -15,6 +15,8 @@ pub struct TrainConfig {
     pub iterations: usize,
     /// Directory where run folders and checkpoints are written.
     pub output_dir: PathBuf,
+    /// Game name used in run directory names.
+    pub game_name: String,
     /// Resume training from this checkpoint path (e.g. `checkpoints/run/model_iter_10`).
     #[serde(skip)]
     pub resume: Option<PathBuf>,
@@ -111,6 +113,7 @@ impl Default for TrainConfig {
             // Infrastructure
             iterations: 1000,
             output_dir: PathBuf::from("checkpoints"),
+            game_name: String::from("unknown"),
             resume: None,
 
             // Training

@@ -576,7 +576,8 @@ impl<G: Game + 'static> GameCli<G> {
             })
             .1
             .clone();
-        let config = parse_train_config(matches, base_config);
+        let mut config = parse_train_config(matches, base_config);
+        config.game_name = self.name.clone();
 
         // Look up encoder
         let encoder_name = matches
