@@ -29,8 +29,21 @@ pub struct TrainConfig {
     /// Learning rate.
     pub lr: f64,
     /// Fresh self-play samples to collect before triggering a training step.
+    ///
+    /// Each iteration generates this many samples via self-play, then trains
+    /// `epochs` passes over the full replay buffer. Gradient steps per epoch =
+    /// `replay_buffer_samples / train_batch_size`, so this controls how much
+    /// new data arrives between training passes, not the training volume itself.
+    /// Larger values mean more diverse fresh data per iteration but longer
+    /// self-play phases.
     pub train_samples_per_iter: usize,
     /// Maximum samples retained in the replay buffer. Oldest games evicted first.
+    ///
+    /// Sized as a multiple of `train_samples_per_iter`: the ratio determines how
+    /// many iterations a sample survives before eviction. 5-10x is typical.
+    /// Too small risks overfitting to recent play patterns; too large dilutes
+    /// training with stale positions from weaker networks. Games are evicted
+    /// whole (not individual samples) to preserve trajectories for reanalyze.
     pub replay_buffer_samples: usize,
     /// Number of games to reanalyze per iteration (0 = disabled).
     pub reanalyze_games: usize,

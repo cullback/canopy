@@ -28,7 +28,7 @@ const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
 const HIDDEN: usize = 256;
 const GLOBAL_HIDDEN: usize = 96;
-const NUM_LAYERS: usize = 6;
+const NUM_LAYERS: usize = 4;
 
 // Action layout (must match action.rs ACTION_SPACE = 249):
 //   [settlement 0..54 | road 54..126 | city 126..180 | other_pre 180..205 | robber 205..224 | other_post 224..249]

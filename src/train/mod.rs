@@ -328,8 +328,7 @@ pub fn run_training<G>(
             .iter()
             .map(|s| s.stats().batches.load(Relaxed))
             .sum();
-        let evals_per_sec =
-            (evals_now - stats_start_evals) as f64 / iter_start.elapsed().as_secs_f64();
+        let evals_per_sec = evals_now as f64 / training_start.elapsed().as_secs_f64();
         let avg_batch_size = if batches_now == 0 {
             0.0
         } else {
