@@ -207,7 +207,7 @@ fn prepare_batch<B: Backend>(
 struct BatchLosses<B: Backend> {
     total: Tensor<B, 1>,
     policy: f32,
-    value: f32,
+    wdl: f32,
     soft_policy: f32,
     aux_value: f32,
     /// Per-horizon auxiliary value MSE (empty if no aux heads).
@@ -243,16 +243,16 @@ fn compute_batch_losses<B: Backend>(
     // Value loss: cross-entropy with WDL target
     let log_wdl = log_softmax(value_pred, 1); // [batch, 3]
     let per_sample_ce_value = batch.value_targets.clone().mul(log_wdl).sum_dim(1).neg(); // [batch, 1]
-    let value_loss = if let Some(ref sw) = batch.surprise_weights {
+    let wdl_loss = if let Some(ref sw) = batch.surprise_weights {
         per_sample_ce_value.mul(sw.clone()).mean()
     } else {
         per_sample_ce_value.mean()
     };
 
     let pl = policy_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
-    let vl = value_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
+    let wl = wdl_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
 
-    let mut total_loss = policy_loss.add(value_loss);
+    let mut total_loss = policy_loss.add(wdl_loss);
 
     // Soft policy loss
     let soft_pl = if let (Some(soft_targets), Some(soft_logits)) =
@@ -305,7 +305,7 @@ fn compute_batch_losses<B: Backend>(
     BatchLosses {
         total: total_loss.reshape([1]),
         policy: pl,
-        value: vl,
+        wdl: wl,
         soft_policy: soft_pl,
         aux_value: aux_vl,
         aux_value_per_horizon: aux_vl_per_horizon,
@@ -316,7 +316,7 @@ fn compute_batch_losses<B: Backend>(
 #[derive(Default)]
 struct EpochLosses {
     policy: f32,
-    value: f32,
+    wdl: f32,
     soft_policy: f32,
     aux_value: f32,
     aux_value_per_horizon: Vec<f32>,
@@ -375,7 +375,7 @@ where
         fastrand::shuffle(&mut indices);
 
         let mut total_policy_loss = 0.0f32;
-        let mut total_value_loss = 0.0f32;
+        let mut total_wdl_loss = 0.0f32;
         let mut total_soft_policy_loss = 0.0f32;
         let mut total_aux_value_loss = 0.0f32;
         let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
@@ -401,7 +401,7 @@ where
             let losses = compute_batch_losses(output, &batch, cfg);
 
             total_policy_loss += losses.policy;
-            total_value_loss += losses.value;
+            total_wdl_loss += losses.wdl;
             total_soft_policy_loss += losses.soft_policy;
             total_aux_value_loss += losses.aux_value;
             for (acc, &v) in total_aux_per_horizon
@@ -427,7 +427,7 @@ where
         (
             EpochLosses {
                 policy: total_policy_loss / nb,
-                value: total_value_loss / nb,
+                wdl: total_wdl_loss / nb,
                 soft_policy: total_soft_policy_loss / nb,
                 aux_value: total_aux_value_loss / nb,
                 aux_value_per_horizon: total_aux_per_horizon,
@@ -441,7 +441,7 @@ where
         let model = self.model.valid();
 
         let mut total_policy_loss = 0.0f32;
-        let mut total_value_loss = 0.0f32;
+        let mut total_wdl_loss = 0.0f32;
         let mut total_soft_policy_loss = 0.0f32;
         let mut total_aux_value_loss = 0.0f32;
         let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
@@ -466,7 +466,7 @@ where
             let losses = compute_batch_losses(output, &batch, cfg);
 
             total_policy_loss += losses.policy;
-            total_value_loss += losses.value;
+            total_wdl_loss += losses.wdl;
             total_soft_policy_loss += losses.soft_policy;
             total_aux_value_loss += losses.aux_value;
             for (acc, &v) in total_aux_per_horizon
@@ -484,7 +484,7 @@ where
         }
         EpochLosses {
             policy: total_policy_loss / nb,
-            value: total_value_loss / nb,
+            wdl: total_wdl_loss / nb,
             soft_policy: total_soft_policy_loss / nb,
             aux_value: total_aux_value_loss / nb,
             aux_value_per_horizon: total_aux_per_horizon,
@@ -557,24 +557,30 @@ where
             let val_losses = self.validate(val_samples, cfg);
 
             span.pb_set_message(&format!(
-                "epoch {}/{} p={:.4} v={:.4} val_p={:.4} val_v={:.4}",
+                "epoch {}/{} p={:.4} w={:.4} val_p={:.4} val_w={:.4}",
                 epoch + 1,
                 cfg.epochs,
                 train_losses.policy,
-                train_losses.value,
+                train_losses.wdl,
                 val_losses.policy,
-                val_losses.value
+                val_losses.wdl
             ));
 
             final_train = train_losses;
             final_val = val_losses;
         }
 
+        span.pb_set_finish_message(&format!(
+            "p={:.4} w={:.4} val_p={:.4} val_w={:.4}",
+            final_train.policy, final_train.wdl, final_val.policy, final_val.wdl,
+        ));
+        drop(span);
+
         TrainMetrics {
             loss_policy_train: final_train.policy,
-            loss_value_train: final_train.value,
+            loss_wdl_train: final_train.wdl,
             loss_policy_val: final_val.policy,
-            loss_value_val: final_val.value,
+            loss_wdl_val: final_val.wdl,
             loss_soft_policy_train: final_train.soft_policy,
             loss_soft_policy_val: final_val.soft_policy,
             loss_aux_value_train: final_train.aux_value,

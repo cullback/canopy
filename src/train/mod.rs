@@ -88,9 +88,9 @@ pub struct TrainStepConfig {
 /// Metrics returned from a training step.
 pub struct TrainMetrics {
     pub loss_policy_train: f32,
-    pub loss_value_train: f32,
+    pub loss_wdl_train: f32,
     pub loss_policy_val: f32,
-    pub loss_value_val: f32,
+    pub loss_wdl_val: f32,
     /// Soft policy loss (0.0 if disabled).
     pub loss_soft_policy_train: f32,
     pub loss_soft_policy_val: f32,
@@ -327,6 +327,17 @@ pub fn run_training<G>(
             refill_work_queues(&work_txs, effective_sims, &mut rng);
         }
         // No drain. In-flight results buffer in the channel for next iteration.
+        let evals_now: u64 = servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+        let evals_per_sec =
+            (evals_now - stats_start_evals) as f64 / iter_start.elapsed().as_secs_f64();
+        sp_span.pb_set_finish_message(&format!(
+            "iter {}/{} sims={} | {:.0} evals/s  [{}]",
+            iteration + 1,
+            config.iterations,
+            effective_sims,
+            evals_per_sec,
+            HumanDuration(iter_start.elapsed()),
+        ));
         drop(sp_span);
 
         let self_play_elapsed = iter_start.elapsed();
@@ -452,9 +463,9 @@ pub fn run_training<G>(
             // Core training
             iteration: iters_done,
             loss_policy_train: train_metrics.loss_policy_train,
-            loss_value_train: train_metrics.loss_value_train,
+            loss_wdl_train: train_metrics.loss_wdl_train,
             loss_policy_val: train_metrics.loss_policy_val,
-            loss_value_val: train_metrics.loss_value_val,
+            loss_wdl_val: train_metrics.loss_wdl_val,
             loss_soft_policy_train: train_metrics.loss_soft_policy_train,
             loss_soft_policy_val: train_metrics.loss_soft_policy_val,
             loss_aux_value_train: train_metrics.loss_aux_value_train,

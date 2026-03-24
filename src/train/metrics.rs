@@ -37,13 +37,13 @@ pub(super) struct CsvRow {
     #[serde(serialize_with = "round6::f32")]
     pub loss_policy_train: f32,
     #[serde(serialize_with = "round6::f32")]
-    pub loss_value_train: f32,
+    pub loss_wdl_train: f32,
     /// Validation policy loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub loss_policy_val: f32,
     /// Validation value loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
-    pub loss_value_val: f32,
+    pub loss_wdl_val: f32,
     #[serde(serialize_with = "round6::f32")]
     pub loss_soft_policy_train: f32,
     #[serde(serialize_with = "round6::f32")]
