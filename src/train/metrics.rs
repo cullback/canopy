@@ -1,3 +1,10 @@
+//! CSV logging and per-iteration diagnostic statistics.
+//!
+//! `CsvRow` defines the metrics schema (column order = field order).
+//! `CsvLogger` handles file creation, schema migration on resume, and
+//! row serialization. `compute_iter_stats` computes policy/value diagnostics
+//! from a slice of training samples.
+
 use std::io::BufWriter;
 use std::path::PathBuf;
 
@@ -160,6 +167,10 @@ pub(super) struct CsvRow {
     pub replay_samples: usize,
     /// Samples generated this iteration only.
     pub samples_iter: usize,
+    /// Games reanalyzed this iteration.
+    pub reanalyze_games: usize,
+    /// Total games in replay buffer.
+    pub replay_buffer_games: usize,
     #[serde(serialize_with = "round6::f64")]
     pub time_selfplay_secs: f64,
     #[serde(serialize_with = "round6::f64")]
@@ -303,7 +314,7 @@ pub(super) struct IterStats {
     pub value_network_stddev: f64,
 }
 
-pub(super) fn compute_iter_stats(samples: &[Sample]) -> IterStats {
+pub(super) fn compute_iter_stats(samples: &[&Sample]) -> IterStats {
     if samples.is_empty() {
         return IterStats::default();
     }

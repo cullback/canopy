@@ -1,3 +1,9 @@
+//! Training configuration: all hyperparameters and infrastructure settings.
+//!
+//! `TrainConfig` is the single source of truth for a training run. Games
+//! set defaults via `add_config` in their CLI setup; the user overrides
+//! individual fields from the command line.
+
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -20,8 +26,12 @@ pub struct TrainConfig {
     pub train_batch_size: usize,
     /// Learning rate.
     pub lr: f64,
-    /// Number of most-recent iterations kept in the replay buffer.
-    pub replay_window: usize,
+    /// Fresh self-play samples to collect before triggering a training step.
+    pub train_samples_per_iter: usize,
+    /// Maximum samples retained in the replay buffer. Oldest games evicted first.
+    pub replay_buffer_samples: usize,
+    /// Number of games to reanalyze per iteration (0 = disabled).
+    pub reanalyze_games: usize,
     /// Iterations over which MCTS sims ramp from `mcts_sims_start` to `mcts_sims`
     /// and the value target transitions from pure Z (game outcome) toward Q
     /// (search value), capped at `q_weight_max`. 0 = no ramp.
@@ -40,8 +50,6 @@ pub struct TrainConfig {
     pub q_weight_max: f32,
 
     // -- Self-play --
-    /// Self-play games generated per iteration.
-    pub games_per_iter: usize,
     /// Maximum async game tasks running concurrently during self-play.
     pub concurrent_games: usize,
     /// Maximum evaluations per GPU forward pass. Also determines the
@@ -109,12 +117,13 @@ impl Default for TrainConfig {
             epochs: 3,
             train_batch_size: 1024,
             lr: 0.001,
-            replay_window: 10,
+            train_samples_per_iter: 20_000,
+            replay_buffer_samples: 200_000,
+            reanalyze_games: 0,
             warmup_iters: 100,
             q_weight_max: 0.85,
 
             // Self-play
-            games_per_iter: 200,
             concurrent_games: 256,
             inference_batch_size: 1024,
             explore_moves: 30,

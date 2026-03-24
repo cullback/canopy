@@ -1,3 +1,10 @@
+//! Burn backend: `TrainableModel` implementation, loss computation, and device selection.
+//!
+//! Implements `TrainableModel` for any Burn model that satisfies `PolicyValueNet`.
+//! Handles backend selection (CUDA > WGPU > ndarray), optimizer setup (AdamW),
+//! train/val splitting, gradient steps with clipping, and checkpoint
+//! serialization via Burn's recorder.
+
 use std::path::Path;
 use std::sync::Arc;
 

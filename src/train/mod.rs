@@ -1,12 +1,19 @@
+//! Training coordinator: owns the main loop, shared types, and public API.
+//!
+//! Wires together all other `train::*` modules. Sets up persistent inference
+//! servers and worker tasks once, then loops: collect samples → train →
+//! swap evaluators → repeat. Also defines the types that cross module
+//! boundaries (`Sample`, `TrainStepConfig`, `TrainMetrics`, `TrainableModel`).
+
 mod burn_backend;
 mod checkpoint;
 pub mod config;
 mod game;
 pub mod inference;
 mod metrics;
+mod replay_buffer;
 mod self_play;
 
-use std::collections::VecDeque;
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Instant;
@@ -171,42 +178,170 @@ pub fn run_training<G>(
     checkpoint::save_config(&run_dir, &config);
 
     let mut csv = metrics::CsvLogger::open(&run_dir, start_iteration);
-    let mut replay_buffer: VecDeque<Vec<Sample>> = VecDeque::new();
     let training_start = Instant::now();
 
+    // === Setup (once) ===
+
+    // 1. Create PauseControl for GPU 0
+    let pause_control = Arc::new(inference::PauseControl::new());
+
+    // 2. Create InferenceServer per GPU (GPU 0 gets pause)
+    let evaluators = model.evaluators(encoder.clone(), config.inference_workers);
+    let mut servers = Vec::with_capacity(evaluators.len());
+    for (i, eval) in evaluators.into_iter().enumerate() {
+        let pause = if i == 0 {
+            Some(pause_control.clone())
+        } else {
+            None
+        };
+        servers.push(inference::InferenceServer::start::<G>(
+            eval,
+            config.inference_batch_size,
+            pause,
+        ));
+    }
+
+    // 3. Create tokio runtime (persistent)
+    let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+
+    // 4. Create per-worker channels + unbounded result channel
+    let num_workers = config.concurrent_games;
+    let (result_tx, mut result_rx) = tokio::sync::mpsc::unbounded_channel();
+
+    // Per-worker work channels (bounded capacity 2 for backpressure)
+    let mut work_txs: Vec<tokio::sync::mpsc::Sender<self_play::WorkItem>> =
+        Vec::with_capacity(num_workers);
+
+    let mcts_config = crate::mcts::Config {
+        num_simulations: config.mcts_sims, // overridden per-game by effective_sims
+        num_sampled_actions: config.gumbel_m,
+        c_visit: config.c_visit,
+        c_scale: config.c_scale,
+        leaf_batch_size: config.leaf_batch_size,
+        ..Default::default()
+    };
+
+    let actor_config = Arc::new(game::ActorConfig {
+        explore_moves: config.explore_moves,
+        playout_cap_full_prob: config.playout_cap_full_prob,
+        playout_cap_fast_sims_base: config.playout_cap_fast_sims,
+        num_aux_targets: config.aux_value_horizons.len(),
+        aux_value_horizons: config.aux_value_horizons.clone(),
+        surprise_weight_fraction: config.surprise_weight_fraction,
+    });
+
+    // 5. Spawn persistent worker tasks (round-robin GPU assignment)
+    let mut worker_handles = Vec::with_capacity(num_workers);
+    for i in 0..num_workers {
+        let (tx, rx) = tokio::sync::mpsc::channel(2);
+        work_txs.push(tx);
+
+        let server_idx = i % servers.len();
+        let request_tx = servers[server_idx].sender();
+        let result_tx = result_tx.clone();
+        let encoder = encoder.clone();
+        let actor_config = actor_config.clone();
+        let mcts_config = mcts_config.clone();
+        let new_state = new_state.clone();
+        let worker_seed = rng.u64(..);
+
+        worker_handles.push(rt.spawn(self_play::worker_loop::<G>(
+            rx,
+            result_tx,
+            request_tx,
+            encoder,
+            actor_config,
+            mcts_config,
+            new_state,
+            worker_seed,
+        )));
+    }
+    // Drop our copy so unbounded channel closes when all workers finish
+    drop(result_tx);
+
+    // 6. Create ReplayBuffer
+    let mut replay_buffer = replay_buffer::ReplayBuffer::new(config.replay_buffer_samples);
+
+    // === Main loop ===
     for iteration in start_iteration..config.iterations {
         let iter_start = Instant::now();
         let effective_sims = progressive_sims(&config, iteration);
-        let evaluators = model.evaluators(encoder.clone(), config.inference_workers);
 
-        // Self-play
-        let sp = self_play::run_self_play_iteration(
-            evaluators,
-            encoder.clone(),
-            &config,
-            effective_sims,
-            iteration,
-            &mut rng,
-            &new_state,
-        );
-        let self_play_elapsed = iter_start.elapsed();
-        let games_done = sp.wins + sp.losses + sp.draws;
-        let samples_this_iter = sp.samples.len();
-        let num_tasks = sp.num_tasks;
-        let avg_batch_size = sp.avg_batch_size();
+        // Keep work queues fed
+        refill_work_queues(&work_txs, effective_sims, &mut rng);
 
-        // Stats
-        let stats = metrics::compute_iter_stats(&sp.samples);
-
-        // Train
-        let train_start = Instant::now();
-        replay_buffer.push_back(sp.samples);
-        while replay_buffer.len() > config.replay_window {
-            replay_buffer.pop_front();
+        // Collect results until sample threshold
+        let mut fresh_samples = 0usize;
+        let mut collected_games = Vec::new();
+        while fresh_samples < config.train_samples_per_iter {
+            match result_rx.blocking_recv() {
+                Some(self_play::WorkResult::SelfPlay(mut record)) => {
+                    fresh_samples += record.samples.len();
+                    record.iteration_analyzed = iteration;
+                    collected_games.push(record);
+                }
+                Some(self_play::WorkResult::Reanalyze { game_id, samples }) => {
+                    replay_buffer.replace_samples(game_id, samples, iteration);
+                }
+                None => panic!("all workers died unexpectedly"),
+            }
+            // Keep queues fed while collecting
+            refill_work_queues(&work_txs, effective_sims, &mut rng);
         }
-        let mut samples: Vec<&Sample> = replay_buffer.iter().flat_map(|v| v.iter()).collect();
+        // No drain. In-flight results buffer in the channel for next iteration.
+
+        let self_play_elapsed = iter_start.elapsed();
+        let games_done = collected_games.len();
+        let samples_this_iter = collected_games
+            .iter()
+            .map(|g| g.samples.len())
+            .sum::<usize>();
+
+        // Compute game stats before pushing to buffer
+        let sp = self_play::IterGameResults::aggregate(&collected_games);
+
+        // Push new games to replay buffer
+        replay_buffer.push_games(collected_games);
+
+        // Submit reanalyze work (phased)
+        if config.reanalyze_games > 0 {
+            let reanalyze_items =
+                replay_buffer.select_for_reanalyze(config.reanalyze_games, iteration, &mut rng);
+            let mut next_worker = 0;
+            for (game_id, seed, actions, reward) in reanalyze_items {
+                let item = self_play::WorkItem::Reanalyze {
+                    game_id,
+                    seed,
+                    actions,
+                    reward,
+                    effective_sims,
+                };
+                // Round-robin across workers
+                let _ = work_txs[next_worker].blocking_send(item);
+                next_worker = (next_worker + 1) % work_txs.len();
+            }
+        }
+
+        // Stats from fresh samples
+        let fresh_sample_refs: Vec<&Sample> = replay_buffer
+            .games()
+            .iter()
+            .rev()
+            .take(games_done)
+            .flat_map(|g| g.samples.iter())
+            .collect();
+        let stats = metrics::compute_iter_stats(&fresh_sample_refs);
+
+        // Pause GPU 0 → train → swap evaluators → resume
+        let train_start = Instant::now();
+        pause_control.pause();
+
+        let mut all_samples: Vec<&Sample> = replay_buffer.all_samples();
         let q_weight = q_weight(&config, iteration + 1) as f32;
-        fastrand::shuffle(&mut samples);
+        fastrand::shuffle(&mut all_samples);
         let step_cfg = TrainStepConfig {
             lr: config.lr,
             train_batch_size: config.train_batch_size,
@@ -218,7 +353,15 @@ pub fn run_training<G>(
             aux_value_weight: config.aux_value_weight,
             num_aux_targets: config.aux_value_horizons.len(),
         };
-        let train_metrics = model.train_step(&samples, &step_cfg);
+        let train_metrics = model.train_step(&all_samples, &step_cfg);
+
+        // Swap evaluators on all servers
+        let new_evals = model.evaluators(encoder.clone(), config.inference_workers);
+        for (server, eval) in servers.iter().zip(new_evals) {
+            server.swap_infer_fn(inference::make_infer_fn::<G>(eval));
+        }
+
+        pause_control.resume();
         let train_elapsed = train_start.elapsed();
 
         // Checkpoint
@@ -235,25 +378,25 @@ pub fn run_training<G>(
         let iters_remaining = config.iterations - iters_done;
         let avg_iter_time = total_elapsed / iters_this_session as u32;
         let eta = avg_iter_time * iters_remaining as u32;
-        let avg_turns = if games_done > 0 {
-            sp.total_turns / games_done
+        let avg_turns = if sp.wins + sp.losses + sp.draws > 0 {
+            sp.total_turns / (sp.wins + sp.losses + sp.draws)
         } else {
             0
         };
+        let num_games_total = sp.wins + sp.losses + sp.draws;
 
         info!(
-            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples, entropy={:.6} | tasks={}, avg_batch={:.1} | self-play {}, train {} | total {}, ETA {}",
+            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples (buffer: {} samples, {} games) | self-play {}, train {} | total {}, ETA {}",
             iters_done,
             config.iterations,
-            games_done,
+            num_games_total,
             sp.wins,
             sp.losses,
             sp.draws,
             avg_turns,
-            samples.len(),
-            stats.policy_entropy_avg,
-            num_tasks,
-            avg_batch_size,
+            all_samples.len(),
+            replay_buffer.total_samples(),
+            replay_buffer.len(),
             HumanDuration(self_play_elapsed),
             HumanDuration(train_elapsed),
             HumanDuration(total_elapsed),
@@ -262,8 +405,8 @@ pub fn run_training<G>(
 
         // CSV
         let min_game_length = sp.min_game_length.unwrap_or(0);
-        let avg_game_length = if games_done > 0 {
-            sp.total_turns as f64 / games_done as f64
+        let avg_game_length = if num_games_total > 0 {
+            sp.total_turns as f64 / num_games_total as f64
         } else {
             0.0
         };
@@ -322,10 +465,45 @@ pub fn run_training<G>(
             lr: config.lr,
             q_weight,
             mcts_sims: effective_sims,
-            replay_samples: samples.len(),
+            replay_samples: all_samples.len(),
             samples_iter: samples_this_iter,
+            reanalyze_games: config.reanalyze_games,
+            replay_buffer_games: replay_buffer.len(),
             time_selfplay_secs: self_play_elapsed.as_secs_f64(),
             time_train_secs: train_elapsed.as_secs_f64(),
         });
+    }
+
+    // === Shutdown ===
+    for tx in &work_txs {
+        let _ = tx.blocking_send(self_play::WorkItem::Shutdown);
+    }
+    drop(work_txs);
+    rt.block_on(async {
+        for h in worker_handles {
+            let _ = h.await;
+        }
+    });
+    for server in servers {
+        server.shutdown();
+    }
+}
+
+fn refill_work_queues(
+    work_txs: &[tokio::sync::mpsc::Sender<self_play::WorkItem>],
+    effective_sims: u32,
+    rng: &mut fastrand::Rng,
+) {
+    for tx in work_txs {
+        // Fill each worker's queue until full (capacity 2)
+        loop {
+            match tx.try_send(self_play::WorkItem::SelfPlay {
+                seed: rng.u64(..),
+                effective_sims,
+            }) {
+                Ok(()) => {}
+                Err(_) => break,
+            }
+        }
     }
 }

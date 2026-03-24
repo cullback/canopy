@@ -197,10 +197,22 @@ pub fn train_command() -> Command {
                 .default_value(d.iterations.to_string()),
         )
         .arg(
-            Arg::new("games")
-                .long("games")
-                .default_value(d.games_per_iter.to_string())
-                .help("Self-play games per iteration"),
+            Arg::new("train-samples")
+                .long("train-samples")
+                .default_value(d.train_samples_per_iter.to_string())
+                .help("Fresh self-play samples to collect before each training step"),
+        )
+        .arg(
+            Arg::new("replay-buffer-samples")
+                .long("replay-buffer-samples")
+                .default_value(d.replay_buffer_samples.to_string())
+                .help("Maximum samples retained in the replay buffer"),
+        )
+        .arg(
+            Arg::new("reanalyze-games")
+                .long("reanalyze-games")
+                .default_value(d.reanalyze_games.to_string())
+                .help("Games to reanalyze per iteration (0 = disabled)"),
         )
         .arg(
             Arg::new("concurrent-games")
@@ -233,11 +245,6 @@ pub fn train_command() -> Command {
                 .help("Maximum evaluations per GPU forward pass during self-play"),
         )
         .arg(Arg::new("lr").long("lr").default_value(d.lr.to_string()))
-        .arg(
-            Arg::new("replay-window")
-                .long("replay-window")
-                .default_value(d.replay_window.to_string()),
-        )
         .arg(
             Arg::new("output")
                 .long("output")
@@ -737,8 +744,14 @@ pub fn parse_train_config(
     if set("iterations") {
         config.iterations = val("iterations").parse().unwrap();
     }
-    if set("games") {
-        config.games_per_iter = val("games").parse().unwrap();
+    if set("train-samples") {
+        config.train_samples_per_iter = val("train-samples").parse().unwrap();
+    }
+    if set("replay-buffer-samples") {
+        config.replay_buffer_samples = val("replay-buffer-samples").parse().unwrap();
+    }
+    if set("reanalyze-games") {
+        config.reanalyze_games = val("reanalyze-games").parse().unwrap();
     }
     if set("concurrent-games") {
         config.concurrent_games = val("concurrent-games").parse().unwrap();
@@ -757,9 +770,6 @@ pub fn parse_train_config(
     }
     if set("lr") {
         config.lr = val("lr").parse().unwrap();
-    }
-    if set("replay-window") {
-        config.replay_window = val("replay-window").parse().unwrap();
     }
     if set("output") {
         config.output_dir = val("output").into();

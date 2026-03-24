@@ -1,3 +1,9 @@
+//! Checkpoint save/load and run directory management.
+//!
+//! Handles resuming from a checkpoint (restoring model weights, optimizer
+//! state, and RNG seed), creating timestamped run directories, saving
+//! config snapshots, and writing model checkpoints with metadata.
+
 use std::path::PathBuf;
 
 use serde::Serialize;
@@ -60,8 +66,8 @@ pub(super) fn setup_run_dir(config: &TrainConfig) -> PathBuf {
             .unwrap()
             .as_secs();
         let run_name = format!(
-            "{ts}_mcts{}_g{}_lr{}",
-            config.mcts_sims, config.games_per_iter, config.lr,
+            "{ts}_mcts{}_s{}_lr{}",
+            config.mcts_sims, config.train_samples_per_iter, config.lr,
         );
         let dir = config.output_dir.join(&run_name);
         std::fs::create_dir_all(&dir).expect("failed to create run directory");
