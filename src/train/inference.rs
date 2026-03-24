@@ -17,9 +17,16 @@ use crate::game::Game;
 
 /// A pre-encoded inference request sent from an async game task to the batcher.
 /// Game-independent: carries raw features, not game states.
-/// May contain multiple samples (a leaf batch) in a single request.
+///
+/// A single request may contain multiple samples (e.g. `leaf_batch_size`
+/// leaves from one MCTS step), packed contiguously in `flat_features`.
 pub struct InferRequest {
+    /// `[batch_size * feature_size]` floats — one or more encoded states
+    /// packed contiguously.
     pub flat_features: Vec<f32>,
+    /// Number of samples in `flat_features`. The batcher derives
+    /// `feature_size = flat_features.len() / batch_size` and uses this
+    /// count to aggregate samples across requests and slice responses.
     pub batch_size: usize,
     pub response_tx: tokio::sync::oneshot::Sender<InferResponse>,
 }
