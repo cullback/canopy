@@ -304,13 +304,23 @@ pub fn run_training<G>(
                     if elapsed_secs > 0.5 {
                         let evals_now: u64 =
                             servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+                        let batches_now: u64 = servers
+                            .iter()
+                            .map(|s| s.stats().batches.load(Relaxed))
+                            .sum();
                         let evals_per_sec = (evals_now - stats_start_evals) as f64 / elapsed_secs;
+                        let avg_batch = if batches_now == 0 {
+                            0.0
+                        } else {
+                            evals_now as f64 / batches_now as f64
+                        };
                         sp_span.pb_set_message(&format!(
-                            "iter {}/{} sims={} | {:.0} evals/s",
+                            "iter {}/{} sims={} | {:.0} evals/s, avg batch {:.0}",
                             iteration + 1,
                             config.iterations,
                             effective_sims,
-                            evals_per_sec
+                            evals_per_sec,
+                            avg_batch
                         ));
                     }
                 }
