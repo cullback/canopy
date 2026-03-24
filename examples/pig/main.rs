@@ -79,16 +79,17 @@ fn main() {
     setup.add_config(
         "default",
         TrainConfig {
-            iterations: 200,
+            iterations: 100,
             train_samples_per_iter: 3_000,
             replay_buffer_samples: 30_000,
+            // max_moves: 500,
             mcts_sims: 200,
             mcts_sims_start: 50,
             epochs: 3,
             train_batch_size: 128,
             warmup_iters: 20,
-            concurrent_games: 10,
-            leaf_batch_size: 1,
+            concurrent_games: 100,
+            // leaf_batch_size: 1,
             explore_moves: 10,
             ..TrainConfig::default()
         },

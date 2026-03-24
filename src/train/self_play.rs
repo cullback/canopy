@@ -21,7 +21,7 @@ pub(super) struct IterGameResults {
     pub wins: u32,
     pub losses: u32,
     pub draws: u32,
-    pub total_turns: u32,
+    pub total_actions: u32,
     pub min_game_length: Option<u32>,
     pub max_game_length: u32,
     pub game_length_stddev: f64,
@@ -32,15 +32,15 @@ impl IterGameResults {
         let mut wins = 0u32;
         let mut losses = 0u32;
         let mut draws = 0u32;
-        let mut total_turns = 0u32;
-        let mut sum_turns_sq = 0u64;
+        let mut total_actions = 0u32;
+        let mut sum_actions_sq = 0u64;
         let mut min_game_length: Option<u32> = None;
         let mut max_game_length = 0u32;
 
         for game in games {
             let game_len = game.samples.last().map_or(0, |s| s.game_length);
-            total_turns += game_len;
-            sum_turns_sq += (game_len as u64) * (game_len as u64);
+            total_actions += game_len;
+            sum_actions_sq += (game_len as u64) * (game_len as u64);
             min_game_length = Some(min_game_length.map_or(game_len, |m: u32| m.min(game_len)));
             max_game_length = max_game_length.max(game_len);
             if game.reward > 0.0 {
@@ -54,8 +54,8 @@ impl IterGameResults {
 
         let num_games = wins + losses + draws;
         let game_length_stddev = if num_games > 0 {
-            let mean = total_turns as f64 / num_games as f64;
-            let var = sum_turns_sq as f64 / num_games as f64 - mean * mean;
+            let mean = total_actions as f64 / num_games as f64;
+            let var = sum_actions_sq as f64 / num_games as f64 - mean * mean;
             var.max(0.0).sqrt()
         } else {
             0.0
@@ -65,7 +65,7 @@ impl IterGameResults {
             wins,
             losses,
             draws,
-            total_turns,
+            total_actions,
             min_game_length,
             max_game_length,
             game_length_stddev,

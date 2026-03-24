@@ -3,8 +3,7 @@
 //! Pure game logic — no channels, batching, or GPU knowledge. Leaf evaluation
 //! is delegated to a caller-provided async `infer` closure. Handles chance
 //! nodes, forced moves, MCTS search, playout cap randomization, training
-//! sample collection, and post-game processing (surprise weights, short-term
-//! value EMA targets).
+//! sample collection, and post-game processing (short-term value EMA targets).
 
 use std::future::Future;
 
@@ -17,12 +16,12 @@ use super::Sample;
 
 /// Per-game config knobs derived from [`super::TrainConfig`].
 pub(super) struct ActorConfig {
+    pub max_moves: u32,
     pub explore_moves: u32,
     pub playout_cap_full_prob: f32,
     pub playout_cap_fast_sims_base: u32,
     pub num_aux_targets: usize,
     pub aux_value_horizons: Vec<u32>,
-    pub surprise_weight_fraction: f32,
 }
 
 /// Result of a single self-play game.
@@ -96,7 +95,7 @@ fn make_sample(
     features: Vec<f32>,
     sign: f32,
     is_full_search: bool,
-    turn_count: u32,
+    action_count: u32,
     num_aux_targets: usize,
 ) -> Sample {
     let q_wdl = if sign > 0.0 {
@@ -135,36 +134,30 @@ fn make_sample(
         z: sign,
         q_wdl,
         full_search: is_full_search,
-        move_number: turn_count,
+        move_number: action_count,
         game_length: 0, // backfilled at game end
         network_value: result.network_value * sign,
         value_correction,
         q_std,
         prior_agrees,
         policy_surprise,
-        surprise_weight: 1.0,
         aux_targets: vec![0.0; num_aux_targets].into_boxed_slice(),
     }
 }
 
-/// Post-process samples after game completion: short-term value targets,
-/// surprise weights, and z *= reward.
+/// Post-process samples after game completion: short-term value targets and z *= reward.
 fn finalize_samples(
     samples: &mut [Sample],
     reward: f32,
-    turn_count: u32,
+    action_count: u32,
     aux_value_horizons: &[u32],
-    surprise_weight_fraction: f32,
 ) {
     if !aux_value_horizons.is_empty() {
         compute_short_term_values(samples, aux_value_horizons);
     }
-    if surprise_weight_fraction > 0.0 {
-        normalize_surprise_weights(samples, surprise_weight_fraction);
-    }
     for s in samples {
         s.z *= reward;
-        s.game_length = turn_count;
+        s.game_length = action_count;
     }
 }
 
@@ -194,8 +187,6 @@ where
 {
     let feature_size = encoder.feature_size();
     let mut samples: Vec<Sample> = Vec::new();
-    let mut turn_count: u32 = 0;
-    let mut last_sign: Option<f32> = None;
     let mut actions_buf = Vec::new();
     let mut encode_buf = Vec::with_capacity(feature_size);
     let mut all_actions: Vec<usize> = Vec::new();
@@ -209,13 +200,21 @@ where
         }
 
         // Terminal check
-        if let Status::Terminal(reward) = search.state().status() {
+        let (terminated, reward) = match search.state().status() {
+            Status::Terminal(reward) => (true, reward),
+            _ if actor_config.max_moves > 0
+                && all_actions.len() as u32 >= actor_config.max_moves =>
+            {
+                (true, 0.0)
+            }
+            _ => (false, 0.0),
+        };
+        if terminated {
             finalize_samples(
                 &mut samples,
                 reward,
-                turn_count,
+                all_actions.len() as u32,
                 &actor_config.aux_value_horizons,
-                actor_config.surprise_weight_fraction,
             );
             return GameResult {
                 samples,
@@ -226,12 +225,6 @@ where
         }
 
         let sign = search.state().current_sign();
-
-        // Track turn count via player changes
-        if last_sign != Some(sign) {
-            turn_count += 1;
-            last_sign = Some(sign);
-        }
 
         // Skip forced moves (single legal action)
         actions_buf.clear();
@@ -258,7 +251,7 @@ where
         let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
 
         // Choose action (exploration vs exploitation)
-        let chosen = if turn_count <= actor_config.explore_moves {
+        let chosen = if (all_actions.len() as u32) < actor_config.explore_moves {
             sample_from_policy(&result.policy, rng)
         } else {
             result.selected_action
@@ -269,7 +262,7 @@ where
             features_buf,
             sign,
             is_full_search,
-            turn_count,
+            all_actions.len() as u32,
             actor_config.num_aux_targets,
         ));
 
@@ -303,8 +296,6 @@ where
 {
     let feature_size = encoder.feature_size();
     let mut samples: Vec<Sample> = Vec::new();
-    let mut turn_count: u32 = 0;
-    let mut last_sign: Option<f32> = None;
     let mut actions_buf = Vec::new();
     let mut chance_buf = Vec::new();
     let mut encode_buf = Vec::with_capacity(feature_size);
@@ -332,12 +323,6 @@ where
 
         let sign = search.state().current_sign();
 
-        // Track turn count via player changes
-        if last_sign != Some(sign) {
-            turn_count += 1;
-            last_sign = Some(sign);
-        }
-
         // Skip forced moves
         actions_buf.clear();
         search.state().legal_actions(&mut actions_buf);
@@ -362,7 +347,7 @@ where
             features_buf,
             sign,
             true,
-            turn_count,
+            action_idx as u32,
             actor_config.num_aux_targets,
         ));
 
@@ -375,9 +360,8 @@ where
     finalize_samples(
         &mut samples,
         reward,
-        turn_count,
+        actions.len() as u32,
         &actor_config.aux_value_horizons,
-        actor_config.surprise_weight_fraction,
     );
 
     samples
@@ -397,36 +381,6 @@ fn compute_kl(target: &[f32], prior: &[f32]) -> f32 {
         }
     }
     kl
-}
-
-/// Normalize surprise weights across a game's samples.
-///
-/// Full-search samples: w = (1-f)/N + f * kl / total_kl
-/// Fast-search samples: w = (1-f)/N
-fn normalize_surprise_weights(samples: &mut [Sample], fraction: f32) {
-    let n_full = samples.iter().filter(|s| s.full_search).count();
-    if n_full == 0 {
-        return;
-    }
-    let total_kl: f32 = samples
-        .iter()
-        .filter(|s| s.full_search)
-        .map(|s| s.policy_surprise)
-        .sum();
-    let n = n_full as f32;
-    let uniform = (1.0 - fraction) / n;
-    for s in samples.iter_mut() {
-        if s.full_search {
-            let surprise_part = if total_kl > 0.0 {
-                fraction * s.policy_surprise / total_kl
-            } else {
-                fraction / n
-            };
-            s.surprise_weight = uniform + surprise_part;
-        } else {
-            s.surprise_weight = (1.0 - fraction) / n;
-        }
-    }
 }
 
 /// Compute EMA short-term value targets, backwards through the game.

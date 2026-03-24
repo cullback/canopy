@@ -57,6 +57,9 @@ pub struct TrainConfig {
     /// Maximum evaluations per GPU forward pass. Also determines the
     /// eval request queue capacity (2x this value).
     pub inference_batch_size: usize,
+    /// Terminate games exceeding this many actions (including chance nodes) as a
+    /// draw (reward = 0). 0 = no limit.
+    pub max_moves: u32,
     /// Early-game turns where action is sampled from improved policy
     /// (for exploration diversity). After this, the best action is used deterministically.
     pub explore_moves: u32,
@@ -96,10 +99,6 @@ pub struct TrainConfig {
     /// Weight of soft policy loss.
     pub soft_policy_weight: f32,
 
-    // -- Policy surprise weighting --
-    /// Fraction of weight budget allocated proportionally to surprise (0.0 = disabled).
-    pub surprise_weight_fraction: f32,
-
     // -- Auxiliary short-term value heads --
     /// EMA horizons for auxiliary value heads (empty = disabled). E.g. [6, 16, 50].
     pub aux_value_horizons: Vec<u32>,
@@ -129,6 +128,7 @@ impl Default for TrainConfig {
             // Self-play
             concurrent_games: 256,
             inference_batch_size: 1024,
+            max_moves: 0,
             explore_moves: 30,
             playout_cap_full_prob: 0.25,
             playout_cap_fast_sims: 64,
@@ -139,7 +139,7 @@ impl Default for TrainConfig {
             gumbel_m: 16,
             c_visit: 50.0,
             c_scale: 1.0,
-            leaf_batch_size: 32,
+            leaf_batch_size: 16,
 
             // Checkpointing
             checkpoint_interval: 1,
@@ -149,9 +149,6 @@ impl Default for TrainConfig {
             // Soft policy
             soft_policy_temperature: 4.0,
             soft_policy_weight: 8.0,
-
-            // Policy surprise weighting
-            surprise_weight_fraction: 0.5,
 
             // Auxiliary short-term value heads
             aux_value_horizons: vec![],

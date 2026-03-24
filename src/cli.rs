@@ -290,6 +290,12 @@ pub fn train_command() -> Command {
                 .help("Leaves to collect per MCTS batch before requesting evaluation"),
         )
         .arg(
+            Arg::new("max-moves")
+                .long("max-moves")
+                .default_value(d.max_moves.to_string())
+                .help("Terminate games exceeding this many actions as a draw (0 = no limit)"),
+        )
+        .arg(
             Arg::new("explore-moves")
                 .long("explore-moves")
                 .default_value(d.explore_moves.to_string())
@@ -795,6 +801,9 @@ pub fn parse_train_config(
     }
     if set("leaf-batch-size") {
         config.leaf_batch_size = val("leaf-batch-size").parse().unwrap();
+    }
+    if set("max-moves") {
+        config.max_moves = val("max-moves").parse().unwrap();
     }
     if set("explore-moves") {
         config.explore_moves = val("explore-moves").parse().unwrap();

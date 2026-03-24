@@ -44,6 +44,7 @@ fn main() {
             iterations: 1000,
             train_samples_per_iter: 50_000,
             replay_buffer_samples: 300_000,
+            max_moves: 5000,
             epochs: 1,
             lr: 0.0005,
             mcts_sims: 3000,

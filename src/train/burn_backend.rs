@@ -80,8 +80,6 @@ struct BatchTensors<B: Backend> {
     num_full: usize,
     /// Soft policy target (raised to 1/T and renormalized). None if T=0.
     soft_policy_targets: Option<Tensor<B, 2>>,
-    /// Surprise weights [batch, 1]. None if surprise weighting disabled.
-    surprise_weights: Option<Tensor<B, 2>>,
     /// Auxiliary value targets [batch, num_aux]. None if no aux heads.
     aux_value_targets: Option<Tensor<B, 2>>,
 }
@@ -166,17 +164,6 @@ fn prepare_batch<B: Backend>(
         None
     };
 
-    // Surprise weights
-    let surprise_weights = if cfg.surprise_weight_fraction > 0.0 {
-        let w_data: Vec<f32> = samples.iter().map(|s| s.surprise_weight).collect();
-        Some(Tensor::<B, 2>::from_data(
-            TensorData::new(w_data, [bs, 1]),
-            device,
-        ))
-    } else {
-        None
-    };
-
     // Auxiliary value targets
     let aux_value_targets = if cfg.num_aux_targets > 0 {
         let aux_data: Vec<f32> = samples
@@ -198,7 +185,6 @@ fn prepare_batch<B: Backend>(
         mask: mask_tensor,
         num_full,
         soft_policy_targets,
-        surprise_weights,
         aux_value_targets,
     }
 }
@@ -232,22 +218,15 @@ fn compute_batch_losses<B: Backend>(
         1.0
     };
 
-    // Apply surprise weights if enabled
-    let weighted_ce = if let Some(ref sw) = batch.surprise_weights {
-        per_sample_ce.mul(sw.clone())
-    } else {
-        per_sample_ce
-    };
-    let policy_loss = weighted_ce.mul(batch.mask.clone()).sum().div_scalar(denom);
+    let policy_loss = per_sample_ce
+        .mul(batch.mask.clone())
+        .sum()
+        .div_scalar(denom);
 
     // Value loss: cross-entropy with WDL target
     let log_wdl = log_softmax(value_pred, 1); // [batch, 3]
     let per_sample_ce_value = batch.value_targets.clone().mul(log_wdl).sum_dim(1).neg(); // [batch, 1]
-    let wdl_loss = if let Some(ref sw) = batch.surprise_weights {
-        per_sample_ce_value.mul(sw.clone()).mean()
-    } else {
-        per_sample_ce_value.mean()
-    };
+    let wdl_loss = per_sample_ce_value.mean();
 
     let pl = policy_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
     let wl = wdl_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
@@ -260,15 +239,7 @@ fn compute_batch_losses<B: Backend>(
     {
         let soft_log_probs = log_softmax(soft_logits, 1);
         let soft_ce = soft_targets.clone().mul(soft_log_probs).sum_dim(1).neg(); // [batch, 1]
-        let soft_ce_weighted = if let Some(ref sw) = batch.surprise_weights {
-            soft_ce.mul(sw.clone())
-        } else {
-            soft_ce
-        };
-        let soft_loss = soft_ce_weighted
-            .mul(batch.mask.clone())
-            .sum()
-            .div_scalar(denom);
+        let soft_loss = soft_ce.mul(batch.mask.clone()).sum().div_scalar(denom);
         let sl = soft_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
         total_loss = total_loss.add(soft_loss.mul_scalar(cfg.soft_policy_weight));
         sl
@@ -283,11 +254,7 @@ fn compute_batch_losses<B: Backend>(
         let diff = aux_preds.sub(aux_targets.clone()); // [batch, num_aux]
         let sq_diff = diff.powf_scalar(2.0); // [batch, num_aux]
         let per_sample_aux_mse = sq_diff.clone().mean_dim(1); // [batch, 1]
-        let aux_loss = if let Some(ref sw) = batch.surprise_weights {
-            per_sample_aux_mse.mul(sw.clone()).mean()
-        } else {
-            per_sample_aux_mse.mean()
-        };
+        let aux_loss = per_sample_aux_mse.mean();
         let al = aux_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
         total_loss = total_loss.add(aux_loss.mul_scalar(cfg.aux_value_weight));
         // Per-horizon MSE (mean over batch)

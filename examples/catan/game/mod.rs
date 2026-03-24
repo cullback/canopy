@@ -26,7 +26,6 @@ use resource::{
 use state::{GameState, Phase};
 
 const VP_TO_WIN: u8 = 15;
-const MAX_TURNS: u16 = 400;
 pub(crate) const DISCARD_THRESHOLD: u8 = 9;
 pub(crate) const FRIENDLY_ROBBER_VP: u8 = 3;
 
@@ -53,24 +52,7 @@ impl Game for GameState {
 
     fn status(&self) -> Status {
         match &self.phase {
-            Phase::GameOver(p) => {
-                let vp1 = self.total_vps(Player::One) as f32;
-                let vp2 = self.total_vps(Player::Two) as f32;
-                if vp1 >= VP_TO_WIN as f32 || vp2 >= VP_TO_WIN as f32 {
-                    // Decisive win
-                    Status::Terminal(p.sign())
-                } else {
-                    // Timed out — half score for the VP leader, 0 if tied
-                    let reward = if vp1 > vp2 {
-                        0.5
-                    } else if vp2 > vp1 {
-                        -0.5
-                    } else {
-                        0.0
-                    };
-                    Status::Terminal(reward)
-                }
-            }
+            Phase::GameOver(p) => Status::Terminal(p.sign()),
             _ => Status::Ongoing,
         }
     }
@@ -397,12 +379,6 @@ fn distribute_resources(state: &mut GameState, roll: u8) {
 
 fn apply_end_turn(state: &mut GameState) {
     state.turn_number += 1;
-
-    if state.turn_number >= MAX_TURNS {
-        // Timed out — status() will return a heuristic VP-difference reward.
-        state.phase = Phase::GameOver(Player::One);
-        return;
-    }
 
     let player = &mut state.players[state.current_player];
     for i in 0..5 {

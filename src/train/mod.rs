@@ -58,10 +58,8 @@ pub struct Sample {
     pub q_std: f32,
     /// Whether network's top-1 action matches MCTS selected action.
     pub prior_agrees: bool,
-    /// Raw KL(MCTS target || network prior). Used for policy surprise weighting.
+    /// Raw KL(MCTS target || network prior).
     pub policy_surprise: f32,
-    /// Pre-normalized per-game surprise weight (1.0 if disabled).
-    pub surprise_weight: f32,
     /// Short-term value targets (length = aux_value_horizons.len()).
     pub aux_targets: Box<[f32]>,
 }
@@ -77,8 +75,6 @@ pub struct TrainStepConfig {
     pub soft_policy_temperature: f32,
     /// Weight of soft policy loss.
     pub soft_policy_weight: f32,
-    /// Fraction of weight budget from surprise (0.0 = disabled).
-    pub surprise_weight_fraction: f32,
     /// Per-head weight for auxiliary value losses.
     pub aux_value_weight: f32,
     /// Number of auxiliary value targets per sample.
@@ -227,12 +223,12 @@ pub fn run_training<G>(
     };
 
     let actor_config = Arc::new(game::ActorConfig {
+        max_moves: config.max_moves,
         explore_moves: config.explore_moves,
         playout_cap_full_prob: config.playout_cap_full_prob,
         playout_cap_fast_sims_base: config.playout_cap_fast_sims,
         num_aux_targets: config.aux_value_horizons.len(),
         aux_value_horizons: config.aux_value_horizons.clone(),
-        surprise_weight_fraction: config.surprise_weight_fraction,
     });
 
     // 5. Spawn persistent worker tasks (round-robin GPU assignment)
@@ -328,8 +324,17 @@ pub fn run_training<G>(
         }
         // No drain. In-flight results buffer in the channel for next iteration.
         let evals_now: u64 = servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+        let batches_now: u64 = servers
+            .iter()
+            .map(|s| s.stats().batches.load(Relaxed))
+            .sum();
         let evals_per_sec =
             (evals_now - stats_start_evals) as f64 / iter_start.elapsed().as_secs_f64();
+        let avg_batch_size = if batches_now == 0 {
+            0.0
+        } else {
+            evals_now as f64 / batches_now as f64
+        };
         sp_span.pb_set_finish_message(&format!(
             "iter {}/{} sims={} | {:.0} evals/s  [{}]",
             iteration + 1,
@@ -396,7 +401,6 @@ pub fn run_training<G>(
             q_weight,
             soft_policy_temperature: config.soft_policy_temperature,
             soft_policy_weight: config.soft_policy_weight,
-            surprise_weight_fraction: config.surprise_weight_fraction,
             aux_value_weight: config.aux_value_weight,
             num_aux_targets: config.aux_value_horizons.len(),
         };
@@ -425,25 +429,31 @@ pub fn run_training<G>(
         let iters_remaining = config.iterations - iters_done;
         let avg_iter_time = total_elapsed / iters_this_session as u32;
         let eta = avg_iter_time * iters_remaining as u32;
-        let avg_turns = if sp.wins + sp.losses + sp.draws > 0 {
-            sp.total_turns / (sp.wins + sp.losses + sp.draws)
+        let num_games_total = sp.wins + sp.losses + sp.draws;
+        let avg_actions = if num_games_total > 0 {
+            sp.total_actions / num_games_total
         } else {
             0
         };
-        let num_games_total = sp.wins + sp.losses + sp.draws;
 
         info!(
-            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} turns) {} samples (buffer: {} samples, {} games) | self-play {}, train {} | total {}, ETA {}",
+            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} actions) {} samples (buffer: {} samples, {} games) | policy {:.4}/{:.4} wdl {:.4}/{:.4} | {:.0} evals/s, avg batch {:.1} | self-play {}, train {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             num_games_total,
             sp.wins,
             sp.losses,
             sp.draws,
-            avg_turns,
+            avg_actions,
             all_samples.len(),
             replay_buffer.total_samples(),
             replay_buffer.len(),
+            train_metrics.loss_policy_train,
+            train_metrics.loss_policy_val,
+            train_metrics.loss_wdl_train,
+            train_metrics.loss_wdl_val,
+            evals_per_sec,
+            avg_batch_size,
             HumanDuration(self_play_elapsed),
             HumanDuration(train_elapsed),
             HumanDuration(total_elapsed),
@@ -453,7 +463,7 @@ pub fn run_training<G>(
         // CSV
         let min_game_length = sp.min_game_length.unwrap_or(0);
         let avg_game_length = if num_games_total > 0 {
-            sp.total_turns as f64 / num_games_total as f64
+            sp.total_actions as f64 / num_games_total as f64
         } else {
             0.0
         };
