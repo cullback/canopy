@@ -135,9 +135,7 @@ pub enum Step<'a, G: Game> {
 /// 2. [`step`](Self::step) — the only stepping function.  Call with an
 ///    empty slice to start a search; feed evaluations back on subsequent
 ///    calls.  Returns [`Step::NeedsEval`] or [`Step::Done`].
-/// 3. [`pending_states`](Self::pending_states) — borrow the leaf states that
-///    need evaluation (valid after `NeedsEval`).
-/// 4. [`apply_action`](Self::apply_action) — mirror actions as they happen.
+/// 3. [`apply_action`](Self::apply_action) — mirror actions as they happen.
 ///
 /// The caller never touches the tree directly; all interaction goes through
 /// `Step`.
