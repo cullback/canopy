@@ -52,7 +52,7 @@ fn main() {
             leaf_batch_size: 8,
             concurrent_games: 256,
             gumbel_m: 16,
-            explore_actions: 48,
+            explore_actions: 16,
             q_weight_ramp_iters: 60,
             aux_value_horizons: vec![10, 30, 100],
             ..TrainConfig::default()
