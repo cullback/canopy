@@ -1,10 +1,10 @@
 //! Persistent worker tasks and work dispatch types.
 //!
-//! Each worker owns a `tokio::sync::mpsc` receiver and loops over `WorkItem`s
-//! (self-play or reanalyze), sending `WorkResult`s back to the coordinator.
-//! The coordinator round-robins work across per-worker senders — no shared
-//! receiver, no mutex. Also provides `IterGameResults` for aggregating
-//! game-level stats from a batch of `GameRecord`s.
+//! Each worker owns a `tokio::sync::mpsc` receiver and loops over `WorkItem`s,
+//! sending `GameRecord`s back to the coordinator. The coordinator round-robins
+//! work across per-worker senders — no shared receiver, no mutex. Also provides
+//! `IterGameResults` for aggregating game-level stats from a batch of
+//! `GameRecord`s.
 
 use std::sync::Arc;
 
@@ -12,7 +12,7 @@ use crate::game::Game;
 use crate::mcts::Search;
 use crate::nn::StateEncoder;
 
-use super::game::{ActorConfig, play_game, reanalyze_game};
+use super::game::{ActorConfig, play_game};
 use super::inference::InferRequest;
 use super::replay_buffer::GameRecord;
 
@@ -78,26 +78,8 @@ impl IterGameResults {
 // ---------------------------------------------------------------------------
 
 pub(super) enum WorkItem {
-    SelfPlay {
-        seed: u64,
-        effective_sims: u32,
-    },
-    Reanalyze {
-        game_id: u64,
-        seed: u64,
-        actions: Vec<usize>,
-        reward: f32,
-        effective_sims: u32,
-    },
+    SelfPlay { seed: u64, effective_sims: u32 },
     Shutdown,
-}
-
-pub(super) enum WorkResult {
-    SelfPlay(GameRecord),
-    Reanalyze {
-        game_id: u64,
-        samples: Vec<super::Sample>,
-    },
 }
 
 // ---------------------------------------------------------------------------
@@ -107,7 +89,7 @@ pub(super) enum WorkResult {
 /// Persistent worker task. Each worker owns its own mpsc receiver.
 pub(super) async fn worker_loop<G: Game + 'static>(
     mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
-    result_tx: tokio::sync::mpsc::UnboundedSender<WorkResult>,
+    result_tx: tokio::sync::mpsc::UnboundedSender<GameRecord>,
     request_tx: tokio::sync::mpsc::Sender<InferRequest>,
     encoder: Arc<dyn StateEncoder<G>>,
     actor_config: Arc<ActorConfig>,
@@ -124,8 +106,7 @@ pub(super) async fn worker_loop<G: Game + 'static>(
                 seed,
                 effective_sims,
             } => {
-                let game_seed = seed;
-                let state = (new_state)(game_seed);
+                let state = (new_state)(seed);
                 let fast_sims = actor_config.playout_cap_fast_sims_base.min(effective_sims);
 
                 // Reuse or create Search
@@ -160,80 +141,10 @@ pub(super) async fn worker_loop<G: Game + 'static>(
                         }
                     },
                     &mut rng,
-                    game_seed,
                 )
                 .await;
 
-                let mean_vc = if game.samples.is_empty() {
-                    0.0
-                } else {
-                    game.samples.iter().map(|s| s.value_correction).sum::<f32>()
-                        / game.samples.len() as f32
-                };
-
-                let record = GameRecord {
-                    id: 0, // assigned by ReplayBuffer
-                    seed: game.seed,
-                    actions: game.actions,
-                    reward: game.reward,
-                    samples: game.samples,
-                    mean_value_correction: mean_vc,
-                    iteration_analyzed: 0, // set by coordinator
-                };
-
-                if result_tx.send(WorkResult::SelfPlay(record)).is_err() {
-                    break;
-                }
-            }
-
-            WorkItem::Reanalyze {
-                game_id,
-                seed,
-                actions,
-                reward,
-                effective_sims,
-            } => {
-                let state = (new_state)(seed);
-
-                match &mut search {
-                    Some(s) => s.reset(state),
-                    None => {
-                        search = Some(Search::new(state, mcts_config.clone()));
-                    }
-                }
-                let s = search.as_mut().unwrap();
-
-                let tx = request_tx.clone();
-                let samples = reanalyze_game(
-                    s,
-                    effective_sims,
-                    &actor_config,
-                    &*encoder,
-                    |flat_features, batch_size| {
-                        let tx = tx.clone();
-                        async move {
-                            let (resp_tx, resp_rx) = tokio::sync::oneshot::channel();
-                            tx.send(InferRequest {
-                                flat_features,
-                                batch_size,
-                                response_tx: resp_tx,
-                            })
-                            .await
-                            .unwrap();
-                            let resp = resp_rx.await.unwrap();
-                            (resp.flat_policy_logits, resp.flat_wdl)
-                        }
-                    },
-                    &mut rng,
-                    &actions,
-                    reward,
-                )
-                .await;
-
-                if result_tx
-                    .send(WorkResult::Reanalyze { game_id, samples })
-                    .is_err()
-                {
+                if result_tx.send(game).is_err() {
                     break;
                 }
             }

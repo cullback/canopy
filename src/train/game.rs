@@ -1,4 +1,4 @@
-//! Single-game simulation: plays one self-play game or replays one for reanalyze.
+//! Single-game simulation: plays one self-play game.
 //!
 //! Pure game logic — no channels, batching, or GPU knowledge. Leaf evaluation
 //! is delegated to a caller-provided async `infer` closure. Handles chance
@@ -13,6 +13,7 @@ use crate::mcts::{Search, SearchResult, Step};
 use crate::nn::StateEncoder;
 
 use super::Sample;
+use super::replay_buffer::GameRecord;
 
 /// Per-game config knobs derived from [`super::TrainConfig`].
 pub(super) struct ActorConfig {
@@ -24,22 +25,13 @@ pub(super) struct ActorConfig {
     pub aux_value_horizons: Vec<u32>,
 }
 
-/// Result of a single self-play game.
-pub(super) struct GameResult {
-    pub samples: Vec<Sample>,
-    pub reward: f32,
-    pub actions: Vec<usize>,
-    pub seed: u64,
-}
-
 // ---------------------------------------------------------------------------
 // Shared helpers
 // ---------------------------------------------------------------------------
 
 /// Run MCTS search from the current position, returning the search result.
 ///
-/// Handles the step → encode → infer → parse loop that is shared between
-/// self-play and reanalyze.
+/// Handles the step → encode → infer → parse loop.
 async fn run_search<G, F, Fut>(
     search: &mut Search<G>,
     encoder: &dyn StateEncoder<G>,
@@ -178,8 +170,7 @@ pub(super) async fn play_game<G, F, Fut>(
     encoder: &dyn StateEncoder<G>,
     infer: F,
     rng: &mut fastrand::Rng,
-    game_seed: u64,
-) -> GameResult
+) -> GameRecord
 where
     G: Game,
     F: Fn(Vec<f32>, usize) -> Fut,
@@ -189,12 +180,12 @@ where
     let mut samples: Vec<Sample> = Vec::new();
     let mut actions_buf = Vec::new();
     let mut encode_buf = Vec::with_capacity(feature_size);
-    let mut all_actions: Vec<usize> = Vec::new();
+    let mut action_count: u32 = 0;
 
     loop {
         // Resolve chance nodes
         if let Some(action) = search.state().sample_chance(rng) {
-            all_actions.push(action);
+            action_count += 1;
             search.apply_action(action);
             continue;
         }
@@ -202,9 +193,7 @@ where
         // Terminal check
         let (terminated, reward) = match search.state().status() {
             Status::Terminal(reward) => (true, reward),
-            _ if actor_config.max_actions > 0
-                && all_actions.len() as u32 >= actor_config.max_actions =>
-            {
+            _ if actor_config.max_actions > 0 && action_count >= actor_config.max_actions => {
                 (true, 0.0)
             }
             _ => (false, 0.0),
@@ -213,15 +202,10 @@ where
             finalize_samples(
                 &mut samples,
                 reward,
-                all_actions.len() as u32,
+                action_count,
                 &actor_config.aux_value_horizons,
             );
-            return GameResult {
-                samples,
-                reward,
-                actions: all_actions,
-                seed: game_seed,
-            };
+            return GameRecord { reward, samples };
         }
 
         let sign = search.state().current_sign();
@@ -230,7 +214,7 @@ where
         actions_buf.clear();
         search.state().legal_actions(&mut actions_buf);
         if actions_buf.len() == 1 {
-            all_actions.push(actions_buf[0]);
+            action_count += 1;
             search.apply_action(actions_buf[0]);
             continue;
         }
@@ -251,7 +235,7 @@ where
         let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
 
         // Choose action (exploration vs exploitation)
-        let chosen = if (all_actions.len() as u32) < actor_config.explore_actions {
+        let chosen = if action_count < actor_config.explore_actions {
             sample_from_policy(&result.policy, rng)
         } else {
             result.selected_action
@@ -262,109 +246,13 @@ where
             features_buf,
             sign,
             is_full_search,
-            all_actions.len() as u32,
+            action_count,
             actor_config.num_aux_targets,
         ));
 
-        all_actions.push(chosen);
+        action_count += 1;
         search.apply_action(chosen);
     }
-}
-
-// ---------------------------------------------------------------------------
-// Reanalyze
-// ---------------------------------------------------------------------------
-
-/// Reanalyze a previously played game with the current network.
-///
-/// Actions are predetermined (replayed from the original game). Always uses
-/// full search budget. Chance nodes are detected via `chance_outcomes()`.
-pub(super) async fn reanalyze_game<G, F, Fut>(
-    search: &mut Search<G>,
-    effective_sims: u32,
-    actor_config: &ActorConfig,
-    encoder: &dyn StateEncoder<G>,
-    infer: F,
-    rng: &mut fastrand::Rng,
-    actions: &[usize],
-    reward: f32,
-) -> Vec<Sample>
-where
-    G: Game,
-    F: Fn(Vec<f32>, usize) -> Fut,
-    Fut: Future<Output = (Vec<f32>, Vec<f32>)>,
-{
-    let feature_size = encoder.feature_size();
-    let mut samples: Vec<Sample> = Vec::new();
-    let mut actions_buf = Vec::new();
-    let mut chance_buf = Vec::new();
-    let mut encode_buf = Vec::with_capacity(feature_size);
-    let mut action_idx = 0;
-
-    loop {
-        if action_idx >= actions.len() {
-            break;
-        }
-
-        // Resolve chance nodes (detected via chance_outcomes)
-        chance_buf.clear();
-        search.state().chance_outcomes(&mut chance_buf);
-        if !chance_buf.is_empty() {
-            let action = actions[action_idx];
-            action_idx += 1;
-            search.apply_action(action);
-            continue;
-        }
-
-        // Terminal check
-        if let Status::Terminal(_) = search.state().status() {
-            break;
-        }
-
-        let sign = search.state().current_sign();
-
-        // Skip forced actions
-        actions_buf.clear();
-        search.state().legal_actions(&mut actions_buf);
-        if actions_buf.len() == 1 {
-            action_idx += 1;
-            search.apply_action(actions_buf[0]);
-            continue;
-        }
-
-        // Always full search for reanalyze
-        search.set_num_simulations(effective_sims);
-
-        // Encode features before search
-        let mut features_buf = Vec::with_capacity(feature_size);
-        encoder.encode(search.state(), &mut features_buf);
-
-        // MCTS search
-        let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
-
-        samples.push(make_sample(
-            result,
-            features_buf,
-            sign,
-            true,
-            action_idx as u32,
-            actor_config.num_aux_targets,
-        ));
-
-        // Apply predetermined action
-        let action = actions[action_idx];
-        action_idx += 1;
-        search.apply_action(action);
-    }
-
-    finalize_samples(
-        &mut samples,
-        reward,
-        actions.len() as u32,
-        &actor_config.aux_value_horizons,
-    );
-
-    samples
 }
 
 // ---------------------------------------------------------------------------

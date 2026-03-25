@@ -1,74 +1,126 @@
 # Training configuration guide
 
-How to size, tune, and reason about `TrainConfig` parameters. The goal is to
-avoid wasting GPU cycles on stale data or starving training of fresh signal.
+How to size, tune, and reason about `TrainConfig` parameters. Each section
+follows the same format: what the parameter controls, how to initialize it from
+game properties, and how to diagnose misconfiguration from training metrics.
 
 ## Core loop
 
-Each iteration: play self-play games until at least `train_samples_per_iter`
-fresh samples have been collected, then train `epochs` passes over the full
-replay buffer. Games are played to completion, so the last game in an iteration
-may push the actual sample count slightly over the target. The buffer holds at
-most `replay_buffer_samples` samples, evicting oldest games first.
-
-Key derived quantities:
+Each iteration: self-play generates at least `train_samples_per_iter` fresh
+samples, then training runs `epochs` passes over the full replay buffer. Games
+play to completion, so actual sample count may slightly exceed the target. The
+buffer holds at most `replay_buffer_samples` samples, evicting oldest games
+first.
 
 ```
-retention        = replay_buffer_samples / train_samples_per_iter   (iterations before eviction)
+retention        = replay_buffer_samples / train_samples_per_iter   (iters before eviction)
 steps_per_epoch  = replay_buffer_samples / train_batch_size
-total_steps      = epochs * steps_per_epoch
+gradient_steps   = epochs * steps_per_epoch
 freshness_ratio  = train_samples_per_iter / replay_buffer_samples   (fraction of buffer that is new)
 ```
 
-## Replay buffer and samples per iteration
+---
 
-**`train_samples_per_iter`** — how much new data per iteration. Not "number of
-games" — the system collects games until it has enough samples. Longer games
-produce more samples per game, so game count varies.
+## `mcts_sims`
 
-**`replay_buffer_samples`** — total buffer capacity in samples. Size it as a
-multiple of `train_samples_per_iter`. Start at 5×:
+Search budget per action. More sims produce better policy targets (the MCTS
+visit distribution the network trains to match) and more accurate value backups,
+but each game takes proportionally longer. For a fixed compute budget, more sims
+means fewer games — you're trading sample quantity for sample quality.
 
-| Ratio  | Retention   | Good for                                     |
-| ------ | ----------- | -------------------------------------------- |
-| 3-5x   | 3-5 iters   | Small/fast games, rapid policy shifts        |
-| 5-10x  | 5-10 iters  | Most games (default range)                   |
-| 10-20x | 10-20 iters | Only with reanalyze to refresh stale targets |
+**Initialize:** estimate the effective branching factor B_eff — how many actions
+the network puts non-trivial probability on once past random initialization (not
+the legal action count). Start at 20–40 × B_eff, floor at 100.
 
-At 5×, each sample survives 5 iterations. With 2 epochs/iter, each sample gets
-trained on ~10 times across its lifetime. Below 3× the network oscillates
-(forgets old patterns, rediscovers, forgets again). Above 10× the value targets
-from distant iterations are actively misleading if the network has improved
-significantly.
+If B_eff is unknown: `~2 × sqrt(action_space_size) × avg_game_length^0.25`
+(order-of-magnitude estimate — sweep if uncertain).
 
-The right ratio depends on learning speed. Rapid improvement (50+ Elo/iter)
-means staleness matters more — use 3–5×. Slow, steady gains (5–15 Elo/iter)
-tolerate a larger buffer (7–10×) since old data remains approximately valid.
+| Game type                          | Typical B_eff | Starting sims |
+| ---------------------------------- | ------------- | ------------- |
+| Simple (Pig, Tic-tac-toe)          | 3-5           | 50-200        |
+| Medium (Connect4, Othello)         | 5-15          | 200-800       |
+| Deep tactics (Chess, Go)           | 8-30          | 800-1200      |
+| Wide but shallow (Catan, Splendor) | 5-15          | 200-400       |
 
-**Staleness diagnostic:** track value prediction error stratified by data age.
-Bucket the buffer by "how many iterations old" and compute value loss per
-bucket.
+The last two rows both have high action counts but need sims for different
+reasons. Chess/Go need deep search for tactical resolution — the value of a
+move may not be apparent until 15+ actions later. Games like Catan have wide
+branching but shallow tactical horizons; the strategy is positional, and the
+network prior handles most of the assessment with search mainly comparing a few
+candidates.
 
-- Recent data (0–1 iters old): should have lowest value loss
-- Old data (4–5 iters old): modestly higher is expected
-- If old data has dramatically higher value loss (2×+), the buffer is too large
-  — old value targets are misleading the network
-- If value loss is roughly uniform across ages, the buffer could be larger
-  without harm
+Stochastic games typically hit diminishing returns on sims sooner than
+deterministic games of similar decision complexity — additional sims past a
+point are just resampling the same chance distribution against a variance floor.
+Size sims for tactical depth, and expect the useful range to be lower for
+stochastic games.
 
-**Failure modes:**
+**Diagnose:** check `policy_surprise_avg` in metrics.csv (KL of MCTS improved
+policy vs network prior, averaged over full-search samples).
 
-- Policy loss decreasing but value loss stuck/increasing → buffer staleness.
-  Old value targets from weaker networks confuse the value head. Shrink buffer.
-- Network forgets how to play certain openings it previously handled → buffer
-  too small, those positions have been evicted. Increase buffer.
-- Training loss suspiciously low but playing strength doesn't match → overfitting
-  to a small buffer. Increase size or check that whole-game eviction isn't
-  creating blind spots.
+- Near zero (< 0.1 nats) throughout training → search is decorative, increase
+  sims
+- Very large (> 2 nats) late in training → network isn't learning from search
+  targets, check policy loss and training pipeline
+- Value loss stuck high while policy loss declines → tree isn't deep enough for
+  reliable value backups, increase sims
+- Metrics improve well per iteration but wall-clock is painful → sims fine
+  algorithmically, too much compute per sample; reduce sims and compensate with
+  more games (see [interactions](#how-sims-samples-and-buffer-interact))
 
-**Initialization heuristic:** think in games first, then convert. You want
-enough games per iteration for trajectory diversity — the self-play batch
-shouldn't just replay the same opening line repeatedly.
+## `mcts_sims_start`
+
+Starting sims for the warmup ramp. Sims ramp linearly from `mcts_sims_start` to
+`mcts_sims` over `warmup_iters`. Early in training both heads are random —
+extra sims just average noise without producing better targets.
+
+**Initialize:** `2–4 × gumbel_m`. This is the floor for Gumbel Sequential
+Halving to complete one full halving pass. Below it the schedule is degenerate
+and can't rank actions. Model size doesn't matter — a large model with random
+weights is still random.
+
+**Diagnose:**
+
+- Early games are near-random even by early-training standards → sims_start
+  below 2 × gumbel_m, Sequential Halving can't complete a pass
+- First iterations are very slow with no quality benefit → sims_start too high,
+  wasting compute on random evaluations
+
+## `gumbel_m`
+
+Top-k actions considered at root via Gumbel sampling. Sequential Halving
+allocates sims across these candidates: `n / (ceil(log2(m)) × m)` visits per
+candidate in the first round. Doubling `m` roughly halves per-action depth.
+Clamped to the legal action count, so overshooting is safe but wastes sim
+budget.
+
+**Initialize:** set to roughly the number of plausible actions in a typical
+position.
+
+| Position type              | m     |
+| -------------------------- | ----- |
+| 5-10 good actions typical  | 16    |
+| High-branching (Go, Chess) | 32-64 |
+
+Verify: `mcts_sims / (ceil(log2(m)) × m)` should be ≥ 2. If not, either
+increase sims or decrease m.
+
+**Diagnose:**
+
+- Policy improvement stalls, search never finds the right action → m too low,
+  strong actions excluded from candidates
+- MCTS policy target looks like the prior (no improvement from search) → m too
+  high relative to sims, each candidate gets too few visits for Sequential
+  Halving to distinguish them
+
+## `train_samples_per_iter`
+
+How much new data per iteration. Controls how much the network's opponents
+change between training steps — the fundamental freshness/stability tradeoff.
+Not "number of games" — the system collects games until it has enough samples.
+Longer games produce more samples per game, so game count varies.
+
+**Initialize:** think in games first, then convert.
 
 ```
 num_games = max(256, 2 * action_space_size)
@@ -76,489 +128,395 @@ train_samples_per_iter = num_games * avg_game_length
 ```
 
 The `2 * action_space_size` ensures diversity in the first action alone. The 256
-floor is a minimum for statistical stability. Example: 100 legal actions, avg 60
-actions long → 200 games × 60 = 12,000 samples/iter.
+floor provides statistical stability. Example: 100 legal actions, avg 60 actions
+→ 200 games × 60 = 12,000 samples/iter.
 
-**How to pick `train_samples_per_iter`:** this controls how much the network's
-opponents change between training steps — the fundamental freshness/stability
-tradeoff. Self-play and training are sequential (the GPU pauses inference during
-training), so both phases always fully utilize the GPU. The question isn't
-hardware efficiency but learning dynamics:
+Stochastic games should bias toward more games (and thus higher samples_per_iter
+relative to a deterministic game of similar complexity). Noisier value targets
+from chance events need more averaging across trajectories to produce stable
+training signal.
 
-- **Too large:** each iteration brings a lot of new data, but the network only
-  trains on it for `epochs` passes. Older buffer samples become stale faster
-  (they were generated by a much weaker network). Self-play wall time dominates,
-  meaning you spend most of your time generating data and relatively little time
-  learning from it.
-- **Too small:** the network updates frequently on very little new data. Training
-  dominates wall time. Risk of policy lag — the network changes so fast between
-  self-play rounds that in-flight games finish with an outdated policy, and the
-  replay buffer is mostly the same data being re-trained on.
+Check the new-data-to-gradient-steps ratio after computing other params:
 
-**New-data-to-gradient-steps ratio:** each iteration trains for
-`epochs × replay_buffer_samples / batch_size` gradient steps. The ratio of
-gradient steps to new samples tells you how hard you're chewing on data:
+```
+grad_steps = epochs × replay_buffer_samples / train_batch_size
+ratio = grad_steps / train_samples_per_iter
+```
 
-- Ratio < 1: generating data faster than training on it, wasteful on self-play
-- Ratio 2–10: sweet spot, each new sample revisited a few times through buffer
+- Ratio < 1: generating data faster than training on it, wasteful
+- Ratio 2–10: sweet spot
 - Ratio > 20: grinding on limited new data, overfitting risk
 
-**Fresh data loss diagnostic:** track training loss at the start of each
-iteration (before training, on the new batch). If this is consistently much
-higher than end-of-iteration loss, you're overfitting within each iteration —
-generate more samples or reduce epochs. If fresh and end-of-iteration loss are
-similar, the network generalizes well and the ratio is healthy.
+**Diagnose:**
 
-**Failure modes:**
-
-- Strength improves per iteration but wall-clock is painful →
-  samples_per_iter too high, try halving and running more frequent iterations
 - Loss oscillates between iterations (drops during training, jumps on fresh
   data) → overfitting within iteration, increase samples or reduce epochs
-- Elo plateaus despite loss decreasing → possible diversity starvation from
-  too few samples exploring the game tree
+- Strength improves per iteration but wall-clock is painful → samples_per_iter
+  too high, try halving it and running more frequent iterations
+- Elo plateaus despite loss decreasing → possible diversity starvation, too few
+  games exploring the game tree
+- Self-play time dominates → samples_per_iter too high relative to training
+  capacity. Training time dominates → too low
 
-**Signs you got the buffer wrong:**
+## `replay_buffer_samples`
 
-- Buffer too small: val loss oscillates, catastrophic forgetting of rare positions
-- Buffer too large: val loss stagnates, value_correction climbs (stale evaluations)
+Total buffer capacity in samples, sized as a multiple of
+`train_samples_per_iter`. Controls how much historical data the network trains
+on. At 5×, each sample survives 5 iterations; with 2 epochs/iter, each sample
+gets trained on ~10 times across its lifetime.
 
-## MCTS simulations
+**Initialize:** start at 5× `train_samples_per_iter`.
 
-**`mcts_sims`** — full search budget. More sims = better targets but slower
-games. The relationship is roughly:
+| Ratio | Retention  | Use when                                   |
+| ----- | ---------- | ------------------------------------------ |
+| 3-5×  | 3-5 iters  | Small/fast games, rapid policy improvement |
+| 5-10× | 5-10 iters | Most games (default range)                 |
 
-```
-self_play_time ∝ mcts_sims × avg_decisions_per_game × train_samples_per_iter
-```
+Adjust based on learning speed: rapid improvement (50+ Elo/iter) → use 3–5×
+(staleness matters more). Slow, steady gains (5–15 Elo/iter) → 7–10× is fine
+(old data still approximately valid). Below 3× the network oscillates (forgets
+patterns, rediscovers, forgets). Above 10× old value targets actively mislead.
 
-For a given GPU throughput, you're trading off sims vs games. Higher sims give
-better training signal per sample but fewer total samples.
+Stochastic games tolerate larger buffers than deterministic games at the same
+learning speed. Staleness matters less when outcome variance from chance events
+already dominates the variance from network improvement between iterations —
+the old data isn't much noisier than new data. Bias toward 7–10× for stochastic
+games.
 
-| Game complexity            | Sims      | Rationale                             |
-| -------------------------- | --------- | ------------------------------------- |
-| Simple (Pig, Tic-tac-toe)  | 50-200    | Small trees, diminishing returns fast |
-| Medium (Connect4, Othello) | 200-800   | Moderate branching, needs depth       |
-| Complex (Catan, Chess)     | 800-3000+ | Large trees, deep tactics             |
+**Diagnose:** track value prediction error stratified by data age (bucket by
+iterations old).
 
-**Initialization heuristic:** estimate the effective branching factor B_eff —
-not legal action count, but how many actions the network puts non-trivial mass on
-once past random init. Start at 20–40 × B_eff. For 50 legal actions where the
-network concentrates on ~8 plausible ones: 160–320 sims. Floor at ~100.
+- Old data has dramatically higher value loss (2×+) than recent data → buffer
+  too large, old targets misleading the network. Shrink buffer.
+- Value loss roughly uniform across ages → buffer could be larger without harm
+- Policy loss decreasing but value loss stuck/increasing → buffer staleness,
+  old value targets from weaker networks confuse value head. Shrink buffer.
+- Network forgets openings it previously handled → buffer too small, those
+  positions evicted. Increase buffer.
+- Training loss suspiciously low but playing strength doesn't match →
+  overfitting to a small buffer. Increase size.
 
-If B_eff is unknown, use `~2 × sqrt(action_space_size) × avg_game_length^0.25`
-as a proxy (accounts for breadth and the fact that deeper games need slightly
-more search to propagate value information).
+## `epochs`
 
-**KL diagnostic:** compute KL(visit_distribution ‖ prior) averaged across root
-positions.
+Training passes over the replay buffer per iteration. Each epoch reshuffles the
+buffer. `gradient_steps = epochs × ceil(0.8 × replay_buffer_samples / train_batch_size)`
+(the 0.8 accounts for the 80/20 train/validation split).
 
-- KL very small (< 0.1 nats): search isn't improving on the prior. Either sims
-  too low or the network is already strong (distinguish by checking play
-  strength).
-- KL very large (> 2 nats): search massively overrides the prior. Expected
-  early in training; late in training it means the network isn't learning from
-  search targets.
+**Initialize:** start at 2. Typical range 2–4. Epochs interact with buffer
+ratio: high epochs + small buffer = heavy overfitting; high epochs + large
+buffer is more forgiving but slow.
 
-**Failure modes:**
+**Diagnose:** compare train loss and validation loss at the end of each epoch
+within an iteration.
 
-- KL stays near zero throughout training → sims too low, search is decorative
-- Value loss stuck high despite policy loss declining → sims too low for
-  accurate value backups, tree isn't deep enough
-- Metrics improve well per iteration but wall-clock is slow → sims fine
-  algorithmically but too much compute per sample; reduce sims, compensate
-  with more games
+- Validation loss rises while training loss drops → overfitting, reduce epochs
+- Epoch 3+ shows minimal improvement over epoch 2 → diminishing returns, stay
+  at 2
+- Each sample seen roughly once (1 epoch) → may not extract full signal from
+  high-quality full-search samples
 
-**Stochastic games:** each sim samples one chance outcome, so more sims means
-better averaging over dice/cards. But diminishing returns are steep — chance
-branches multiply the effective tree size and you can never enumerate all
-outcomes anyway. In practice, the value head learns to price in expected variance
-(especially with short-horizon aux targets that provide low-variance training
-signal), so stochastic games don't need significantly more sims than
-deterministic games of similar decision complexity. Size sims for tactical depth,
-not chance averaging.
+## `playout_cap_full_prob`
 
-**`mcts_sims_start`** — starting sims for the warmup ramp. Sims ramp linearly
-from `mcts_sims_start` to `mcts_sims` over `warmup_iters`. Early in training
-both heads are random: the policy gives uniform priors (undirected exploration)
-and the value head returns noise (leaf evaluations are meaningless). Extra sims
-just average that noise — they don't produce better targets.
+Fraction of actions that get full search and contribute to policy training.
+Policy loss trains only on full-search samples (fast-search samples are masked
+to zero). Value loss trains on all samples. This directly controls policy
+training signal density.
 
-The floor is set by the Gumbel Sequential Halving schedule, which needs at least
-~2 × `gumbel_m` sims to complete one full halving pass across all candidates.
-Below that the schedule is degenerate and can't properly rank actions.
+**Initialize:** 0.25. Compute savings:
+`avg_sims = p × full_sims + (1 - p) × fast_sims`. With p=0.25, full=800,
+fast=64: 248 avg sims vs 800 = 3.2× speedup. Policy samples per game ≈
+`p × non_forced_actions`.
 
-```
-mcts_sims_start ≈ 2-4 × gumbel_m
-```
+**Diagnose:**
 
-This gives a valid schedule without wasting time on random evaluations. As the
-value head improves during warmup, more sims compound that signal — the ramp
-tracks this. Note that the sims ramp parallels the Q-weight ramp: both reflect
-growing trust in the network's evaluations. Early iterations use Z targets (game
-outcome) not Q targets (search value), so search quality barely affects training
-signal anyway.
+- Policy loss stagnates while value loss improves → policy head starving for
+  signal, increase p
+- Self-play nearly as slow as without playout cap → p too high, minimal compute
+  savings
 
-Model size doesn't directly affect `mcts_sims_start` — a large model with random
-weights is still random. Model size affects how many iterations the value head
-takes to become useful, which is what `warmup_iters` controls.
+## `playout_cap_fast_sims`
 
-**Failure modes:**
+Sims for fast-search actions. Fast-search actions form the game trajectory that
+determines Z (game outcome). Bad fast search produces noisy Z targets.
 
-- Sims_start too low (below 2 × gumbel_m): Sequential Halving can't complete
-  a halving pass, early games are near-random even by early-training standards
-- Sims_start too high: wastes compute on random evaluations during early
-  iterations. No benefit — you're just averaging noise more precisely
-- Ramp too short (warmup_iters too low): sims jump to full budget before the
-  value head is useful, wasting compute on sims that don't improve targets
-- Ramp too long: the network has good evaluations but sims are artificially
-  suppressed, producing worse targets than the network deserves
+**Initialize:** at least `2 × gumbel_m` (same Sequential Halving floor as
+`mcts_sims_start`). Below that, fast-search picks near-random actions. Keep
+below `full_sims / 4` for meaningful compute savings. Default: 64.
 
-**`gumbel_m`** — top-k actions considered at root via Gumbel sampling. Sequential
-Halving allocates sims across these candidates, so `m` directly controls the
-breadth/depth tradeoff: higher `m` considers more actions but gives each fewer
-sims. The schedule allocates `n / (ceil(log2(m)) × m)` visits per candidate in
-the first phase, so doubling `m` roughly halves per-action depth.
+**Diagnose:**
 
-Set `m` to roughly the number of plausible actions in a typical position. It's
-clamped to the legal action count, so overshooting is safe but wastes part of
-the sim budget on candidates that get immediately pruned. For a game where
-positions typically have 5-10 good actions, `m = 16` is fine. For high-branching
-games (Go, Chess mid-game), `m = 32-64`.
+- Games are much longer or more random than expected → fast_sims too low,
+  trajectory quality degraded, Z targets noisy
+- fast_sims > full_sims / 4 → speedup from playout cap randomization is modest,
+  consider lowering
 
-**Diagnostic:** check the Sequential Halving visit allocation. With `n` sims and
-`m` candidates, each candidate gets `n / (ceil(log2(m)) × m)` visits in the
-first round. If this number is < 2, the halving phases can't meaningfully
-distinguish candidates — either increase sims or decrease m.
+## `train_batch_size`
 
-**Failure modes:**
+Samples per gradient step. Determines how many gradient steps per iteration
+and the noise/smoothness tradeoff in optimization.
 
-- m too low: search misses strong actions the network hasn't learned yet,
-  especially early in training when the prior is weak. Policy improvement stalls
-  because MCTS never considers the right action.
-- m too high relative to sims: each candidate gets so few visits that
-  Sequential Halving is essentially random selection. The MCTS policy target
-  degrades toward the prior, providing no training signal improvement.
+**Initialize:** start at 1024. Check the resulting step count:
+`gradient_steps = epochs × ceil(0.8 × replay_buffer_samples / train_batch_size)`.
+Target 100–500 steps/iter. Adjust batch size or buffer to stay in range.
 
-## Playout cap randomization
+If you change batch size, co-adjust learning rate. The linear scaling rule:
+doubling batch size → double LR (each step averages twice as many gradients, so
+a larger step is safe). This isn't exact — very large batches may need
+sublinear scaling — but it's the right default.
 
-Each action flips a per-action coin: with probability `playout_cap_full_prob` it
-runs full search (`effective_sims`), otherwise it runs fast search
-(`min(playout_cap_fast_sims, effective_sims)`). The fast-search floor matters
-during warmup when progressive sims may drop below `playout_cap_fast_sims`.
+**Diagnose:**
 
-**Policy loss trains only on full-search samples.** The training code masks
-fast-search samples to zero in the policy loss and divides by the full-search
-count, not the batch size. Value loss trains on all samples regardless. So
-`playout_cap_full_prob` directly controls policy training signal density.
+- < 50 steps/iter → batch too large, each epoch does very little work, loss
+  barely moves within an iteration
+- \> 1000 steps/iter → iterations slow from optimizer overhead
+- Loss spikes during training → batch too small, gradient noise too high
+- Changed batch size without adjusting LR → effective learning rate scales
+  inversely; doubling batch size halves effective step size
 
-**`playout_cap_full_prob`** — fraction of actions that get full search and
-contribute to policy training. Compute savings:
+## `inference_batch_size`
 
-```
-avg_sims_per_action = p * full_sims + (1 - p) * fast_sims
-```
+Max evaluations per GPU forward pass during self-play. The batcher blocks until
+the first inference request arrives, then drains all queued requests up to this
+limit and fires one forward pass.
 
-With defaults (p=0.25, full=800, fast=64): `0.25 * 800 + 0.75 * 64 = 248`
-avg sims/action vs 800 = 3.2x speedup. Policy samples per game ≈
-`p * non_forced_moves`. If policy loss stagnates while value loss improves,
-raise `p` — the policy head may lack training signal.
+**Initialize:** 1024 for most GPUs. Increase for large GPUs with spare
+throughput. The actual batch fill depends on `concurrent_games` and
+`leaf_batch_size`.
 
-**`playout_cap_fast_sims`** — sims for fast actions. Fast-search actions become
-the game trajectory that determines Z (game outcome). Bad fast search produces
-bad game outcomes and noisy Z targets. The floor follows the same Sequential
-Halving constraint as `mcts_sims_start`: at least ~2 × `gumbel_m` sims to
-complete one halving pass. Below that the schedule degenerates and picks
-near-random actions.
+**Diagnose:**
 
-**Diagnostic:** compare game outcomes (win rates, avg game length) between
-full-search-only positions and the overall trajectory. If fast-search actions
-cause significantly worse play (games are much longer or outcomes more random
-than expected), fast_sims is too low and Z targets are noisy.
+- `avg batch` in progress bar < 50% of `inference_batch_size` → GPU underfull,
+  increase `concurrent_games` or `leaf_batch_size`
+- `evals/s` dropping → inference bottleneck, check GPU utilization
 
-**Failure modes:**
+## `leaf_batch_size`
 
-- full_prob too low: policy head starves for training signal. Value loss
-  improves but policy loss plateaus or improves very slowly.
-- full_prob too high: minimal compute savings. Self-play is nearly as slow
-  as without playout cap randomization.
-- fast_sims too low: game trajectories become near-random at fast-search actions,
-  Z targets are noisy, value head trains on garbage game outcomes.
-- fast_sims too high relative to full sims: reduces the compute benefit of
-  playout cap randomization. If fast_sims > full_sims / 4, the speedup is
-  modest.
+MCTS leaves collected per search before pausing to request a GPU eval. During
+search, each simulation reaching an unexpanded leaf pushes it into a pending
+buffer (with virtual loss). Once pending count reaches `leaf_batch_size`, MCTS
+yields and sends a batched inference request. Higher values improve GPU batching
+but stall individual searches. Must not exceed `mcts_sims`.
 
-## Batch sizes
+**Initialize:**
 
-**`train_batch_size`** — samples per gradient step. Training uses an 80/20
-train/validation split, so effective training samples = `0.8 * buffer_size`.
+| mcts_sims | leaf_batch_size |
+| --------- | --------------- |
+| 50-100    | 1-4             |
+| 200-800   | 4-16            |
+| 800+      | 16-32           |
 
-```
-gradient_steps_per_iter = epochs * ceil(0.8 * replay_buffer_samples / train_batch_size)
-```
+**Diagnose:**
 
-With defaults (epochs=3, buffer=200k, batch=1024): `3 * ceil(160000 / 1024)
-= 471` steps per iteration. Check `gradient_steps` in the training CSV.
-Fewer than ~50 steps/iter means the batch consumes too much of the buffer per
-step — gradients smooth out but each epoch does very little work. More than
-~1000 means slow iterations from optimizer overhead. Smaller batches add
-gradient noise that acts as implicit regularization; larger batches converge
-more smoothly but can skip narrow optima. Start at 1024 and adjust based on
-the gradient step count.
+- `avg batch` low despite enough concurrent games → leaf_batch_size too small,
+  each game contributes too few samples per request
+- Search quality degrades (policy targets look noisy) → leaf_batch_size too
+  high relative to sims, most sims consumed by batch collection
 
-**Failure modes:**
+## `concurrent_games`
 
-- Batch too large (< 50 steps/iter): each epoch does very little work, training
-  is effectively underfitting. Loss barely moves within an iteration.
-- Batch too small (> 1000 steps/iter): iterations are slow from optimizer
-  overhead. Gradient noise may cause instability — watch for loss spikes.
-- Batch size changed without adjusting learning rate: the effective learning
-  rate scales inversely with batch size. Doubling batch size without adjusting
-  LR halves the effective step size, potentially stalling training.
+Async game tasks running in parallel during self-play. Each game contributes
+`leaf_batch_size` samples per inference request. The batcher needs enough
+concurrent requests to fill `inference_batch_size`.
 
-**`inference_batch_size`** — max evaluations per GPU forward pass. The batcher
-blocks until the first inference request arrives, then drains all queued
-requests non-blocking up to this limit and fires one forward pass. If too few
-requests arrive before the batcher fires, the batch runs underfull and GPU
-utilization drops. Monitor `avg batch` in the progress bar — target >50% of
-`inference_batch_size`. If below that, increase `concurrent_games` to push
-more requests into the queue.
+**Initialize:** start at 256. Minimum to fill one batch:
+`concurrent_games × leaf_batch_size ≥ inference_batch_size`. Overshoot by 2–4×
+since not all games submit requests simultaneously. Each concurrent game holds
+an MCTS tree and game state in memory — for complex games with large trees this
+cost adds up.
 
-**`leaf_batch_size`** — MCTS leaves collected before pausing search to request
-a GPU eval. During search, each simulation that reaches an unexpanded leaf
-pushes that state into a pending buffer and applies a virtual loss (preventing
-other simulations from following the same path). Once the pending count reaches
-`leaf_batch_size`, MCTS yields back to the caller, which encodes all pending
-states and sends them as a single batched inference request. Higher values
-produce better GPU batching but stall each individual search while collecting.
-Must not exceed `mcts_sims` (can't collect more leaves than the total sim
-budget). When `mcts_sims` runs small (50-100), use 1-4. When large (800+),
-16-32 helps fill inference batches.
+**Diagnose:**
 
-## Concurrent games
+- `avg batch` < 50% of `inference_batch_size` → increase concurrent_games
+- Memory pressure / OOM → too many concurrent games with large trees, reduce
 
-**`concurrent_games`** — async game tasks running in parallel. Each game
-contributes `leaf_batch_size` samples per inference request. The batcher fires
-when it accumulates `inference_batch_size` total samples, so the minimum to
-fill one batch:
+## `max_actions`
 
-```
-concurrent_games × leaf_batch_size ≥ inference_batch_size
-```
+Safety cap on game length (total actions including chance nodes). Games hitting
+the cap terminate as a draw (reward=0). Set to 0 to disable.
 
-In practice, not all games submit requests simultaneously — some encode
-features, some await results, some process game logic. Overshoot the formula
-by 2-4x to keep the batcher well-fed. Each concurrent game holds an MCTS tree
-and game state in memory, so for complex games with large trees this cost adds
-up. Start at 256 and check `avg batch`. If below 50% of
-`inference_batch_size`, increase `concurrent_games`.
+**Initialize:** 2–3× the expected game length with competent play. Estimate avg
+actions per game (decisions + chance nodes). Pig to 100: ~130 actions with good
+play → cap at 500. Catan: ~1000 actions → cap at 2000+.
 
-## Max actions
+**Diagnose:**
 
-**`max_actions`** — safety cap on game length (total actions including chance
-nodes). Terminates as a draw (reward=0). Set to 2-3x the expected game length
-with competent play. 0 disables.
+- High draw rate with avg game length near max_actions → cap too low, games
+  hitting the limit and getting reward=0, destroying value signal
+- Early iterations very slow → random play produces very long games, set a cap
+  even for complex games
 
-**Sizing:** estimate the average number of actions per game (decisions + chance
-nodes). A game of Pig to 100 is ~130 actions with good play, so 500 is a safe
-cap. Catan is ~1000 actions normally, so 2000+ is appropriate.
+## `warmup_iters`
 
-**Too low:** most games hit the cap and get reward=0, destroying value signal.
-Watch for high draw rates with avg game length near max_actions.
-
-**Too high / disabled:** early iterations with random play can produce very long
-games, making first iterations slow. Set a generous cap for complex games.
-
-## Warmup
-
-**`warmup_iters`** — ramp period for sims and Q-weight. The warmup fraction
-ramps linearly:
-
-```
-warmup_frac = min(iteration / warmup_iters, 1.0)
-```
-
+Ramp period for sims and Q-weight. `warmup_frac = min(iter / warmup_iters, 1)`.
 Two things ramp together:
 
-- **Sims:** `effective_sims = mcts_sims_start + warmup_frac * (mcts_sims - mcts_sims_start)`
-- **Q-weight:** `q_weight = warmup_frac * q_weight_max`
+- Sims: `effective = mcts_sims_start + frac × (mcts_sims - mcts_sims_start)`
+- Q-weight: `q_weight = frac × q_weight_max`
 
-The value target blends Z (game outcome) and Q (search value):
-`target = (1 - q_weight) * Z + q_weight * Q`. At iteration 0, `q_weight = 0`
-and training uses pure Z. By the end of warmup, Q dominates.
+Early in training the value head is random, so Q targets (derived from search
+using that value head) are noise. Z (actual game outcome) provides the only real
+signal. As the network improves, Q becomes a better per-position target than the
+coarse game-level Z.
 
-**Why warmup exists:** early in training the value head outputs near-random
-evaluations. Q targets derive from search backed by that value head, so Q
-starts as noise. Z (the actual game result) provides the only real signal.
-As the network improves, Q becomes a better per-position target than Z because
-it reflects the search-refined evaluation of the specific position rather than
-the coarse game outcome shared across all positions.
+**Initialize:** warmup should last until the value head starts discriminating
+positions. No fixed formula — depends on model capacity and game complexity.
+Start at 20–30 iterations and adjust based on diagnostics.
 
-**Sizing:** warmup should last until the value head starts discriminating
-positions. Watch `value_error_late` beginning to decline and
-`value_network_stddev` rising above near-zero in the training CSV. These
-indicate the value head outputs meaningful position-dependent evaluations
-rather than a flat prior. The right length depends on model capacity and game
-complexity, not a fixed fraction of total iterations.
+**Diagnose:** watch `value_error_late` and `value_network_stddev` in the
+training CSV.
 
-**Diagnostic:** watch `value_error_late` and `value_network_stddev` in the
-training CSV. The transition point — where value_error_late starts declining
-and stddev rises above near-zero — marks when warmup should be ending. If these
-signals arrive well before warmup ends, it's too long. If warmup ends while
-the value head is still flat, it's too short.
+- `value_error_late` declining and `value_network_stddev` rising above near-zero
+  → value head is producing meaningful evaluations, warmup should be ending
+- These signals arrive well before warmup ends → warmup too long, wasting
+  iterations on coarse Z targets
+- Warmup ends while value head is still flat → warmup too short, Q targets
+  introduced before they're useful; value loss may jump when Q-weight kicks in
 
-**Failure modes:**
+## `q_weight_max`
 
-- Warmup too short: Q targets introduced before the value head is meaningful.
-  Value loss jumps when Q-weight kicks in, potentially destabilizing training.
-- Warmup too long: the network could benefit from search-refined Q targets but
-  is stuck on coarse Z targets. Wastes iterations that could show faster
-  improvement.
-- Q-weight ramp too aggressive (jumping from 0 to high): can cause a regime
-  shift mid-training. The value head suddenly trains on a different target
-  distribution, causing transient instability.
+Maximum blend toward Q (search value) after warmup completes. The value target
+is `(1 - q_weight) × Z + q_weight × Q`. Values below 1.0 retain a Z anchor
+that prevents value drift from self-referential Q targets.
 
-**`q_weight_max`** — max blend toward Q after warmup. Values below 1.0 retain
-a Z anchor: 0.85 keeps 15% Z weight, which prevents value drift from
-self-referential Q targets (Q comes from search using the same value head that
-training updates). 1.0 removes the anchor entirely.
+**Initialize:** 0.85. This keeps 15% Z weight as a grounding signal. Use 1.0
+only with high sims where Q is reliably better than Z.
 
-**Failure modes:**
+**Diagnose:**
 
-- q_weight_max = 1.0 with weak search: value head chases its own tail. Q is
-  derived from search using the same value head, so errors compound without a Z
-  anchor.
-- q_weight_max too low: search refinement is wasted. Even with high sims
-  producing excellent Q targets, training barely uses them.
+- Value loss slowly drifts upward after warmup, playing strength plateaus →
+  q_weight_max too high with insufficient sims, value head chasing its own tail.
+  Reduce q_weight_max or increase sims.
+- Search produces excellent Q targets but value head isn't learning from them →
+  q_weight_max too low, search refinement wasted
 
-## Exploration
+## `explore_actions`
 
-**`explore_actions`** — number of initial actions where the agent samples from
-the MCTS-improved policy distribution instead of taking the deterministic best
-action from Sequential Halving. Compared against the total action count
-(including chance nodes and forced single-legal-action positions), not just
-decision points.
+Number of initial actions where the agent samples from the MCTS-improved policy
+distribution instead of taking the deterministic Sequential Halving best action.
+Compared against the total action count (including chance nodes and forced
+single-legal-action actions), not just decision points.
 
-**Why it matters:** without exploration, deterministic games produce identical
-self-play trajectories from the same starting position — the network sees the
-same positions repeatedly and never explores alternatives. Stochastic games
-get natural trajectory diversity from chance nodes (dice rolls, card draws),
-so they need less explore_actions to cover the state space.
+**Initialize:** start at 20–30% of avg_game_length for deterministic games,
+10–15% for stochastic games.
 
-**Sizing:** set explore_actions high enough for the game state to differentiate
-naturally. After enough actions, distinct game states produce distinct
-evaluations and the deterministic policy diverges on its own. For stochastic
-games, chance nodes contribute to the action count, so the effective number of
-explored decisions equals explore_actions minus the expected chance actions in
-that window.
+- Deterministic games: need more explore_actions since there's no natural
+  trajectory diversity. Set to cover the opening phase where many positions look
+  similar to the network.
+- Stochastic games: chance nodes provide natural diversity, so fewer are needed.
+  Effective explored decisions = explore_actions minus expected chance actions in
+  that window.
 
-**Diagnostic:** measure trajectory diversity — count unique game states seen at
-action N across all self-play games in an iteration. This should grow rapidly
-for the first few actions and plateau. If it plateaus immediately (turn 1),
-explore_actions is too low for deterministic games. If trajectory diversity is
-already high by action 5 (common in stochastic games), explore_actions beyond
-that adds noise without benefit.
+**Diagnose:** measure trajectory diversity — count unique game states at action
+N across self-play games in an iteration.
 
-**Failure modes:**
+- Diversity plateaus at action 1 (deterministic games) → explore_actions too
+  low, self-play producing near-identical games, network overfits to a narrow
+  slice of the game tree
+- Diversity already high by action 5 (stochastic games) → explore_actions
+  beyond that adds noise without benefit
+- Network produces unrealistic positions in early game → explore_actions too
+  high, noisy MCTS policy sampling creates positions the network wastes capacity
+  learning
 
-- Too low (deterministic games): self-play produces near-identical games,
-  network memorizes a narrow set of positions, policy and value overfit to
-  a small slice of the game tree.
-- Too high: exploration actions are sampled proportionally from the MCTS
-  policy, which early in training is noisy. Extended exploration produces
-  unrealistic positions that the network wastes capacity learning.
-- Too low (stochastic games): usually not a problem since chance nodes provide
-  diversity, but in games with deterministic openings (e.g., fixed initial
-  placement phases), this can still cause opening diversity collapse.
-
-## Epochs
-
-**`epochs`** — training passes over the replay buffer per iteration. Each
-epoch reshuffles the buffer, so samples appear in different batch combinations.
-
-```
-gradient_steps_per_iter = epochs * ceil(0.8 * replay_buffer_samples / train_batch_size)
-```
-
-Typical range: 2-4. More epochs risk overfitting to the current buffer
-contents, especially when the buffer holds few iterations of data (low
-retention ratio). Fewer epochs underutilize the collected data. The 80/20
-train/validation split lets you detect overfitting: if training loss drops
-while validation loss rises across epochs within an iteration, reduce epochs.
-
-**Diagnostic:** compare train loss and validation loss at the end of each epoch
-within an iteration. Epoch 1 should show the largest drop. If epoch 3+ shows
-minimal improvement over epoch 2, you're in diminishing returns territory.
-If validation loss rises while training loss keeps dropping, you're overfitting.
-
-**Failure modes:**
-
-- Too many epochs (> 4): overfitting to buffer contents, especially with small
-  buffers. Validation loss rises, playing strength doesn't match training loss.
-- Too few epochs (1): each sample is seen roughly once per iteration. The
-  network may not extract full signal from the data, especially from
-  high-quality full-search samples.
-- Epochs interact with buffer ratio: high epochs + small buffer = heavy
-  overfitting. High epochs + large buffer is more forgiving but slow.
-
-## Hardware utilization signals
-
-Monitor these in the training log:
-
-| Metric                      | Healthy                                | Problem                                                |
-| --------------------------- | -------------------------------------- | ------------------------------------------------------ |
-| `avg batch`                 | >50% of `inference_batch_size`         | Low → increase `concurrent_games` or `leaf_batch_size` |
-| `evals/s`                   | Stable, proportional to GPU capability | Dropping → inference bottleneck                        |
-| `self-play` vs `train` time | Roughly balanced                       | One dominates → adjust `train_samples_per_iter`        |
-| Draw rate                   | Decreasing over iterations             | Constant high → `max_actions` too low                  |
-
-## Game-specific considerations
-
-**Stochastic games** (dice, card draws): chance nodes add actions without
-decisions. Games are longer in action count. `max_actions` and `explore_actions`
-should account for this. Natural randomness provides exploration, so
-`explore_actions` can be lower.
-
-**Deterministic games** (Chess, Go): need more `explore_actions` for opening
-diversity. MCTS is more effective (no chance noise), so fewer sims may suffice
-for equivalent quality.
-
-**Short games** (<50 decisions): fewer samples per game, need more games per
-iteration. Lower `train_samples_per_iter` to keep iteration time reasonable.
-Smaller replay buffer (3-5x).
-
-**Long games** (>200 decisions): many samples per game, fewer games needed.
-Higher `train_samples_per_iter` to ensure enough game diversity. Larger replay
-buffer (8-10x).
+---
 
 ## How sims, samples, and buffer interact
 
-The three form a triangle:
+These three parameters form a triangle:
 
-- **mcts_sims** controls quality per sample (how good the search targets are)
-- **train_samples_per_iter** controls quantity of fresh data per learning step
-- **replay_buffer_samples** controls memory (how much history the network trains on)
+- **mcts_sims** → quality per sample (how good the search targets are)
+- **train_samples_per_iter** → quantity of fresh data per learning step
+- **replay_buffer_samples** → memory (how much history the network trains on)
 
 For a fixed compute budget, increasing sims means decreasing samples_per_iter
 (fewer but better games). The KataGo finding: early in training, the trade
-favors more games with fewer sims. Practical approach: start with moderate sims
-(~200), generous samples_per_iter, and 5× buffer. As training progresses and
-the network strengthens, increase sims (search becomes more valuable on a good
-network) — you can tolerate fewer games per iteration because each game's
-targets are higher quality.
+favors more games with fewer sims. As the network strengthens, search becomes
+more valuable and you can tolerate fewer games because each game's targets are
+higher quality.
+
+Practical approach: start with moderate sims (~200), generous samples_per_iter,
+and 5× buffer. Increase sims once the network is past warmup and losses are
+declining.
+
+Stochasticity pushes the entire triad: fewer sims (variance floor), more games
+(noisier targets need more averaging), larger buffer (staleness matters less
+when outcome variance dominates network-improvement variance).
+
+## `aux_value_horizons`
+
+Auxiliary value heads that predict short-horizon exponential moving averages of
+future Q-values. Each horizon `h` produces a target via backwards EMA:
+`alpha = 1 - exp(-1/h)`, so horizon 10 averages roughly the next 10 actions'
+search evaluations. Shares hidden layers with the main value head (single
+multi-output projection).
+
+Essential for stochastic games: the correlation between position quality and
+final outcome can be genuinely weak when dozens of future chance events
+intervene. Short-horizon targets let the value head learn positional concepts
+(e.g., "building here improves my position") without that signal being washed
+out by outcome noise. For deterministic games, useful but less critical since Z
+is already a strong signal.
+
+**Initialize:** use 2–4 horizons in a geometric spread covering short to
+medium-long range. Keep all horizons well below avg_game_length — longer
+horizons approach Z and share its noise problem.
+
+| Avg game length | Example horizons |
+| --------------- | ---------------- |
+| ~50 actions     | [4, 10, 25]      |
+| ~200 actions    | [8, 25, 75]      |
+| ~1000 actions   | [10, 30, 100]    |
+
+The shortest horizon should be long enough to capture a meaningful decision
+sequence (not just 1–2 actions). The longest should be short enough to still
+have substantially lower variance than Z.
+
+**Diagnose:** check `loss_aux_value_*_train` / `loss_aux_value_*_val` per
+horizon in metrics.csv.
+
+- Shortest horizon loss improves quickly while main value loss is stuck →
+  aux targets are working, providing signal that Z can't
+- Longest horizon loss tracks main value loss closely → that horizon isn't
+  adding much beyond Z, consider shortening it
+- All aux losses stuck high → horizons may be too long (approaching Z noise
+  level) or the network lacks capacity
+- Aux loss very low but main value loss still high → the value head learns
+  short-term patterns but can't extrapolate to game outcome. Expected early in
+  training; if persistent, may need longer horizons or more capacity
 
 ## Quick-start recipe
 
-For a new game, start with:
-
 1. Estimate avg game length (actions) with random play
-2. Set `max_actions` = 2-3x that estimate
-3. Set `mcts_sims` = 200, `mcts_sims_start` = 50
-4. Set `train_samples_per_iter` = 20k (adjust after first run based on timing)
-5. Set `replay_buffer_samples` = 6-8x `train_samples_per_iter`
-6. Set `concurrent_games` = 256, `inference_batch_size` = 1024
-7. Run one iteration, check `avg batch` and `self-play` vs `train` time
-8. Adjust: if `avg batch` is low, increase `concurrent_games`. If self-play
-   is too fast/slow relative to training, adjust `train_samples_per_iter`.
-9. Increase `mcts_sims` once the network is past warmup and losses are
-   declining — more sims give better targets but slower iterations.
+2. `max_actions` = 2–3× that estimate
+3. `gumbel_m` = 16, `mcts_sims` = 200, `mcts_sims_start` = 64
+   - Verify: `mcts_sims / (ceil(log2(m)) × m) ≥ 2`. With m=16, sims=200:
+     `200 / (4 × 16) = 3.1` ✓. If you drop sims below 128 with m=16, this
+     fails — reduce m or increase sims.
+4. `train_samples_per_iter` = `max(256, 2 × action_space_size) × avg_game_length`
+   - Stochastic games: bias toward the higher end (more games)
+5. `replay_buffer_samples` = 5× `train_samples_per_iter` (7–10× for stochastic)
+6. `epochs` = 2, `train_batch_size` = 1024
+7. `playout_cap_full_prob` = 0.25, `playout_cap_fast_sims` = 64
+8. `concurrent_games` = 256, `inference_batch_size` = 1024
+9. `warmup_iters` = 25, `q_weight_max` = 0.85
+10. `explore_actions` = 20–30% of avg_game_length (10–15% for stochastic)
+11. `aux_value_horizons`: 2–4 horizons in geometric spread, well below
+    avg_game_length. Essential for stochastic games.
+12. Run one iteration. Check:
+    - `avg batch` > 50% of `inference_batch_size`? If not, increase
+      `concurrent_games`.
+    - Self-play vs train time roughly balanced? If not, adjust
+      `train_samples_per_iter`.
+    - `gradient_steps` in 100–500 range? If not, adjust `train_batch_size`
+      (and co-adjust LR: double batch → double LR).
+13. After warmup, increase `mcts_sims` — better targets justify slower
+    iterations once the network is strong.
+
+## Hardware utilization signals
+
+| Metric                      | Healthy                        | Action                                                 |
+| --------------------------- | ------------------------------ | ------------------------------------------------------ |
+| `avg batch`                 | >50% of `inference_batch_size` | Low → increase `concurrent_games` or `leaf_batch_size` |
+| `evals/s`                   | Stable, proportional to GPU    | Dropping → inference bottleneck                        |
+| `self-play` vs `train` time | Roughly balanced               | One dominates → adjust `train_samples_per_iter`        |
+| Draw rate                   | Decreasing over iterations     | Constant high → `max_actions` too low                  |

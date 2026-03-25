@@ -58,7 +58,7 @@ Starts training with few MCTS simulations and ramps to the full budget over warm
 
 ## Training efficiency - Replay buffer — _low impact_
 
-A sample-capped replay buffer (`replay_buffer_samples`) retains the most recent games. Training triggers on fresh sample count (`train_samples_per_iter`) rather than game count. Oldest games are evicted when the buffer exceeds capacity. Supports reanalyze (`reanalyze_games`) for sample efficiency.
+A sample-capped replay buffer (`replay_buffer_samples`) retains the most recent games. Training triggers on fresh sample count (`train_samples_per_iter`) rather than game count. Oldest games are evicted when the buffer exceeds capacity.
 
 ## Game representation - Canonical board representation — _medium impact (per-game strategy)_
 

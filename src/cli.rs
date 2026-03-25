@@ -209,12 +209,6 @@ pub fn train_command() -> Command {
                 .help("Maximum samples retained in the replay buffer"),
         )
         .arg(
-            Arg::new("reanalyze-games")
-                .long("reanalyze-games")
-                .default_value(d.reanalyze_games.to_string())
-                .help("Games to reanalyze per iteration (0 = disabled)"),
-        )
-        .arg(
             Arg::new("concurrent-games")
                 .long("concurrent-games")
                 .default_value(d.concurrent_games.to_string())
@@ -756,9 +750,6 @@ pub fn parse_train_config(
     }
     if set("replay-buffer-samples") {
         config.replay_buffer_samples = val("replay-buffer-samples").parse().unwrap();
-    }
-    if set("reanalyze-games") {
-        config.reanalyze_games = val("reanalyze-games").parse().unwrap();
     }
     if set("concurrent-games") {
         config.concurrent_games = val("concurrent-games").parse().unwrap();

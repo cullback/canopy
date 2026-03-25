@@ -42,11 +42,8 @@ pub struct TrainConfig {
     /// Sized as a multiple of `train_samples_per_iter`: the ratio determines how
     /// many iterations a sample survives before eviction. 5-10x is typical.
     /// Too small risks overfitting to recent play patterns; too large dilutes
-    /// training with stale positions from weaker networks. Games are evicted
-    /// whole (not individual samples) to preserve trajectories for reanalyze.
+    /// training with stale positions from weaker networks.
     pub replay_buffer_samples: usize,
-    /// Number of games to reanalyze per iteration (0 = disabled).
-    pub reanalyze_games: usize,
     /// Iterations over which MCTS sims ramp from `mcts_sims_start` to `mcts_sims`
     /// and the value target transitions from pure Z (game outcome) toward Q
     /// (search value), capped at `q_weight_max`. 0 = no ramp.
@@ -134,7 +131,6 @@ impl Default for TrainConfig {
             lr: 0.001,
             train_samples_per_iter: 20_000,
             replay_buffer_samples: 200_000,
-            reanalyze_games: 0,
             warmup_iters: 100,
             q_weight_max: 0.85,
 

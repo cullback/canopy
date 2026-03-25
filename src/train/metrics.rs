@@ -167,8 +167,6 @@ pub(super) struct CsvRow {
     pub replay_samples: usize,
     /// Samples generated this iteration only.
     pub samples_iter: usize,
-    /// Games reanalyzed this iteration.
-    pub reanalyze_games: usize,
     /// Total games in replay buffer.
     pub replay_buffer_games: usize,
     #[serde(serialize_with = "round6::f64")]

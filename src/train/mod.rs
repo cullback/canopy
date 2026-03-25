@@ -295,9 +295,8 @@ pub fn run_training<G>(
         let mut collected_games = Vec::new();
         while fresh_samples < config.train_samples_per_iter {
             match result_rx.blocking_recv() {
-                Some(self_play::WorkResult::SelfPlay(mut record)) => {
+                Some(record) => {
                     fresh_samples += record.samples.len();
-                    record.iteration_analyzed = iteration;
                     collected_games.push(record);
                     sp_span.pb_set_position(fresh_samples as u64);
                     let elapsed_secs = iter_start.elapsed().as_secs_f64();
@@ -323,9 +322,6 @@ pub fn run_training<G>(
                             avg_batch
                         ));
                     }
-                }
-                Some(self_play::WorkResult::Reanalyze { game_id, samples }) => {
-                    replay_buffer.replace_samples(game_id, samples, iteration);
                 }
                 None => panic!("all workers died unexpectedly"),
             }
@@ -366,25 +362,6 @@ pub fn run_training<G>(
 
         // Push new games to replay buffer
         replay_buffer.push_games(collected_games);
-
-        // Submit reanalyze work (phased)
-        if config.reanalyze_games > 0 {
-            let reanalyze_items =
-                replay_buffer.select_for_reanalyze(config.reanalyze_games, iteration, &mut rng);
-            let mut next_worker = 0;
-            for (game_id, seed, actions, reward) in reanalyze_items {
-                let item = self_play::WorkItem::Reanalyze {
-                    game_id,
-                    seed,
-                    actions,
-                    reward,
-                    effective_sims,
-                };
-                // Round-robin across workers
-                let _ = work_txs[next_worker].blocking_send(item);
-                next_worker = (next_worker + 1) % work_txs.len();
-            }
-        }
 
         // Stats from fresh samples
         let fresh_sample_refs: Vec<&Sample> = replay_buffer
@@ -533,7 +510,6 @@ pub fn run_training<G>(
             mcts_sims: effective_sims,
             replay_samples: all_samples.len(),
             samples_iter: samples_this_iter,
-            reanalyze_games: config.reanalyze_games,
             replay_buffer_games: replay_buffer.len(),
             time_selfplay_secs: self_play_elapsed.as_secs_f64(),
             time_train_secs: train_elapsed.as_secs_f64(),
