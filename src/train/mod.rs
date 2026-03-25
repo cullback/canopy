@@ -444,8 +444,6 @@ pub fn run_training<G>(
             loss_aux_value_1_val: aux_v.get(1).copied().unwrap_or(0.0),
             loss_aux_value_2_train: aux_t.get(2).copied().unwrap_or(0.0),
             loss_aux_value_2_val: aux_v.get(2).copied().unwrap_or(0.0),
-            loss_aux_value_3_train: aux_t.get(3).copied().unwrap_or(0.0),
-            loss_aux_value_3_val: aux_v.get(3).copied().unwrap_or(0.0),
             gradient_steps: train_metrics.gradient_steps,
             // Self-play game stats
             game_length_avg: avg_game_length,

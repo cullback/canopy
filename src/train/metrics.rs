@@ -57,10 +57,6 @@ pub(super) struct CsvRow {
     pub loss_aux_value_2_train: f32,
     #[serde(serialize_with = "round6::f32")]
     pub loss_aux_value_2_val: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_aux_value_3_train: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_aux_value_3_val: f32,
     /// Total optimizer updates across all epochs this iteration.
     pub gradient_steps: usize,
 
