@@ -566,8 +566,8 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                 remaining: new_remaining,
                 roller,
             };
-        } else {
-            // Check if the other player also needs to discard
+        } else if player == roller {
+            // Roller finished discarding — check if opponent also must discard
             let other = player.opponent();
             let other_total = state.players[other].hand.total();
             if other_total > DISCARD_THRESHOLD {
@@ -581,6 +581,10 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                 state.current_player = roller;
                 state.phase = Phase::MoveRobber;
             }
+        } else {
+            // Opponent finished discarding — proceed to robber
+            state.current_player = roller;
+            state.phase = Phase::MoveRobber;
         }
     }
 }
