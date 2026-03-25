@@ -47,9 +47,3 @@ A sample-capped replay buffer (`replay_buffer_samples`) retains the most recent 
 ## Game representation - Canonical board representation — _medium impact (per-game strategy)_
 
 For games with symmetry, the game model maps to a single canonical state (e.g., normalizing board orientation or player identity). Eliminates the need for data augmentation and makes transposition tables more effective. Must be designed into each game's model — retrofitting changes state hashing and invalidates stored training data. Impact is proportional to the symmetry group size. Implemented for Catan.
-
-## Considering - Root policy softmax temperature — _medium impact_
-
-Applies a temperature T=1.1–1.25 to the policy logits before Gumbel sampling at the root during self-play, decaying toward 1.0 over the course of each game. Slightly flattens the prior so search explores more broadly in the opening/midgame, acting as a restoring force against the policy becoming too peaked. Complementary to `explore_actions` (which forces visit-count proportional play) and `gumbel_m` (which controls how many actions enter Sequential Halving) — this is softer than either, nudging exploration without overriding search. Cheap to implement: scale logits by 1/T before adding Gumbel noise.
-
-Reference: [KataGo Methods](https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md) — "Root Policy Softmax Temperature"
