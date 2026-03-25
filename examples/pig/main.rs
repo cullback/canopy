@@ -84,7 +84,6 @@ fn main() {
             replay_buffer_samples: 30_000,
             // max_actions: 500,
             mcts_sims: 200,
-            mcts_sims_start: 50,
             epochs: 3,
             train_batch_size: 128,
             warmup_iters: 20,

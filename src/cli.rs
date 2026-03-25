@@ -308,12 +308,6 @@ pub fn train_command() -> Command {
                 .help("Simulations for fast (non-full) search actions"),
         )
         .arg(
-            Arg::new("simulations-start")
-                .long("simulations-start")
-                .default_value(d.mcts_sims_start.to_string())
-                .help("Starting MCTS sims for progressive ramp (ramps linearly to --simulations)"),
-        )
-        .arg(
             Arg::new("gpus")
                 .long("gpus")
                 .default_value("1")
@@ -804,9 +798,6 @@ pub fn parse_train_config(
     }
     if set("playout-cap-fast-sims") {
         config.playout_cap_fast_sims = val("playout-cap-fast-sims").parse().unwrap();
-    }
-    if set("simulations-start") {
-        config.mcts_sims_start = val("simulations-start").parse().unwrap();
     }
     if set("gpus") {
         config.inference_workers = val("gpus").parse().unwrap();

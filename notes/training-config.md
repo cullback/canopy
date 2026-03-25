@@ -68,24 +68,6 @@ policy vs network prior, averaged over full-search samples).
   algorithmically, too much compute per sample; reduce sims and compensate with
   more games (see [interactions](#how-sims-samples-and-buffer-interact))
 
-## `mcts_sims_start`
-
-Starting sims for the warmup ramp. Sims ramp linearly from `mcts_sims_start` to
-`mcts_sims` over `warmup_iters`. Early in training both heads are random —
-extra sims just average noise without producing better targets.
-
-**Initialize:** `2–4 × gumbel_m`. This is the floor for Gumbel Sequential
-Halving to complete one full halving pass. Below it the schedule is degenerate
-and can't rank actions. Model size doesn't matter — a large model with random
-weights is still random.
-
-**Diagnose:**
-
-- Early games are near-random even by early-training standards → sims_start
-  below 2 × gumbel_m, Sequential Halving can't complete a pass
-- First iterations are very slow with no quality benefit → sims_start too high,
-  wasting compute on random evaluations
-
 ## `gumbel_m`
 
 Top-k actions considered at root via Gumbel sampling. Sequential Halving
@@ -239,8 +221,8 @@ fast=64: 248 avg sims vs 800 = 3.2× speedup. Policy samples per game ≈
 Sims for fast-search actions. Fast-search actions form the game trajectory that
 determines Z (game outcome). Bad fast search produces noisy Z targets.
 
-**Initialize:** at least `2 × gumbel_m` (same Sequential Halving floor as
-`mcts_sims_start`). Below that, fast-search picks near-random actions. Keep
+**Initialize:** at least `2 × gumbel_m` (Sequential Halving floor). Below that,
+fast-search picks near-random actions. Keep
 below `full_sims / 4` for meaningful compute savings. Default: 64.
 
 **Diagnose:**
@@ -347,11 +329,8 @@ play → cap at 500. Catan: ~1000 actions → cap at 2000+.
 
 ## `warmup_iters`
 
-Ramp period for sims and Q-weight. `warmup_frac = min(iter / warmup_iters, 1)`.
-Two things ramp together:
-
-- Sims: `effective = mcts_sims_start + frac × (mcts_sims - mcts_sims_start)`
-- Q-weight: `q_weight = frac × q_weight_max`
+Ramp period for Q-weight. `warmup_frac = min(iter / warmup_iters, 1)`,
+`q_weight = frac × q_weight_max`.
 
 Early in training the value head is random, so Q targets (derived from search
 using that value head) are noise. Z (actual game outcome) provides the only real
@@ -488,7 +467,7 @@ horizon in metrics.csv.
 
 1. Estimate avg game length (actions) with random play
 2. `max_actions` = 2–3× that estimate
-3. `gumbel_m` = 16, `mcts_sims` = 200, `mcts_sims_start` = 64
+3. `gumbel_m` = 16, `mcts_sims` = 200
    - Verify: `mcts_sims / (ceil(log2(m)) × m) ≥ 2`. With m=16, sims=200:
      `200 / (4 × 16) = 3.1` ✓. If you drop sims below 128 with m=16, this
      fails — reduce m or increase sims.

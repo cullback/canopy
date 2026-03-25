@@ -44,18 +44,15 @@ pub struct TrainConfig {
     /// Too small risks overfitting to recent play patterns; too large dilutes
     /// training with stale positions from weaker networks.
     pub replay_buffer_samples: usize,
-    /// Iterations over which MCTS sims ramp from `mcts_sims_start` to `mcts_sims`
-    /// and the value target transitions from pure Z (game outcome) toward Q
-    /// (search value), capped at `q_weight_max`. 0 = no ramp.
+    /// Iterations over which the value target transitions from pure Z (game
+    /// outcome) toward Q (search value), capped at `q_weight_max`. 0 = no ramp.
     ///
-    /// Both ramps are synchronized because they address the same issue: early in
-    /// training the value head is unreliable, so Q (derived from search) is
-    /// near-zero garbage and extra sims just average more noise. Z (game outcome)
-    /// is noisy but carries real signal. As the network improves, Q becomes a
-    /// better per-position target than Z (averaging many sims vs one game result),
-    /// and deeper search produces higher-quality Q. A small Z anchor (via
-    /// `q_weight_max < 1.0`) prevents value drift from purely self-generated
-    /// Q targets.
+    /// Early in training the value head is unreliable, so Q (derived from search)
+    /// is noise. Z (game outcome) is noisy but carries real signal. As the network
+    /// improves, Q becomes a better per-position target than Z (averaging many
+    /// sims vs one game result), and deeper search produces higher-quality Q. A
+    /// small Z anchor (via `q_weight_max < 1.0`) prevents value drift from purely
+    /// self-generated Q targets.
     pub warmup_iters: usize,
     /// Maximum q_weight after warmup ramp. Values < 1.0 retain a Z (game outcome)
     /// anchor to prevent value drift from purely self-generated Q targets.
@@ -81,9 +78,6 @@ pub struct TrainConfig {
     // -- MCTS --
     /// MCTS simulations per action during self-play (full-search budget).
     pub mcts_sims: u32,
-    /// Starting MCTS simulations for progressive ramp (ramps linearly to `mcts_sims`).
-    /// Set equal to `mcts_sims` for no ramp.
-    pub mcts_sims_start: u32,
     /// Gumbel-Top-k sampled actions at root. Clamped to the number of
     /// legal actions, so values larger than `NUM_ACTIONS` are safe.
     pub gumbel_m: u32,
@@ -144,7 +138,6 @@ impl Default for TrainConfig {
 
             // MCTS
             mcts_sims: 800,
-            mcts_sims_start: 50,
             gumbel_m: 16,
             c_visit: 50.0,
             c_scale: 1.0,

@@ -145,16 +145,6 @@ fn q_weight(config: &TrainConfig, iteration: usize) -> f64 {
     warmup_frac(config, iteration) * config.q_weight_max as f64
 }
 
-fn progressive_sims(config: &TrainConfig, iteration: usize) -> u32 {
-    let start = config.mcts_sims_start;
-    if start >= config.mcts_sims {
-        return config.mcts_sims;
-    }
-    let t = warmup_frac(config, iteration);
-    let sims = start as f64 + t * (config.mcts_sims - start) as f64;
-    (sims.round() as u32).max(1)
-}
-
 // ---------------------------------------------------------------------------
 // Public entry point
 // ---------------------------------------------------------------------------
@@ -214,7 +204,7 @@ pub fn run_training<G>(
         Vec::with_capacity(num_workers);
 
     let mcts_config = crate::mcts::Config {
-        num_simulations: config.mcts_sims, // overridden per-game by effective_sims
+        num_simulations: config.mcts_sims,
         num_sampled_actions: config.gumbel_m,
         c_visit: config.c_visit,
         c_scale: config.c_scale,
@@ -266,7 +256,7 @@ pub fn run_training<G>(
     // === Main loop ===
     for iteration in start_iteration..config.iterations {
         let iter_start = Instant::now();
-        let effective_sims = progressive_sims(&config, iteration);
+        let effective_sims = config.mcts_sims;
 
         // Progress bar for self-play collection
         let sp_span = tracing::info_span!("self_play");

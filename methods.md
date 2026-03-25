@@ -52,10 +52,6 @@ Reference: [KataGo Methods](https://github.com/lightvector/KataGo/blob/master/do
 
 Reference: [KataGo Methods](https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md) — "Playout Cap Randomization"
 
-## Training efficiency - Progressive simulation ramp — _medium impact_
-
-Starts training with few MCTS simulations and ramps to the full budget over warmup iterations. Early iterations churn through many games cheaply while the network is weak; later iterations invest in deeper search. Controlled by `mcts_sims_start` and `warmup_iters`. No architectural requirements.
-
 ## Training efficiency - Replay buffer — _low impact_
 
 A sample-capped replay buffer (`replay_buffer_samples`) retains the most recent games. Training triggers on fresh sample count (`train_samples_per_iter`) rather than game count. Oldest games are evicted when the buffer exceeds capacity.
