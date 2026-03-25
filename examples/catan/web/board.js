@@ -282,11 +282,6 @@ class Board {
     const lx = mx + nx / nlen * offset;
     const ly = my + ny / nlen * offset;
 
-    // Color the tile edge at this port
-    parent.appendChild(this._el('line', {
-      x1: x0, y1: y0, x2: x1, y2: y1,
-      stroke: color, 'stroke-width': 4, 'stroke-linecap': 'round'
-    }));
     // Circle label with ratio
     const isGeneric = port.kind === 'generic';
     parent.appendChild(this._el('circle', {
