@@ -164,7 +164,6 @@ struct BatchLosses<B: Backend> {
     total: Tensor<B, 1>,
     policy: f32,
     wdl: f32,
-    aux_value: f32,
     /// Per-horizon auxiliary value MSE (empty if no aux heads).
     aux_value_per_horizon: Vec<f32>,
 }
@@ -203,33 +202,30 @@ fn compute_batch_losses<B: Backend>(
     let mut total_loss = policy_loss.add(wdl_loss);
 
     // Auxiliary value loss
-    let (aux_vl, aux_vl_per_horizon) = if let (Some(aux_targets), Some(aux_preds)) =
+    let aux_value_per_horizon = if let (Some(aux_targets), Some(aux_preds)) =
         (&batch.aux_value_targets, output.aux_values)
     {
         let diff = aux_preds.sub(aux_targets.clone()); // [batch, num_aux]
         let sq_diff = diff.powf_scalar(2.0); // [batch, num_aux]
         let per_sample_aux_mse = sq_diff.clone().mean_dim(1); // [batch, 1]
         let aux_loss = per_sample_aux_mse.mean();
-        let al = aux_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
         total_loss = total_loss.add(aux_loss.mul_scalar(cfg.aux_value_weight));
         // Per-horizon MSE (mean over batch)
         let per_horizon = sq_diff.mean_dim(0); // [1, num_aux]
-        let per_horizon_vec = per_horizon
+        per_horizon
             .reshape([cfg.num_aux_targets])
             .into_data()
             .to_vec::<f32>()
-            .unwrap();
-        (al, per_horizon_vec)
+            .unwrap()
     } else {
-        (0.0, vec![])
+        vec![]
     };
 
     BatchLosses {
         total: total_loss.reshape([1]),
         policy: pl,
         wdl: wl,
-        aux_value: aux_vl,
-        aux_value_per_horizon: aux_vl_per_horizon,
+        aux_value_per_horizon,
     }
 }
 
@@ -238,7 +234,6 @@ fn compute_batch_losses<B: Backend>(
 struct EpochLosses {
     policy: f32,
     wdl: f32,
-    aux_value: f32,
     aux_value_per_horizon: Vec<f32>,
 }
 
@@ -297,7 +292,6 @@ where
         let mut total_policy_loss = 0.0f32;
         let mut total_wdl_loss = 0.0f32;
 
-        let mut total_aux_value_loss = 0.0f32;
         let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
         let mut num_batches = 0usize;
 
@@ -323,7 +317,6 @@ where
             total_policy_loss += losses.policy;
             total_wdl_loss += losses.wdl;
 
-            total_aux_value_loss += losses.aux_value;
             for (acc, &v) in total_aux_per_horizon
                 .iter_mut()
                 .zip(losses.aux_value_per_horizon.iter())
@@ -348,7 +341,6 @@ where
             EpochLosses {
                 policy: total_policy_loss / nb,
                 wdl: total_wdl_loss / nb,
-                aux_value: total_aux_value_loss / nb,
                 aux_value_per_horizon: total_aux_per_horizon,
             },
             num_batches,
@@ -362,7 +354,6 @@ where
         let mut total_policy_loss = 0.0f32;
         let mut total_wdl_loss = 0.0f32;
 
-        let mut total_aux_value_loss = 0.0f32;
         let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
         let mut num_batches = 0usize;
 
@@ -387,7 +378,6 @@ where
             total_policy_loss += losses.policy;
             total_wdl_loss += losses.wdl;
 
-            total_aux_value_loss += losses.aux_value;
             for (acc, &v) in total_aux_per_horizon
                 .iter_mut()
                 .zip(losses.aux_value_per_horizon.iter())
@@ -404,7 +394,6 @@ where
         EpochLosses {
             policy: total_policy_loss / nb,
             wdl: total_wdl_loss / nb,
-            aux_value: total_aux_value_loss / nb,
             aux_value_per_horizon: total_aux_per_horizon,
         }
     }
@@ -499,8 +488,6 @@ where
             loss_wdl_train: final_train.wdl,
             loss_policy_val: final_val.policy,
             loss_wdl_val: final_val.wdl,
-            loss_aux_value_train: final_train.aux_value,
-            loss_aux_value_val: final_val.aux_value,
             aux_value_losses_train: final_train.aux_value_per_horizon,
             aux_value_losses_val: final_val.aux_value_per_horizon,
             gradient_steps: total_gradient_steps,

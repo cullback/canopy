@@ -81,9 +81,6 @@ pub struct TrainMetrics {
     pub loss_wdl_train: f32,
     pub loss_policy_val: f32,
     pub loss_wdl_val: f32,
-    /// Auxiliary value loss (0.0 if disabled).
-    pub loss_aux_value_train: f32,
-    pub loss_aux_value_val: f32,
     /// Per-horizon auxiliary value MSE (empty if no aux heads).
     pub aux_value_losses_train: Vec<f32>,
     pub aux_value_losses_val: Vec<f32>,
@@ -441,8 +438,6 @@ pub fn run_training<G>(
             loss_wdl_train: train_metrics.loss_wdl_train,
             loss_policy_val: train_metrics.loss_policy_val,
             loss_wdl_val: train_metrics.loss_wdl_val,
-            loss_aux_value_train: train_metrics.loss_aux_value_train,
-            loss_aux_value_val: train_metrics.loss_aux_value_val,
             loss_aux_value_0_train: aux_t.first().copied().unwrap_or(0.0),
             loss_aux_value_0_val: aux_v.first().copied().unwrap_or(0.0),
             loss_aux_value_1_train: aux_t.get(1).copied().unwrap_or(0.0),

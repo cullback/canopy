@@ -44,10 +44,6 @@ pub(super) struct CsvRow {
     /// Validation value loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub loss_wdl_val: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_aux_value_train: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_aux_value_val: f32,
     /// Per-horizon auxiliary value MSE (0.0 if slot unused).
     #[serde(serialize_with = "round6::f32")]
     pub loss_aux_value_0_train: f32,
