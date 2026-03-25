@@ -55,12 +55,12 @@ point are just resampling the same chance distribution against a variance floor.
 Size sims for tactical depth, and expect the useful range to be lower for
 stochastic games.
 
-**Diagnose:** check `policy_surprise_avg` in metrics.csv (KL of MCTS improved
-policy vs network prior, averaged over full-search samples).
+**Diagnose:** check `policy_agreement_avg` in metrics.csv (fraction of actions
+where network top-1 matches MCTS selected action).
 
-- Near zero (< 0.1 nats) throughout training → search is decorative, increase
-  sims
-- Very large (> 2 nats) late in training → network isn't learning from search
+- Very high (> 90%) early in training → search isn't contributing beyond the
+  prior, increase sims
+- Flat or low (< 30%) late in training → network isn't learning from search
   targets, check policy loss and training pipeline
 - Value loss stuck high while policy loss declines → tree isn't deep enough for
   reliable value backups, increase sims
@@ -327,10 +327,9 @@ play → cap at 500. Catan: ~1000 actions → cap at 2000+.
 - Early iterations very slow → random play produces very long games, set a cap
   even for complex games
 
-## `warmup_iters`
+## `q_weight_ramp_iters`
 
-Ramp period for Q-weight. `warmup_frac = min(iter / warmup_iters, 1)`,
-`q_weight = frac × q_weight_max`.
+Ramp period for Q-weight. `q_weight = min(iter / q_weight_ramp_iters, 1) × q_weight_max`.
 
 Early in training the value head is random, so Q targets (derived from search
 using that value head) are noise. Z (actual game outcome) provides the only real
@@ -358,7 +357,9 @@ is `(1 - q_weight) × Z + q_weight × Q`. Values below 1.0 retain a Z anchor
 that prevents value drift from self-referential Q targets.
 
 **Initialize:** 0.85. This keeps 15% Z weight as a grounding signal. Use 1.0
-only with high sims where Q is reliably better than Z.
+only with high sims where Q is reliably better than Z. In stochastic games, Q
+hits the same variance floor as sims — the threshold for "Q reliably better
+than Z" is harder to reach, so err toward lower q_weight_max.
 
 **Diagnose:**
 
@@ -477,7 +478,7 @@ horizon in metrics.csv.
 6. `epochs` = 2, `train_batch_size` = 1024
 7. `playout_cap_full_prob` = 0.25, `playout_cap_fast_sims` = 64
 8. `concurrent_games` = 256, `inference_batch_size` = 1024
-9. `warmup_iters` = 25, `q_weight_max` = 0.85
+9. `q_weight_ramp_iters` = 25, `q_weight_max` = 0.85
 10. `explore_actions` = 20–30% of avg_game_length (10–15% for stochastic)
 11. `aux_value_horizons`: 2–4 horizons in geometric spread, well below
     avg_game_length. Essential for stochastic games.

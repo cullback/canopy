@@ -114,11 +114,6 @@ fn make_sample(
         0.0
     };
     let prior_agrees = result.prior_top1_action == result.selected_action;
-    let policy_surprise = if is_full_search {
-        compute_kl(&result.policy, &result.prior_policy)
-    } else {
-        0.0
-    };
 
     Sample {
         features: features.into_boxed_slice(),
@@ -132,7 +127,6 @@ fn make_sample(
         value_correction,
         q_std,
         prior_agrees,
-        policy_surprise,
         aux_targets: vec![0.0; num_aux_targets].into_boxed_slice(),
     }
 }
@@ -258,18 +252,6 @@ where
 // ---------------------------------------------------------------------------
 // Utility functions
 // ---------------------------------------------------------------------------
-
-/// Compute KL(target || prior) = Σ target[a] * ln(target[a] / prior[a]).
-fn compute_kl(target: &[f32], prior: &[f32]) -> f32 {
-    const EPSILON: f32 = 1e-8;
-    let mut kl = 0.0f32;
-    for (&t, &p) in target.iter().zip(prior.iter()) {
-        if t > 0.0 {
-            kl += t * (t / p.max(EPSILON)).ln();
-        }
-    }
-    kl
-}
 
 /// Compute EMA short-term value targets, backwards through the game.
 ///

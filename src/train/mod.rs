@@ -58,8 +58,6 @@ pub struct Sample {
     pub q_std: f32,
     /// Whether network's top-1 action matches MCTS selected action.
     pub prior_agrees: bool,
-    /// Raw KL(MCTS target || network prior).
-    pub policy_surprise: f32,
     /// Short-term value targets (length = aux_value_horizons.len()).
     pub aux_targets: Box<[f32]>,
 }
@@ -132,17 +130,17 @@ pub trait TrainableModel<G: Game>: Send {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/// Linear ramp from 0 to 1 over warmup_iters, uncapped.
-fn warmup_frac(config: &TrainConfig, iteration: usize) -> f64 {
-    if config.warmup_iters == 0 {
+/// Linear ramp from 0 to 1 over q_weight_ramp_iters.
+fn q_weight_ramp_frac(config: &TrainConfig, iteration: usize) -> f64 {
+    if config.q_weight_ramp_iters == 0 {
         return 1.0;
     }
-    (iteration as f64 / config.warmup_iters as f64).min(1.0)
+    (iteration as f64 / config.q_weight_ramp_iters as f64).min(1.0)
 }
 
 /// Q-weight for value target mixing: ramps from 0 to q_weight_max.
 fn q_weight(config: &TrainConfig, iteration: usize) -> f64 {
-    warmup_frac(config, iteration) * config.q_weight_max as f64
+    q_weight_ramp_frac(config, iteration) * config.q_weight_max as f64
 }
 
 // ---------------------------------------------------------------------------
@@ -480,7 +478,6 @@ pub fn run_training<G>(
             policy_max_prob_high_branch_avg: stats.policy_max_prob_high_branch_avg,
             policy_agreement_avg: stats.policy_agreement_avg,
             policy_agreement_high_branch_avg: stats.policy_agreement_high_branch_avg,
-            policy_surprise_avg: stats.policy_surprise_avg,
             // Value diagnostics
             value_z_avg: stats.value_z_avg,
             value_q_avg: stats.value_q_avg,

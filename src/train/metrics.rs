@@ -109,9 +109,6 @@ pub(super) struct CsvRow {
     /// Policy agreement restricted to positions with ≥6 legal actions.
     #[serde(serialize_with = "round6::f64")]
     pub policy_agreement_high_branch_avg: f64,
-    /// Mean KL(MCTS target || network prior) for full-search samples.
-    #[serde(serialize_with = "round6::f64")]
-    pub policy_surprise_avg: f64,
 
     // ── Value diagnostics ────────────────────────────────────────────
     /// Mean game outcome (Z) from current player's perspective. Near 0 =
@@ -158,7 +155,7 @@ pub(super) struct CsvRow {
     #[serde(serialize_with = "round6::f64")]
     pub lr: f64,
     /// Weight of Q in value target blend (0 = pure Z, 1 = pure Q).
-    /// Ramps from 0→1 over `warmup_iters`.
+    /// Ramps from 0→q_weight_max over `q_weight_ramp_iters`.
     #[serde(serialize_with = "round6::f32")]
     pub q_weight: f32,
     /// Effective MCTS simulations this iteration (may ramp up during warmup).
@@ -287,8 +284,6 @@ pub(super) struct IterStats {
     pub policy_agreement_avg: f64,
     /// Policy agreement restricted to high-branch (≥6 legal) positions.
     pub policy_agreement_high_branch_avg: f64,
-    /// Mean KL(MCTS target || network prior) for full-search samples.
-    pub policy_surprise_avg: f64,
     pub value_z_avg: f64,
     pub value_q_avg: f64,
     pub value_z_stddev: f64,
@@ -383,17 +378,6 @@ pub(super) fn compute_iter_stats(samples: &[&Sample]) -> IterStats {
     let hb_n = hb_count.max(1) as f64;
 
     let avg_policy_agreement = samples.iter().filter(|s| s.prior_agrees).count() as f64 / n;
-    let full_search_count = samples.iter().filter(|s| s.full_search).count();
-    let policy_surprise_avg = if full_search_count > 0 {
-        samples
-            .iter()
-            .filter(|s| s.full_search)
-            .map(|s| s.policy_surprise as f64)
-            .sum::<f64>()
-            / full_search_count as f64
-    } else {
-        0.0
-    };
     let avg_value_correction = samples
         .iter()
         .map(|s| s.value_correction as f64)
@@ -456,7 +440,6 @@ pub(super) fn compute_iter_stats(samples: &[&Sample]) -> IterStats {
         policy_max_prob_high_branch_avg: hb_max_prob_sum / hb_n,
         policy_agreement_avg: avg_policy_agreement,
         policy_agreement_high_branch_avg: hb_agreement_count as f64 / hb_n,
-        policy_surprise_avg,
         value_z_avg: mean_z,
         value_q_avg: mean_q,
         value_z_stddev: var_z.sqrt(),

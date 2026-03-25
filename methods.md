@@ -26,19 +26,13 @@ All nodes in a flat `Vec`, edges packed contiguously, integer indices instead of
 
 ## Training targets - Value target mixing — _high impact_
 
-Mixes game outcome `z` with MCTS root Q-value `q`: `target = (1-α)·z + α·q`. The mixing weight `q_weight` (α) ramps linearly from 0 to 1 over `warmup_iters` — early in training the value head is weak so Q is garbage, and pure game outcome Z provides the only real signal despite its variance. As the network improves, Q becomes a better per-position target than Z because it averages over many simulations rather than one game result. By the end of warmup, training uses pure Q. Critical for stochastic games like Catan where dice variance makes pure Z extremely noisy throughout training.
+Mixes game outcome `z` with MCTS root Q-value `q`: `target = (1-α)·z + α·q`. The mixing weight `q_weight` (α) ramps linearly from 0 to `q_weight_max` over `q_weight_ramp_iters` — early in training the value head is weak so Q is garbage, and pure game outcome Z provides the only real signal despite its variance. As the network improves, Q becomes a better per-position target than Z because it averages over many simulations rather than one game result. By the end of the ramp, Q dominates. Critical for stochastic games like Catan where dice variance makes pure Z extremely noisy throughout training.
 
 ## Training targets - Soft policy target — _medium impact_
 
 A second policy head trained against a softened MCTS target: `soft_target = normalize(policy_target^(1/T))` with temperature T (default 4.0). Acts as a regularizer on the shared trunk — the soft head sees a smoother target that preserves probability mass on runner-up actions, preventing the network from becoming overly sharp. The soft head shares all intermediate features with the hard policy head; only the final linear projections are separate (~10K extra parameters). Controlled by `soft_policy_temperature` (0.0 disables) and `soft_policy_weight` (default 8.0).
 
 Reference: [KataGo Methods](https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md) — "Soft Policy"
-
-## Training targets - Policy surprise weighting — _medium impact_
-
-Weights training samples by how much MCTS search changed the network's policy. Computes KL divergence between the MCTS improved policy and the network prior for each position: `KL = Σ target[a] · ln(target[a] / prior[a])`. Positions where search discovered something the network didn't expect get more gradient signal. Weights are normalized per-game to avoid cross-game scale issues. Controlled by `surprise_weight_fraction` (default 0.5; 0.0 disables). At fraction f, each sample gets weight `(1-f)/N + f·kl/total_kl`.
-
-Reference: [KataGo Methods](https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md) — "Policy Surprise Weighting"
 
 ## Training targets - Auxiliary short-term value heads — _medium impact_
 
