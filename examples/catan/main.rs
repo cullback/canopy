@@ -42,7 +42,7 @@ fn main() {
         "nexus",
         TrainConfig {
             iterations: 1000,
-            train_samples_per_iter: 50_000,
+            train_samples_per_iter: 100_000,
             replay_buffer_samples: 350_000,
             max_actions: 2000,
             epochs: 2,
@@ -50,7 +50,7 @@ fn main() {
             mcts_sims: 400,
             train_batch_size: 1024,
             leaf_batch_size: 8,
-            concurrent_games: 256,
+            concurrent_games: 512,
             gumbel_m: 16,
             explore_actions: 16,
             q_weight_ramp_iters: 60,
