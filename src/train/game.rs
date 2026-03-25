@@ -175,24 +175,36 @@ where
     let mut actions_buf = Vec::new();
     let mut encode_buf = Vec::with_capacity(feature_size);
     let mut action_count: u32 = 0;
+    let max = actor_config.max_actions;
 
     loop {
-        // Resolve chance nodes
-        if let Some(action) = search.state().sample_chance(rng) {
-            action_count += 1;
-            search.apply_action(action);
-            continue;
+        // Advance through chance nodes and forced actions
+        loop {
+            if max > 0 && action_count >= max {
+                break;
+            }
+            if let Some(action) = search.state().sample_chance(rng) {
+                action_count += 1;
+                search.apply_action(action);
+            } else {
+                actions_buf.clear();
+                search.state().legal_actions(&mut actions_buf);
+                if actions_buf.len() == 1 {
+                    action_count += 1;
+                    search.apply_action(actions_buf[0]);
+                } else {
+                    break;
+                }
+            }
         }
 
-        // Terminal check
-        let (terminated, reward) = match search.state().status() {
-            Status::Terminal(reward) => (true, reward),
-            _ if actor_config.max_actions > 0 && action_count >= actor_config.max_actions => {
-                (true, 0.0)
-            }
-            _ => (false, 0.0),
+        // Terminal / max-actions check
+        let reward = match search.state().status() {
+            Status::Terminal(r) => Some(r),
+            _ if max > 0 && action_count >= max => Some(0.0),
+            _ => None,
         };
-        if terminated {
+        if let Some(reward) = reward {
             finalize_samples(
                 &mut samples,
                 reward,
@@ -203,15 +215,6 @@ where
         }
 
         let sign = search.state().current_sign();
-
-        // Skip forced actions (single legal action)
-        actions_buf.clear();
-        search.state().legal_actions(&mut actions_buf);
-        if actions_buf.len() == 1 {
-            action_count += 1;
-            search.apply_action(actions_buf[0]);
-            continue;
-        }
 
         // Playout cap randomization
         let is_full_search = rng.f32() < actor_config.playout_cap_full_prob;
