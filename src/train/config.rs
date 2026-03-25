@@ -114,12 +114,12 @@ impl Default for TrainConfig {
             resume: None,
 
             // Training
-            epochs: 3,
+            epochs: 2,
             train_batch_size: 1024,
             lr: 0.001,
             train_samples_per_iter: 20_000,
-            replay_buffer_samples: 200_000,
-            q_weight_ramp_iters: 100,
+            replay_buffer_samples: 100_000,
+            q_weight_ramp_iters: 25,
             q_weight_max: 0.85,
 
             // Self-play
@@ -131,11 +131,11 @@ impl Default for TrainConfig {
             playout_cap_fast_sims: 64,
 
             // MCTS
-            mcts_sims: 800,
+            mcts_sims: 200,
             gumbel_m: 16,
             c_visit: 50.0,
             c_scale: 1.0,
-            leaf_batch_size: 16,
+            leaf_batch_size: 4,
 
             // Checkpointing
             checkpoint_interval: 1,
