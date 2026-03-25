@@ -78,8 +78,6 @@ struct BatchTensors<B: Backend> {
     value_targets: Tensor<B, 2>,
     mask: Tensor<B, 2>,
     num_full: usize,
-    /// Soft policy target (raised to 1/T and renormalized). None if T=0.
-    soft_policy_targets: Option<Tensor<B, 2>>,
     /// Auxiliary value targets [batch, num_aux]. None if no aux heads.
     aux_value_targets: Option<Tensor<B, 2>>,
 }
@@ -137,33 +135,6 @@ fn prepare_batch<B: Backend>(
 
     let num_full = samples.iter().filter(|s| s.full_search).count();
 
-    // Soft policy target: policy_target^(1/T) renormalized
-    let soft_policy_targets = if cfg.soft_policy_temperature > 0.0 {
-        let inv_t = 1.0 / cfg.soft_policy_temperature;
-        let mut soft_data = Vec::with_capacity(bs * num_actions);
-        for s in samples {
-            let mut row = Vec::with_capacity(num_actions);
-            let mut sum = 0.0f32;
-            for &p in s.policy_target.iter() {
-                let v = if p > 0.0 { p.powf(inv_t) } else { 0.0 };
-                row.push(v);
-                sum += v;
-            }
-            if sum > 0.0 {
-                for v in &mut row {
-                    *v /= sum;
-                }
-            }
-            soft_data.extend_from_slice(&row);
-        }
-        Some(Tensor::<B, 2>::from_data(
-            TensorData::new(soft_data, [bs, num_actions]),
-            device,
-        ))
-    } else {
-        None
-    };
-
     // Auxiliary value targets
     let aux_value_targets = if cfg.num_aux_targets > 0 {
         let aux_data: Vec<f32> = samples
@@ -184,7 +155,6 @@ fn prepare_batch<B: Backend>(
         value_targets: value_tensor,
         mask: mask_tensor,
         num_full,
-        soft_policy_targets,
         aux_value_targets,
     }
 }
@@ -194,7 +164,6 @@ struct BatchLosses<B: Backend> {
     total: Tensor<B, 1>,
     policy: f32,
     wdl: f32,
-    soft_policy: f32,
     aux_value: f32,
     /// Per-horizon auxiliary value MSE (empty if no aux heads).
     aux_value_per_horizon: Vec<f32>,
@@ -233,20 +202,6 @@ fn compute_batch_losses<B: Backend>(
 
     let mut total_loss = policy_loss.add(wdl_loss);
 
-    // Soft policy loss
-    let soft_pl = if let (Some(soft_targets), Some(soft_logits)) =
-        (&batch.soft_policy_targets, output.soft_policy_logits)
-    {
-        let soft_log_probs = log_softmax(soft_logits, 1);
-        let soft_ce = soft_targets.clone().mul(soft_log_probs).sum_dim(1).neg(); // [batch, 1]
-        let soft_loss = soft_ce.mul(batch.mask.clone()).sum().div_scalar(denom);
-        let sl = soft_loss.clone().into_data().to_vec::<f32>().unwrap()[0];
-        total_loss = total_loss.add(soft_loss.mul_scalar(cfg.soft_policy_weight));
-        sl
-    } else {
-        0.0
-    };
-
     // Auxiliary value loss
     let (aux_vl, aux_vl_per_horizon) = if let (Some(aux_targets), Some(aux_preds)) =
         (&batch.aux_value_targets, output.aux_values)
@@ -273,7 +228,6 @@ fn compute_batch_losses<B: Backend>(
         total: total_loss.reshape([1]),
         policy: pl,
         wdl: wl,
-        soft_policy: soft_pl,
         aux_value: aux_vl,
         aux_value_per_horizon: aux_vl_per_horizon,
     }
@@ -284,7 +238,6 @@ fn compute_batch_losses<B: Backend>(
 struct EpochLosses {
     policy: f32,
     wdl: f32,
-    soft_policy: f32,
     aux_value: f32,
     aux_value_per_horizon: Vec<f32>,
 }
@@ -343,7 +296,7 @@ where
 
         let mut total_policy_loss = 0.0f32;
         let mut total_wdl_loss = 0.0f32;
-        let mut total_soft_policy_loss = 0.0f32;
+
         let mut total_aux_value_loss = 0.0f32;
         let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
         let mut num_batches = 0usize;
@@ -369,7 +322,7 @@ where
 
             total_policy_loss += losses.policy;
             total_wdl_loss += losses.wdl;
-            total_soft_policy_loss += losses.soft_policy;
+
             total_aux_value_loss += losses.aux_value;
             for (acc, &v) in total_aux_per_horizon
                 .iter_mut()
@@ -395,7 +348,6 @@ where
             EpochLosses {
                 policy: total_policy_loss / nb,
                 wdl: total_wdl_loss / nb,
-                soft_policy: total_soft_policy_loss / nb,
                 aux_value: total_aux_value_loss / nb,
                 aux_value_per_horizon: total_aux_per_horizon,
             },
@@ -409,7 +361,7 @@ where
 
         let mut total_policy_loss = 0.0f32;
         let mut total_wdl_loss = 0.0f32;
-        let mut total_soft_policy_loss = 0.0f32;
+
         let mut total_aux_value_loss = 0.0f32;
         let mut total_aux_per_horizon = vec![0.0f32; cfg.num_aux_targets];
         let mut num_batches = 0usize;
@@ -434,7 +386,7 @@ where
 
             total_policy_loss += losses.policy;
             total_wdl_loss += losses.wdl;
-            total_soft_policy_loss += losses.soft_policy;
+
             total_aux_value_loss += losses.aux_value;
             for (acc, &v) in total_aux_per_horizon
                 .iter_mut()
@@ -452,7 +404,6 @@ where
         EpochLosses {
             policy: total_policy_loss / nb,
             wdl: total_wdl_loss / nb,
-            soft_policy: total_soft_policy_loss / nb,
             aux_value: total_aux_value_loss / nb,
             aux_value_per_horizon: total_aux_per_horizon,
         }
@@ -548,8 +499,6 @@ where
             loss_wdl_train: final_train.wdl,
             loss_policy_val: final_val.policy,
             loss_wdl_val: final_val.wdl,
-            loss_soft_policy_train: final_train.soft_policy,
-            loss_soft_policy_val: final_val.soft_policy,
             loss_aux_value_train: final_train.aux_value,
             loss_aux_value_val: final_val.aux_value,
             aux_value_losses_train: final_train.aux_value_per_horizon,

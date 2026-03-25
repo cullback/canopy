@@ -35,7 +35,6 @@ impl<B: Backend> PolicyValueNet<B> for PigModel<B> {
         ForwardOutput {
             policy_logits: policy,
             value,
-            soft_policy_logits: None,
             aux_values: None,
         }
     }

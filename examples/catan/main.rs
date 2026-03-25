@@ -53,7 +53,7 @@ fn main() {
             concurrent_games: 256,
             gumbel_m: 16,
             explore_actions: 48,
-            warmup_iters: 60,
+            q_weight_ramp_iters: 60,
             aux_value_horizons: vec![10, 30, 100],
             ..TrainConfig::default()
         },

@@ -24,8 +24,6 @@ pub struct ForwardOutput<B: Backend> {
     /// WDL logits `[batch, 3]` (pre-softmax). Softmax → `[win, draw, loss]`
     /// probabilities from the current player's perspective.
     pub value: Tensor<B, 2>,
-    /// Soft policy logits `[batch, num_actions]` — `None` if model has no soft head.
-    pub soft_policy_logits: Option<Tensor<B, 2>>,
     /// Auxiliary short-term value predictions `[batch, num_aux]` — `None` if no aux heads.
     pub aux_values: Option<Tensor<B, 2>>,
 }

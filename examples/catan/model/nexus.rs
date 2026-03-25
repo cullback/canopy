@@ -241,14 +241,6 @@ pub struct CatanNexusModel<B: Backend> {
     policy_robber1: Linear<B>,
     policy_robber2: Linear<B>,
 
-    // Soft policy heads (separate final projections, share intermediate features
-    // with hard policy; trained against softened MCTS target as regularizer)
-    soft_policy_settlement2: Linear<B>,
-    soft_policy_road2: Linear<B>,
-    soft_policy_city2: Linear<B>,
-    soft_policy_other2: Linear<B>,
-    soft_policy_robber2: Linear<B>,
-
     // Value head
     value1: Linear<B>,
     value2: Linear<B>,
@@ -322,12 +314,6 @@ pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Catan
         policy_other2: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
         policy_robber1: LinearConfig::new(HIDDEN, HIDDEN).init(device),
         policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
-
-        soft_policy_settlement2: LinearConfig::new(HIDDEN, 1).init(device),
-        soft_policy_road2: LinearConfig::new(HIDDEN, 1).init(device),
-        soft_policy_city2: LinearConfig::new(HIDDEN, 1).init(device),
-        soft_policy_other2: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
-        soft_policy_robber2: LinearConfig::new(HIDDEN, 1).init(device),
 
         value1: LinearConfig::new(pool_dim, HIDDEN).init(device),
         value2: LinearConfig::new(HIDDEN, HIDDEN).init(device),
@@ -426,7 +412,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         );
         let settlement_logits = self
             .policy_settlement2
-            .forward(settlement_hidden.clone())
+            .forward(settlement_hidden)
             .reshape([batch, NUM_NODES]);
 
         // ── Policy: Road (actions 54-125) ────────────────────────────
@@ -441,7 +427,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         );
         let road_logits = self
             .policy_road2
-            .forward(edge_feats_hidden.clone())
+            .forward(edge_feats_hidden)
             .reshape([batch, NUM_EDGES]);
 
         // ── Policy: City (actions 126-179) ───────────────────────────
@@ -451,7 +437,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         );
         let city_logits = self
             .policy_city2
-            .forward(city_hidden.clone())
+            .forward(city_hidden)
             .reshape([batch, NUM_NODES]);
 
         // ── Pooled features (shared by other-policy and value heads) ─
@@ -461,7 +447,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
 
         // ── Policy: Other (50 non-robber actions) ────────────────────
         let other_hidden = relu(self.policy_other1.forward(pooled.clone()));
-        let other_logits = self.policy_other2.forward(other_hidden.clone());
+        let other_logits = self.policy_other2.forward(other_hidden);
         // Split into pre-robber [25] and post-robber [25]
         let other_pre = other_logits.clone().narrow(1, 0, NUM_OTHER_PRE);
         let other_post = other_logits.narrow(1, NUM_OTHER_PRE, NUM_OTHER_POST);
@@ -473,7 +459,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         );
         let robber_logits = self
             .policy_robber2
-            .forward(robber_hidden.clone())
+            .forward(robber_hidden)
             .reshape([batch, NUM_TILES]);
 
         // ── Concatenate: [settlement(54)|road(72)|city(54)|other_pre(25)|robber(19)|other_post(25)]
@@ -485,38 +471,6 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
                 other_pre,
                 robber_logits,
                 other_post,
-            ],
-            1,
-        );
-
-        // ── Soft policy (shares intermediate features, separate final projections) ──
-        let soft_settlement = self
-            .soft_policy_settlement2
-            .forward(settlement_hidden)
-            .reshape([batch, NUM_NODES]);
-        let soft_road = self
-            .soft_policy_road2
-            .forward(edge_feats_hidden.reshape([batch * NUM_EDGES, HIDDEN]))
-            .reshape([batch, NUM_EDGES]);
-        let soft_city = self
-            .soft_policy_city2
-            .forward(city_hidden)
-            .reshape([batch, NUM_NODES]);
-        let soft_other = self.soft_policy_other2.forward(other_hidden);
-        let soft_other_pre = soft_other.clone().narrow(1, 0, NUM_OTHER_PRE);
-        let soft_other_post = soft_other.narrow(1, NUM_OTHER_PRE, NUM_OTHER_POST);
-        let soft_robber = self
-            .soft_policy_robber2
-            .forward(robber_hidden.reshape([batch * NUM_TILES, HIDDEN]))
-            .reshape([batch, NUM_TILES]);
-        let soft_policy_logits = Tensor::cat(
-            vec![
-                soft_settlement,
-                soft_road,
-                soft_city,
-                soft_other_pre,
-                soft_robber,
-                soft_other_post,
             ],
             1,
         );
@@ -539,7 +493,6 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
         ForwardOutput {
             policy_logits: policy,
             value,
-            soft_policy_logits: Some(soft_policy_logits),
             aux_values,
         }
     }

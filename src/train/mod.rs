@@ -69,10 +69,6 @@ pub struct TrainStepConfig {
     pub epochs: usize,
     /// Weight of Q in value target: 0.0 = pure Z, 1.0 = pure Q.
     pub q_weight: f32,
-    /// Temperature for soft policy target (0.0 = disabled).
-    pub soft_policy_temperature: f32,
-    /// Weight of soft policy loss.
-    pub soft_policy_weight: f32,
     /// Per-head weight for auxiliary value losses.
     pub aux_value_weight: f32,
     /// Number of auxiliary value targets per sample.
@@ -85,9 +81,6 @@ pub struct TrainMetrics {
     pub loss_wdl_train: f32,
     pub loss_policy_val: f32,
     pub loss_wdl_val: f32,
-    /// Soft policy loss (0.0 if disabled).
-    pub loss_soft_policy_train: f32,
-    pub loss_soft_policy_val: f32,
     /// Auxiliary value loss (0.0 if disabled).
     pub loss_aux_value_train: f32,
     pub loss_aux_value_val: f32,
@@ -373,8 +366,6 @@ pub fn run_training<G>(
             train_batch_size: config.train_batch_size,
             epochs: config.epochs,
             q_weight,
-            soft_policy_temperature: config.soft_policy_temperature,
-            soft_policy_weight: config.soft_policy_weight,
             aux_value_weight: config.aux_value_weight,
             num_aux_targets: config.aux_value_horizons.len(),
         };
@@ -450,8 +441,6 @@ pub fn run_training<G>(
             loss_wdl_train: train_metrics.loss_wdl_train,
             loss_policy_val: train_metrics.loss_policy_val,
             loss_wdl_val: train_metrics.loss_wdl_val,
-            loss_soft_policy_train: train_metrics.loss_soft_policy_train,
-            loss_soft_policy_val: train_metrics.loss_soft_policy_val,
             loss_aux_value_train: train_metrics.loss_aux_value_train,
             loss_aux_value_val: train_metrics.loss_aux_value_val,
             loss_aux_value_0_train: aux_t.first().copied().unwrap_or(0.0),

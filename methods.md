@@ -28,12 +28,6 @@ All nodes in a flat `Vec`, edges packed contiguously, integer indices instead of
 
 Mixes game outcome `z` with MCTS root Q-value `q`: `target = (1-α)·z + α·q`. The mixing weight `q_weight` (α) ramps linearly from 0 to `q_weight_max` over `q_weight_ramp_iters` — early in training the value head is weak so Q is garbage, and pure game outcome Z provides the only real signal despite its variance. As the network improves, Q becomes a better per-position target than Z because it averages over many simulations rather than one game result. By the end of the ramp, Q dominates. Critical for stochastic games like Catan where dice variance makes pure Z extremely noisy throughout training.
 
-## Training targets - Soft policy target — _medium impact_
-
-A second policy head trained against a softened MCTS target: `soft_target = normalize(policy_target^(1/T))` with temperature T (default 4.0). Acts as a regularizer on the shared trunk — the soft head sees a smoother target that preserves probability mass on runner-up actions, preventing the network from becoming overly sharp. The soft head shares all intermediate features with the hard policy head; only the final linear projections are separate (~10K extra parameters). Controlled by `soft_policy_temperature` (0.0 disables) and `soft_policy_weight` (default 8.0).
-
-Reference: [KataGo Methods](https://github.com/lightvector/KataGo/blob/master/docs/KataGoMethods.md) — "Soft Policy"
-
 ## Training targets - Auxiliary short-term value heads — _medium impact_
 
 Additional value heads trained on exponential moving averages of future Q-values, providing intermediate-horizon value signals alongside the main game-outcome value head. For each horizon h, targets are computed backwards through the game: `ema = α·Q[t] + (1-α)·ema` with `α = 1 - exp(-1/h)`. This gives the network credit for predicting what search will think a few actions ahead, not just the final outcome. Shares a hidden layer across all horizons with a single multi-output projection. Controlled by `aux_value_horizons` (e.g. `[4, 10, 30]` for Catan's ~90-move games; empty disables) and `aux_value_weight` (default 0.5 per head).

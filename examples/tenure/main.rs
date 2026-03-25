@@ -95,7 +95,7 @@ fn main() {
             mcts_sims: 200,
             epochs: 3,
             train_batch_size: 256,
-            warmup_iters: 15,
+            q_weight_ramp_iters: 15,
             concurrent_games: 20,
             leaf_batch_size: 8,
             explore_actions: 10,

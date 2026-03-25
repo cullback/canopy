@@ -250,10 +250,10 @@ pub fn train_command() -> Command {
                 .help("Resume training from checkpoint path (e.g. checkpoints/run/model_iter_10)"),
         )
         .arg(
-            Arg::new("warmup-iters")
-                .long("warmup-iters")
-                .default_value(d.warmup_iters.to_string())
-                .help("Iterations to ramp MCTS sims and Z→Q blend together"),
+            Arg::new("q-weight-ramp-iters")
+                .long("q-weight-ramp-iters")
+                .default_value(d.q_weight_ramp_iters.to_string())
+                .help("Iterations to ramp Q-weight from 0 to q_weight_max"),
         )
         .arg(
             Arg::new("checkpoint-interval")
@@ -769,8 +769,8 @@ pub fn parse_train_config(
     if set("resume") {
         config.resume = matches.get_one::<String>("resume").map(PathBuf::from);
     }
-    if set("warmup-iters") {
-        config.warmup_iters = val("warmup-iters").parse().unwrap();
+    if set("q-weight-ramp-iters") {
+        config.q_weight_ramp_iters = val("q-weight-ramp-iters").parse().unwrap();
     }
     if set("checkpoint-interval") {
         config.checkpoint_interval = val("checkpoint-interval").parse().unwrap();

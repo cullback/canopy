@@ -53,7 +53,7 @@ pub struct TrainConfig {
     /// sims vs one game result), and deeper search produces higher-quality Q. A
     /// small Z anchor (via `q_weight_max < 1.0`) prevents value drift from purely
     /// self-generated Q targets.
-    pub warmup_iters: usize,
+    pub q_weight_ramp_iters: usize,
     /// Maximum q_weight after warmup ramp. Values < 1.0 retain a Z (game outcome)
     /// anchor to prevent value drift from purely self-generated Q targets.
     pub q_weight_max: f32,
@@ -97,12 +97,6 @@ pub struct TrainConfig {
     #[serde(skip)]
     pub inference_workers: usize,
 
-    // -- Soft policy --
-    /// Temperature for soft policy target (0.0 = disabled).
-    pub soft_policy_temperature: f32,
-    /// Weight of soft policy loss.
-    pub soft_policy_weight: f32,
-
     // -- Auxiliary short-term value heads --
     /// EMA horizons for auxiliary value heads (empty = disabled). E.g. [6, 16, 50].
     pub aux_value_horizons: Vec<u32>,
@@ -125,7 +119,7 @@ impl Default for TrainConfig {
             lr: 0.001,
             train_samples_per_iter: 20_000,
             replay_buffer_samples: 200_000,
-            warmup_iters: 100,
+            q_weight_ramp_iters: 100,
             q_weight_max: 0.85,
 
             // Self-play
@@ -147,10 +141,6 @@ impl Default for TrainConfig {
             checkpoint_interval: 1,
 
             inference_workers: 1,
-
-            // Soft policy
-            soft_policy_temperature: 4.0,
-            soft_policy_weight: 8.0,
 
             // Auxiliary short-term value heads
             aux_value_horizons: vec![],

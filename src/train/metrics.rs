@@ -36,18 +36,14 @@ pub(super) struct CsvRow {
     pub iteration: usize,
     #[serde(serialize_with = "round6::f32")]
     pub loss_policy_train: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_wdl_train: f32,
     /// Validation policy loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub loss_policy_val: f32,
+    #[serde(serialize_with = "round6::f32")]
+    pub loss_wdl_train: f32,
     /// Validation value loss (held-out split of replay buffer).
     #[serde(serialize_with = "round6::f32")]
     pub loss_wdl_val: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_soft_policy_train: f32,
-    #[serde(serialize_with = "round6::f32")]
-    pub loss_soft_policy_val: f32,
     #[serde(serialize_with = "round6::f32")]
     pub loss_aux_value_train: f32,
     #[serde(serialize_with = "round6::f32")]
@@ -158,7 +154,7 @@ pub(super) struct CsvRow {
     /// Ramps from 0→q_weight_max over `q_weight_ramp_iters`.
     #[serde(serialize_with = "round6::f32")]
     pub q_weight: f32,
-    /// Effective MCTS simulations this iteration (may ramp up during warmup).
+    /// MCTS simulations per action this iteration.
     pub mcts_sims: u32,
     /// Total samples in the replay buffer (across all retained iterations).
     pub replay_samples: usize,
