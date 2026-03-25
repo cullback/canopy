@@ -72,17 +72,17 @@ pub struct TrainConfig {
     pub inference_batch_size: usize,
     /// Terminate games exceeding this many actions (including chance nodes) as a
     /// draw (reward = 0). 0 = no limit.
-    pub max_moves: u32,
-    /// Early-game turns where action is sampled from improved policy
+    pub max_actions: u32,
+    /// Early-game actions where the action is sampled from improved policy
     /// (for exploration diversity). After this, the best action is used deterministically.
-    pub explore_moves: u32,
-    /// Probability of full search per move (playout cap randomization).
+    pub explore_actions: u32,
+    /// Probability of full search per action (playout cap randomization).
     pub playout_cap_full_prob: f32,
-    /// Simulations for fast (non-full) search moves (playout cap randomization).
+    /// Simulations for fast (non-full) search actions (playout cap randomization).
     pub playout_cap_fast_sims: u32,
 
     // -- MCTS --
-    /// MCTS simulations per move during self-play (full-search budget).
+    /// MCTS simulations per action during self-play (full-search budget).
     pub mcts_sims: u32,
     /// Starting MCTS simulations for progressive ramp (ramps linearly to `mcts_sims`).
     /// Set equal to `mcts_sims` for no ramp.
@@ -141,8 +141,8 @@ impl Default for TrainConfig {
             // Self-play
             concurrent_games: 256,
             inference_batch_size: 1024,
-            max_moves: 0,
-            explore_moves: 30,
+            max_actions: 0,
+            explore_actions: 30,
             playout_cap_full_prob: 0.25,
             playout_cap_fast_sims: 64,
 

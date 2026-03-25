@@ -414,7 +414,7 @@ impl Tree {
         // so we wrap each element in Option and use .take() to move ownership out.
         // This costs one extra allocation + bool per element; an alternative would
         // be unsafe swap-remove or sentinel values, but this is only called once
-        // per move (between turns) so clarity wins over micro-optimization.
+        // per action so clarity wins over micro-optimization.
         let mut old_nodes: Vec<Option<NodeEntry>> = std::mem::take(&mut self.nodes)
             .into_iter()
             .map(Some)

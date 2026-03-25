@@ -46,8 +46,8 @@ pub struct Sample {
     pub q_wdl: [f32; 3],
     /// Whether this position used full search (for playout cap randomization)
     pub full_search: bool,
-    /// Turn number when this sample was generated (1-indexed).
-    pub move_number: u32,
+    /// Action index when this sample was generated (0-indexed).
+    pub action_number: u32,
     /// Total game length (backfilled after game ends).
     pub game_length: u32,
     /// Raw network value for this position (current player's perspective).
@@ -223,8 +223,8 @@ pub fn run_training<G>(
     };
 
     let actor_config = Arc::new(game::ActorConfig {
-        max_moves: config.max_moves,
-        explore_moves: config.explore_moves,
+        max_actions: config.max_actions,
+        explore_actions: config.explore_actions,
         playout_cap_full_prob: config.playout_cap_full_prob,
         playout_cap_fast_sims_base: config.playout_cap_fast_sims,
         num_aux_targets: config.aux_value_horizons.len(),

@@ -12,7 +12,7 @@ pub enum ClientMsg {
     NewGame { seed: Option<u64> },
     /// Human plays an action.
     PlayAction { action: usize },
-    /// Request the bot to play a move.
+    /// Request the bot to play an action.
     BotMove { simulations: Option<u32> },
     /// Run N additional simulations on current state (step debugger).
     RunSims { count: u32 },

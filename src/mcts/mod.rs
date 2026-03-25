@@ -129,7 +129,7 @@ pub enum Step<'a, G: Game> {
 
 /// Gumbel AlphaZero MCTS, driven as a state machine.
 ///
-/// The search tree persists across moves so that subtrees explored in earlier
+/// The search tree persists across actions so that subtrees explored in earlier
 /// searches can be reused (the tree is compacted, not rebuilt, on each new
 /// search).  The public methods form a simple protocol:
 ///

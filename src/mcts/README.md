@@ -14,7 +14,7 @@ search.apply_action(action: usize)
 search.step(evals: &[Evaluation], rng: &mut Rng) -> Step<'_, G>
 ```
 
-The search tree persists across moves. Call `apply_action` to mirror game actions — if the tree has an expanded child for that action, the root pointer follows it in O(1). The next search compacts the tree to the surviving subtree. If the child wasn't expanded, the tree is discarded and a fresh search starts.
+The search tree persists across actions. Call `apply_action` to mirror game actions — if the tree has an expanded child for that action, the root pointer follows it in O(1). The next search compacts the tree to the surviving subtree. If the child wasn't expanded, the tree is discarded and a fresh search starts.
 
 ### `Step` — state-machine output
 
@@ -90,7 +90,7 @@ Replaces PUCT selection, Dirichlet noise, temperature-based action sampling, and
 
 > **DAG-based graph search instead of a tree**
 
-Replaces the tree with a directed acyclic graph, enabling transposition tables where different move sequences reaching the same board state share a single node. Degrades gracefully to normal MCTS if no transpositions exist. Games opt in by implementing `state_key() -> Option<u64>`. Backpropagation runs up the current path only (standard approach — full DAG-aware backprop is expensive).
+Replaces the tree with a directed acyclic graph, enabling transposition tables where different action sequences reaching the same board state share a single node. Degrades gracefully to normal MCTS if no transpositions exist. Games opt in by implementing `state_key() -> Option<u64>`. Backpropagation runs up the current path only (standard approach — full DAG-aware backprop is expensive).
 
 > **Resumable search with batched NN evaluation**
 
@@ -98,7 +98,7 @@ Splits the MCTS loop so that search pauses at leaf nodes, batches multiple pendi
 
 > **Efficient arena-based data structure with tree reuse**
 
-All nodes live in a flat `Vec` arena, edges in a packed contiguous `Vec`, with integer `NodeId` indices instead of pointers. Tree reuse works by rerooting the DAG after each move via `apply_action` + `compact` rather than discarding and rebuilding. Compaction is O(reachable nodes), typically much smaller than the full tree.
+All nodes live in a flat `Vec` arena, edges in a packed contiguous `Vec`, with integer `NodeId` indices instead of pointers. Tree reuse works by rerooting the DAG after each action via `apply_action` + `compact` rather than discarding and rebuilding. Compaction is O(reachable nodes), typically much smaller than the full tree.
 
 > **Leaf parallelism via virtual loss**
 

@@ -244,7 +244,7 @@ fn main() {
             warmup_iters: 20,
             concurrent_games: 10,
             leaf_batch_size: 1,
-            explore_moves: 0,
+            explore_actions: 0,
             ..TrainConfig::default()
         },
     );

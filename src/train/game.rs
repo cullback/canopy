@@ -2,7 +2,7 @@
 //!
 //! Pure game logic — no channels, batching, or GPU knowledge. Leaf evaluation
 //! is delegated to a caller-provided async `infer` closure. Handles chance
-//! nodes, forced moves, MCTS search, playout cap randomization, training
+//! nodes, forced actions, MCTS search, playout cap randomization, training
 //! sample collection, and post-game processing (short-term value EMA targets).
 
 use std::future::Future;
@@ -16,8 +16,8 @@ use super::Sample;
 
 /// Per-game config knobs derived from [`super::TrainConfig`].
 pub(super) struct ActorConfig {
-    pub max_moves: u32,
-    pub explore_moves: u32,
+    pub max_actions: u32,
+    pub explore_actions: u32,
     pub playout_cap_full_prob: f32,
     pub playout_cap_fast_sims_base: u32,
     pub num_aux_targets: usize,
@@ -134,7 +134,7 @@ fn make_sample(
         z: sign,
         q_wdl,
         full_search: is_full_search,
-        move_number: action_count,
+        action_number: action_count,
         game_length: 0, // backfilled at game end
         network_value: result.network_value * sign,
         value_correction,
@@ -167,7 +167,7 @@ fn finalize_samples(
 
 /// Play one full self-play game, returning collected training samples.
 ///
-/// Pure game logic: chance nodes → forced moves → MCTS search → sample → apply.
+/// Pure game logic: chance nodes → forced actions → MCTS search → sample → apply.
 /// Leaf evaluation is delegated to the caller-provided `infer` closure, keeping
 /// this function free of any channel, batching, or GPU knowledge.
 pub(super) async fn play_game<G, F, Fut>(
@@ -202,8 +202,8 @@ where
         // Terminal check
         let (terminated, reward) = match search.state().status() {
             Status::Terminal(reward) => (true, reward),
-            _ if actor_config.max_moves > 0
-                && all_actions.len() as u32 >= actor_config.max_moves =>
+            _ if actor_config.max_actions > 0
+                && all_actions.len() as u32 >= actor_config.max_actions =>
             {
                 (true, 0.0)
             }
@@ -226,7 +226,7 @@ where
 
         let sign = search.state().current_sign();
 
-        // Skip forced moves (single legal action)
+        // Skip forced actions (single legal action)
         actions_buf.clear();
         search.state().legal_actions(&mut actions_buf);
         if actions_buf.len() == 1 {
@@ -251,7 +251,7 @@ where
         let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
 
         // Choose action (exploration vs exploitation)
-        let chosen = if (all_actions.len() as u32) < actor_config.explore_moves {
+        let chosen = if (all_actions.len() as u32) < actor_config.explore_actions {
             sample_from_policy(&result.policy, rng)
         } else {
             result.selected_action
@@ -323,7 +323,7 @@ where
 
         let sign = search.state().current_sign();
 
-        // Skip forced moves
+        // Skip forced actions
         actions_buf.clear();
         search.state().legal_actions(&mut actions_buf);
         if actions_buf.len() == 1 {

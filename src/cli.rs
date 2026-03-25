@@ -124,7 +124,7 @@ pub fn serve_command() -> Command {
             Arg::new("sims")
                 .long("sims")
                 .default_value("200")
-                .help("Default MCTS simulations per move"),
+                .help("Default MCTS simulations per action"),
         )
         .arg(
             Arg::new("human")
@@ -224,7 +224,7 @@ pub fn train_command() -> Command {
             Arg::new("simulations")
                 .long("simulations")
                 .default_value(d.mcts_sims.to_string())
-                .help("MCTS simulations per move during self-play"),
+                .help("MCTS simulations per action during self-play"),
         )
         .arg(
             Arg::new("epochs")
@@ -290,28 +290,28 @@ pub fn train_command() -> Command {
                 .help("Leaves to collect per MCTS batch before requesting evaluation"),
         )
         .arg(
-            Arg::new("max-moves")
-                .long("max-moves")
-                .default_value(d.max_moves.to_string())
+            Arg::new("max-actions")
+                .long("max-actions")
+                .default_value(d.max_actions.to_string())
                 .help("Terminate games exceeding this many actions as a draw (0 = no limit)"),
         )
         .arg(
-            Arg::new("explore-moves")
-                .long("explore-moves")
-                .default_value(d.explore_moves.to_string())
-                .help("Early-game turns where action is sampled from improved policy"),
+            Arg::new("explore-actions")
+                .long("explore-actions")
+                .default_value(d.explore_actions.to_string())
+                .help("Early-game actions where action is sampled from improved policy"),
         )
         .arg(
             Arg::new("playout-cap-prob")
                 .long("playout-cap-prob")
                 .default_value(d.playout_cap_full_prob.to_string())
-                .help("Probability of full search per move (playout cap randomization)"),
+                .help("Probability of full search per action (playout cap randomization)"),
         )
         .arg(
             Arg::new("playout-cap-fast-sims")
                 .long("playout-cap-fast-sims")
                 .default_value(d.playout_cap_fast_sims.to_string())
-                .help("Simulations for fast (non-full) search moves"),
+                .help("Simulations for fast (non-full) search actions"),
         )
         .arg(
             Arg::new("simulations-start")
@@ -802,11 +802,11 @@ pub fn parse_train_config(
     if set("leaf-batch-size") {
         config.leaf_batch_size = val("leaf-batch-size").parse().unwrap();
     }
-    if set("max-moves") {
-        config.max_moves = val("max-moves").parse().unwrap();
+    if set("max-actions") {
+        config.max_actions = val("max-actions").parse().unwrap();
     }
-    if set("explore-moves") {
-        config.explore_moves = val("explore-moves").parse().unwrap();
+    if set("explore-actions") {
+        config.explore_actions = val("explore-actions").parse().unwrap();
     }
     if set("playout-cap-prob") {
         config.playout_cap_full_prob = val("playout-cap-prob").parse().unwrap();

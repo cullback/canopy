@@ -44,7 +44,7 @@ fn main() {
             iterations: 1000,
             train_samples_per_iter: 50_000,
             replay_buffer_samples: 300_000,
-            max_moves: 2000,
+            max_actions: 2000,
             epochs: 1,
             lr: 0.0005,
             mcts_sims: 3000,
@@ -53,7 +53,7 @@ fn main() {
             leaf_batch_size: 32,
             concurrent_games: 256,
             gumbel_m: 32,
-            explore_moves: 48,
+            explore_actions: 48,
             warmup_iters: 60,
             aux_value_horizons: vec![4, 10, 30],
             ..TrainConfig::default()

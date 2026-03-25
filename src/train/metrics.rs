@@ -91,17 +91,17 @@ pub(super) struct CsvRow {
     #[serde(serialize_with = "round6::f64")]
     pub policy_entropy_avg: f64,
     /// Average max probability in the improved policy. Complement of entropy:
-    /// high values mean the policy concentrates on a single move.
+    /// high values mean the policy concentrates on a single action.
     #[serde(serialize_with = "round6::f64")]
     pub policy_max_prob_avg: f64,
     /// Entropy restricted to positions with ≥6 legal actions, filtering out
-    /// forced/near-forced moves that naturally have low entropy.
+    /// forced/near-forced actions that naturally have low entropy.
     #[serde(serialize_with = "round6::f64")]
     pub policy_entropy_high_branch_avg: f64,
     /// Max prob restricted to positions with ≥6 legal actions.
     #[serde(serialize_with = "round6::f64")]
     pub policy_max_prob_high_branch_avg: f64,
-    /// Fraction of moves where network's top-1 matches MCTS's selected action.
+    /// Fraction of actions where network's top-1 matches MCTS's selected action.
     /// Should rise over training; plateau at ~40-50% means the network isn't
     /// distilling search. Jump to ~95%+ early means search isn't contributing.
     #[serde(serialize_with = "round6::f64")]
@@ -134,7 +134,7 @@ pub(super) struct CsvRow {
     pub value_correction_high_branch_avg: f64,
     /// Std of Q values across visited root children. Measures value head
     /// discriminative power: very small = can't distinguish moves, very
-    /// large = playing refutation-style (one good move, rest terrible).
+    /// large = playing refutation-style (one good action, rest terrible).
     #[serde(serialize_with = "round6::f64")]
     pub value_q_spread_avg: f64,
     /// Q spread restricted to positions with ≥6 legal actions.
@@ -285,7 +285,7 @@ pub(super) struct IterStats {
     pub policy_entropy_high_branch_avg: f64,
     /// Max policy prob averaged over samples with ≥6 legal actions.
     pub policy_max_prob_high_branch_avg: f64,
-    /// Fraction of moves where network top-1 == MCTS selected action.
+    /// Fraction of actions where network top-1 == MCTS selected action.
     pub policy_agreement_avg: f64,
     /// Policy agreement restricted to high-branch (≥6 legal) positions.
     pub policy_agreement_high_branch_avg: f64,
@@ -303,11 +303,11 @@ pub(super) struct IterStats {
     pub value_q_spread_avg: f64,
     /// Q spread restricted to high-branch (≥6 legal) positions.
     pub value_q_spread_high_branch_avg: f64,
-    /// Mean |q - z| for early-game samples (move_number in first third of game).
+    /// Mean |q - z| for early-game samples (action_number in first third of game).
     pub value_error_early_avg: f64,
-    /// Mean |q - z| for mid-game samples (move_number in middle third of game).
+    /// Mean |q - z| for mid-game samples (action_number in middle third of game).
     pub value_error_mid_avg: f64,
-    /// Mean |q - z| for late-game samples (move_number in final third of game).
+    /// Mean |q - z| for late-game samples (action_number in final third of game).
     pub value_error_late_avg: f64,
     /// Stddev of raw network value outputs. Near zero means the value head
     /// is outputting a constant; healthy spread means it differentiates positions.
@@ -416,10 +416,10 @@ pub(super) fn compute_iter_stats(samples: &[&Sample]) -> IterStats {
             continue;
         }
         let third = s.game_length / 3;
-        if s.move_number <= third {
+        if s.action_number <= third {
             early_err_sum += err;
             early_count += 1;
-        } else if s.move_number <= 2 * third {
+        } else if s.action_number <= 2 * third {
             mid_err_sum += err;
             mid_count += 1;
         } else {

@@ -82,7 +82,7 @@ fn main() {
             iterations: 100,
             train_samples_per_iter: 3_000,
             replay_buffer_samples: 30_000,
-            // max_moves: 500,
+            // max_actions: 500,
             mcts_sims: 200,
             mcts_sims_start: 50,
             epochs: 3,
@@ -90,7 +90,7 @@ fn main() {
             warmup_iters: 20,
             concurrent_games: 100,
             // leaf_batch_size: 1,
-            explore_moves: 10,
+            explore_actions: 10,
             ..TrainConfig::default()
         },
     );

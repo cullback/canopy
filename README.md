@@ -22,7 +22,7 @@ MCTS framework for two player games.
 Differences
 
 1. Transposition table — state deduplication via state_key() / DAG structure. Paper doesn't mention transpositions.
-2. Tree reuse between turns — step_to + compact preserves and reroots subtrees. Standard optimization not in the paper.
+2. Tree reuse between actions — step_to + compact preserves and reroots subtrees. Standard optimization not in the paper.
 3. Arena-based tree — contiguous node/edge storage with index-based navigation. Better cache locality.
 4. Value target z/q blending — target = (1-α)z + αq with linear ramp. Paper only uses z (game outcome). Critical for
    stochastic games with high variance outcomes.
@@ -30,7 +30,7 @@ Differences
    perfect-information games.
 6. Path-only Q-bound tracking — creates a natural warmup: trust policy early (tight bounds → small σ), trust Q later
    (wide bounds → large σ). Paper uses full-tree bounds.
-7. Forced move skipping — single legal action bypasses MCTS entirely.
+7. Forced action skipping — single legal action bypasses MCTS entirely.
 
 ## References
 
