@@ -5,6 +5,7 @@
 - feature for total hand size
 - flag for at risk of sevening-out
 - discard_risk: max(0, total - 9) / 12 — how exposed you are to a 7
+- then it can be dynamic / changed
 
 ## Get replay for game
 
