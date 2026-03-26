@@ -286,6 +286,7 @@ pub fn format_phase(phase: &Phase) -> String {
         Phase::MoveRobber => "Move Robber".to_string(),
         Phase::StealResolve => "Steal Resolve".to_string(),
         Phase::Main => "Main".to_string(),
+        Phase::DevCardDraw => "Dev Card Draw".to_string(),
         Phase::RoadBuilding { roads_left } => format!("Road Building ({roads_left} left)"),
         Phase::GameOver(p) => format!("Game Over ({p} wins)"),
     }

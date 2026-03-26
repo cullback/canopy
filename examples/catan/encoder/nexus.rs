@@ -280,8 +280,7 @@ mod tests {
 
     fn make_state() -> GameState {
         let topo = Arc::new(Topology::from_seed(42));
-        let mut rng = fastrand::Rng::with_seed(42);
-        let deck = DevCardDeck::new(&mut rng);
+        let deck = DevCardDeck::new();
         GameState::new(topo, deck, Dice::default())
     }
 

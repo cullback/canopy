@@ -25,7 +25,7 @@ use super::log::GameEvent;
 pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
     let (terrains, numbers, port_resources) = board::to_layout(board);
     let topology = Arc::new(Topology::from_layout(terrains, numbers, port_resources));
-    let dev_deck = DevCardDeck::new(&mut fastrand::Rng::new());
+    let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
 
     let mut state = GameState::new(topology.clone(), dev_deck, dice);
@@ -187,6 +187,8 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                 if let Some(pid) = player_of(color_map, *player) {
                     state.players[pid].hand.sub(DEV_CARD_COST);
                     state.bank.add(DEV_CARD_COST);
+                    state.players[pid].hidden_dev_cards += 1;
+                    state.dev_deck.remove_unknown();
                 }
             }
             GameEvent::Stole {

@@ -259,7 +259,7 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
         Phase::PlaceSettlement => populate_place_settlement(state, actions),
         Phase::PlaceRoad => populate_place_road(state, actions),
         Phase::PreRoll => populate_preroll(state, actions),
-        Phase::Roll | Phase::StealResolve => {
+        Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => {
             // Chance nodes — resolved by chance_outcomes/apply_chance, not player actions
         }
         Phase::Discard { player, .. } => populate_discard(state, *player, actions),
@@ -582,8 +582,7 @@ mod tests {
 
     fn make_state() -> GameState {
         let topo = Arc::new(Topology::from_seed(42));
-        let mut rng = fastrand::Rng::with_seed(42);
-        let deck = DevCardDeck::new(&mut rng);
+        let deck = DevCardDeck::new();
         GameState::new(topo, deck, Dice::default())
     }
 
@@ -709,8 +708,7 @@ mod tests {
     fn road_completeness_matches_brute_force() {
         for seed in [1, 42, 99, 123, 777] {
             let topo = Arc::new(Topology::from_seed(seed));
-            let mut rng_deck = fastrand::Rng::with_seed(seed);
-            let deck = DevCardDeck::new(&mut rng_deck);
+            let deck = DevCardDeck::new();
             let mut state = GameState::new(topo, deck, Dice::default());
 
             // Play setup
@@ -1090,8 +1088,7 @@ mod tests {
         };
 
         // Create state and place P1's first settlement on the generic port
-        let mut rng_deck = fastrand::Rng::with_seed(42);
-        let deck = DevCardDeck::new(&mut rng_deck);
+        let deck = DevCardDeck::new();
         let mut state = GameState::new(topo, deck, Dice::default());
         let mut rng = fastrand::Rng::with_seed(0);
 

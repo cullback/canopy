@@ -95,6 +95,14 @@ impl Game for GameState {
                     self.phase = Phase::Main;
                 }
             }
+            Phase::DevCardDraw => {
+                let kind = DevCardKind::ALL[action];
+                self.dev_deck.remove(kind);
+                self.current_mut().dev_cards[kind] += 1;
+                self.current_mut().dev_cards_bought_this_turn[kind] += 1;
+                self.phase = Phase::Main;
+                check_victory(self);
+            }
             _ => {
                 apply(self, ActionId(action as u8));
             }
@@ -118,6 +126,14 @@ impl Game for GameState {
                 let target_hand = &self.players[target].hand;
                 for (i, &r) in ALL_RESOURCES.iter().enumerate() {
                     let count = target_hand[r];
+                    if count > 0 {
+                        buf.push((i, count as u32));
+                    }
+                }
+            }
+            Phase::DevCardDraw => {
+                for (i, &kind) in DevCardKind::ALL.iter().enumerate() {
+                    let count = self.dev_deck.remaining_of(kind);
                     if count > 0 {
                         buf.push((i, count as u32));
                     }
@@ -150,7 +166,45 @@ impl Game for GameState {
                 }
                 Some(ALL_RESOURCES.len() - 1)
             }
+            Phase::DevCardDraw => {
+                let total = self.dev_deck.total_remaining();
+                if total == 0 {
+                    return None;
+                }
+                let mut pick = rng.u8(..total);
+                for (i, &kind) in DevCardKind::ALL.iter().enumerate() {
+                    let c = self.dev_deck.remaining_of(kind);
+                    if pick < c {
+                        return Some(i);
+                    }
+                    pick -= c;
+                }
+                Some(DevCardKind::ALL.len() - 1)
+            }
             _ => None,
+        }
+    }
+
+    fn determinize(&mut self, rng: &mut fastrand::Rng) {
+        for pid in [Player::One, Player::Two] {
+            let n = self.players[pid].hidden_dev_cards;
+            for _ in 0..n {
+                let total = self.dev_deck.total_remaining();
+                if total == 0 {
+                    break;
+                }
+                let mut pick = rng.u8(..total);
+                for kind in DevCardKind::ALL {
+                    let c = self.dev_deck.remaining_of(kind);
+                    if pick < c {
+                        self.dev_deck.remove(kind);
+                        self.players[pid].dev_cards[kind] += 1;
+                        break;
+                    }
+                    pick -= c;
+                }
+            }
+            self.players[pid].hidden_dev_cards = 0;
         }
     }
 }
@@ -475,9 +529,16 @@ fn apply_build_city(state: &mut GameState, nid: NodeId) {
 fn apply_buy_dev_card(state: &mut GameState) {
     state.current_mut().hand.sub(DEV_CARD_COST);
     state.bank.add(DEV_CARD_COST);
-    let card = state.dev_deck.draw().unwrap();
-    state.current_mut().dev_cards[card] += 1;
-    state.current_mut().dev_cards_bought_this_turn[card] += 1;
+    state.phase = Phase::DevCardDraw;
+}
+
+/// Buy a dev card without revealing it (for colonist replay / competition).
+/// The card stays hidden; determinize will assign it before MCTS rollouts.
+pub fn apply_hidden_dev_card_buy(state: &mut GameState) {
+    state.current_mut().hand.sub(DEV_CARD_COST);
+    state.bank.add(DEV_CARD_COST);
+    state.current_mut().hidden_dev_cards += 1;
+    state.dev_deck.remove_unknown();
 }
 
 fn apply_play_knight(state: &mut GameState) {
@@ -1747,11 +1808,15 @@ mod tests {
         state.players[Player::One].building_vps = 12;
         state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
 
-        // Stack the deck with a VP card
-        state.dev_deck = DevCardDeck::from_cards(&[DevCardKind::VictoryPoint]);
+        // Stack the deck with only VP cards
+        state.dev_deck = DevCardDeck::from_counts([0, 1, 0, 0, 0]);
         state.players[Player::One].hand.add(DEV_CARD_COST);
 
         apply(&mut state, ActionId(BUY_DEV_CARD));
+        assert!(matches!(state.phase, Phase::DevCardDraw));
+
+        // Resolve the chance event: draw VP (index 1)
+        state.apply_action(DevCardKind::VictoryPoint as usize);
 
         assert!(
             matches!(state.phase, Phase::GameOver(Player::One)),
@@ -2165,10 +2230,14 @@ mod tests {
         // Buy a VP dev card → 15 → win
         state.players[Player::One].building_vps = 12;
         state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
-        state.dev_deck = DevCardDeck::from_cards(&[DevCardKind::VictoryPoint]);
+        state.dev_deck = DevCardDeck::from_counts([0, 1, 0, 0, 0]);
         state.players[Player::One].hand.add(DEV_CARD_COST);
 
         apply(&mut state, ActionId(BUY_DEV_CARD));
+        assert!(matches!(state.phase, Phase::DevCardDraw));
+
+        // Resolve chance: draw VP (index 1)
+        state.apply_action(DevCardKind::VictoryPoint as usize);
 
         assert!(
             matches!(state.phase, Phase::GameOver(Player::One)),

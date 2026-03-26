@@ -51,4 +51,12 @@ pub trait Game: Clone + Send + Sync {
         self.chance_outcomes(&mut buf);
         crate::utils::sample_weighted(&buf, rng)
     }
+
+    /// Resample hidden information before an MCTS rollout.
+    ///
+    /// Called once per simulation after cloning the root state.
+    /// Games with hidden state (e.g. unobserved opponent cards) override this
+    /// to sample concrete assignments from the unknown pool.
+    /// Default is a no-op.
+    fn determinize(&mut self, _rng: &mut fastrand::Rng) {}
 }

@@ -80,7 +80,7 @@ pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
         Phase::MoveRobber => (4, 1.0),
         Phase::Main => (5, 1.0),
         Phase::RoadBuilding { .. } => (6, 1.0),
-        Phase::Roll | Phase::StealResolve => unreachable!(),
+        Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => unreachable!(),
         Phase::GameOver(_) => unreachable!(),
     };
     for i in 0..7 {
@@ -111,8 +111,9 @@ pub(super) fn opponent_expected_dev_cards(
     let opp_player = &state.players[opp];
 
     // dev_cards already includes bought_this_turn (both incremented on buy)
-    let opp_hand_size: f32 = opp_player.dev_cards.0.iter().sum::<u8>() as f32;
-    let deck_remaining = state.dev_deck.remaining() as f32;
+    let opp_hand_size: f32 =
+        opp_player.dev_cards.0.iter().sum::<u8>() as f32 + opp_player.hidden_dev_cards as f32;
+    let deck_remaining = state.dev_deck.total_remaining() as f32;
     let total_unknown = deck_remaining + opp_hand_size;
 
     let mut out = [0.0; 5];

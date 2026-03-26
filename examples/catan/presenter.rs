@@ -5,6 +5,7 @@ use canopy::server::GamePresenter;
 
 use crate::game;
 use crate::game::action::ActionId;
+use crate::game::dev_card::DevCardKind;
 use crate::game::dice::Dice;
 use crate::game::resource::ALL_RESOURCES;
 use crate::game::state::{GameState, Phase};
@@ -50,6 +51,13 @@ impl GamePresenter<GameState> for CatanPresenter {
             Phase::StealResolve => {
                 if let Some(&r) = ALL_RESOURCES.get(outcome) {
                     format!("Stole {r}")
+                } else {
+                    String::new()
+                }
+            }
+            Phase::DevCardDraw => {
+                if let Some(&kind) = DevCardKind::ALL.get(outcome) {
+                    format!("Drew {kind:?}")
                 } else {
                     String::new()
                 }

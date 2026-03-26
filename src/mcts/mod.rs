@@ -634,6 +634,7 @@ fn simulate<G: Game>(
     bufs.path.clear();
     let mut current = root;
     let mut state = root_state.clone();
+    state.determinize(rng);
     let mut forced = forced_root_edge;
 
     loop {

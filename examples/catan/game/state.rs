@@ -44,6 +44,9 @@ pub struct PlayerState {
     pub has_played_dev_card_this_turn: bool,
     /// Cumulative count of each dev card type played (for information tracking).
     pub dev_cards_played: DevCardArray,
+    /// Dev cards bought but not yet revealed (for colonist/competition).
+    /// During self-play this is always 0.
+    pub hidden_dev_cards: u8,
     /// VP from buildings only: +1 per settlement, +1 more per city upgrade.
     /// Does **not** include longest road, largest army, or VP dev cards.
     /// For total VP, combine with `dev_cards[VictoryPoint]` and the
@@ -68,6 +71,7 @@ impl Default for PlayerState {
             roads_left: 15,
             has_played_dev_card_this_turn: false,
             dev_cards_played: DevCardArray::default(),
+            hidden_dev_cards: 0,
             building_vps: 0,
             trade_ratios: [4; 5],
         }
@@ -88,6 +92,7 @@ pub enum Phase {
     MoveRobber,
     StealResolve,
     Main,
+    DevCardDraw,
     RoadBuilding {
         roads_left: u8,
     },
@@ -146,7 +151,7 @@ impl GameState {
     pub fn from_seed(seed: u64, dice: Dice) -> Self {
         let mut rng = fastrand::Rng::with_seed(seed);
         let topology = Arc::new(Topology::from_seed(rng.u64(..)));
-        let dev_deck = DevCardDeck::new(&mut rng);
+        let dev_deck = DevCardDeck::new();
         Self::new(topology, dev_deck, dice)
     }
 
@@ -223,8 +228,7 @@ mod tests {
 
     fn make_state() -> GameState {
         let topo = Arc::new(Topology::from_seed(42));
-        let mut rng = fastrand::Rng::with_seed(42);
-        let deck = DevCardDeck::new(&mut rng);
+        let deck = DevCardDeck::new();
         GameState::new(topo, deck, Dice::default())
     }
 
