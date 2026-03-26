@@ -157,6 +157,125 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    /// Append new timeline entries from live polling.
+    ///
+    /// Each entry is `(label, state)` where the first state is the successor
+    /// of the current last timeline state. If the cursor was at the end (user
+    /// watching live), auto-advances to the new end. Returns true if entries
+    /// were added.
+    pub fn extend_timeline(&mut self, new_entries: Vec<(String, G)>) -> bool {
+        if new_entries.is_empty() {
+            return false;
+        }
+
+        let was_at_end = self.cursor == self.history.len();
+
+        // The previous "final state" is the next_state of the last history entry,
+        // or the search state if history is empty.
+        let prev_final = self
+            .history
+            .last()
+            .and_then(|e| e.next_state.clone())
+            .unwrap_or_else(|| self.search.state().clone());
+
+        // First new entry: prev_final -> new_entries[0]
+        self.history.push(HistoryEntry {
+            state: prev_final,
+            action: usize::MAX,
+            label: new_entries[0].0.clone(),
+            is_chance: false,
+            next_state: Some(new_entries[0].1.clone()),
+        });
+
+        // Subsequent entries chain together
+        for i in 1..new_entries.len() {
+            self.history.push(HistoryEntry {
+                state: new_entries[i - 1].1.clone(),
+                action: usize::MAX,
+                label: new_entries[i].0.clone(),
+                is_chance: false,
+                next_state: Some(new_entries[i].1.clone()),
+            });
+        }
+
+        // Auto-advance if user was watching live
+        if was_at_end {
+            let new_state = new_entries.last().unwrap().1.clone();
+            self.search.reset(new_state);
+            self.cursor = self.history.len();
+        }
+
+        true
+    }
+
+    /// Update the final timeline state in-place (e.g. robber, current turn).
+    ///
+    /// Applies a mutation to the last `next_state` in history. If cursor is
+    /// at the end, also updates the search state.
+    pub fn update_final_state(&mut self, f: impl Fn(&mut G)) {
+        if let Some(last) = self.history.last_mut() {
+            if let Some(ref mut ns) = last.next_state {
+                f(ns);
+            }
+        }
+        if self.cursor == self.history.len() {
+            let mut state = self.search.state().clone();
+            f(&mut state);
+            self.search.reset(state);
+        }
+    }
+
+    /// Build a GameState server message for the current state (public for live push).
+    pub fn state_msg(&self) -> ServerMsg {
+        let state = self.search.state();
+        let is_terminal = matches!(state.status(), Status::Terminal(_));
+        let is_chance = self.is_chance();
+
+        let legal = if is_terminal || is_chance {
+            Vec::new()
+        } else {
+            let actions = self.legal_actions();
+            actions
+                .iter()
+                .map(|&a| ActionInfo {
+                    action: a,
+                    label: self.presenter.action_label(state, a),
+                })
+                .collect()
+        };
+
+        let result = if let Status::Terminal(reward) = state.status() {
+            Some(if reward > 0.0 {
+                "P1 wins".into()
+            } else if reward < 0.0 {
+                "P2 wins".into()
+            } else {
+                "Draw".into()
+            })
+        } else {
+            None
+        };
+
+        let action_log: Vec<String> = self.history[..self.cursor]
+            .iter()
+            .filter(|e| !e.label.is_empty())
+            .map(|e| e.label.clone())
+            .collect();
+
+        ServerMsg::GameState {
+            state: self.presenter.serialize_state(state),
+            legal_actions: legal,
+            current_player: self.current_player_idx() as u8,
+            phase: self.presenter.phase_label(state),
+            is_chance,
+            is_terminal,
+            result,
+            action_log,
+            can_undo: self.cursor > 0,
+            can_redo: self.cursor < self.history.len(),
+        }
+    }
+
     /// Process a client message and return response messages.
     pub fn handle(&mut self, msg: ClientMsg) -> Vec<ServerMsg> {
         match msg {
@@ -346,57 +465,6 @@ impl<G: Game + 'static> GameSession<G> {
                     }]
                 }
             }
-        }
-    }
-
-    /// Build a GameState server message for the current state.
-    fn state_msg(&self) -> ServerMsg {
-        let state = self.search.state();
-        let is_terminal = matches!(state.status(), Status::Terminal(_));
-        let is_chance = self.is_chance();
-
-        let legal = if is_terminal || is_chance {
-            Vec::new()
-        } else {
-            let actions = self.legal_actions();
-            actions
-                .iter()
-                .map(|&a| ActionInfo {
-                    action: a,
-                    label: self.presenter.action_label(state, a),
-                })
-                .collect()
-        };
-
-        let result = if let Status::Terminal(reward) = state.status() {
-            Some(if reward > 0.0 {
-                "P1 wins".into()
-            } else if reward < 0.0 {
-                "P2 wins".into()
-            } else {
-                "Draw".into()
-            })
-        } else {
-            None
-        };
-
-        let action_log: Vec<String> = self.history[..self.cursor]
-            .iter()
-            .filter(|e| !e.label.is_empty())
-            .map(|e| e.label.clone())
-            .collect();
-
-        ServerMsg::GameState {
-            state: self.presenter.serialize_state(state),
-            legal_actions: legal,
-            current_player: self.current_player_idx() as u8,
-            phase: self.presenter.phase_label(state),
-            is_chance,
-            is_terminal,
-            result,
-            action_log,
-            can_undo: self.cursor > 0,
-            can_redo: self.cursor < self.history.len(),
         }
     }
 

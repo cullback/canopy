@@ -88,12 +88,18 @@ pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
         state.robber = TileId(idx);
     }
 
-    // Set phase to Main so the board renders
-    state.phase = Phase::Main;
-    state.turn_number = 1;
-    state.pre_roll = false;
-    state.setup_count = 4;
-    state.current_player = Player::One;
+    // If buildings exist, we joined mid-game: skip to main phase.
+    // Otherwise keep the initial PlaceSettlement phase from GameState::new().
+    let has_buildings = !buildings.settlements.is_empty()
+        || !buildings.cities.is_empty()
+        || !buildings.roads.is_empty();
+    if has_buildings {
+        state.phase = Phase::PreRoll;
+        state.turn_number = 1;
+        state.pre_roll = true;
+        state.setup_count = 4;
+        state.current_player = Player::One;
+    }
 
     state
 }
@@ -846,6 +852,31 @@ fn process_post_setup(
             last.state.robber = TileId(idx);
         }
     }
+}
+
+/// Process new post-setup events incrementally, returning new timeline entries.
+///
+/// `state` is mutated to reflect the new events. The returned entries can be
+/// passed to `GameSession::extend_timeline()`.
+pub fn process_new_events(
+    state: &mut GameState,
+    events: &[GameEvent],
+    color_map: &[(u8, Player)],
+    corner_map: &HashMap<(i32, i32, u8), NodeId>,
+    edge_map: &HashMap<(i32, i32, u8), EdgeId>,
+    board: &BoardData,
+) -> Vec<TimelineEntry> {
+    let mut timeline = Vec::new();
+    process_post_setup(
+        state,
+        events,
+        color_map,
+        corner_map,
+        edge_map,
+        board,
+        &mut timeline,
+    );
+    timeline
 }
 
 /// Apply extracted dev card identities to a game state.

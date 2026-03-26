@@ -24,22 +24,29 @@ static MSG_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Discover the colonist.io tab and return its `webSocketDebuggerUrl`.
 async fn discover_tab(port: u16) -> String {
+    try_discover_tab(port)
+        .await
+        .expect("failed to discover colonist.io tab")
+}
+
+/// Fallible version of `discover_tab`.
+async fn try_discover_tab(port: u16) -> Result<String, String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .await
-        .expect("cannot connect to Chrome debug port — is the SSH tunnel up?");
+        .map_err(|e| format!("cannot connect to Chrome debug port: {e}"))?;
 
     let request =
         format!("GET /json HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nConnection: close\r\n\r\n");
     tokio::io::AsyncWriteExt::write_all(&mut stream, request.as_bytes())
         .await
-        .expect("failed to write HTTP request");
+        .map_err(|e| format!("failed to write HTTP request: {e}"))?;
 
     let mut buf = vec![0u8; 8192];
     let mut data = Vec::new();
     loop {
         let n = tokio::io::AsyncReadExt::read(&mut stream, &mut buf)
             .await
-            .expect("failed to read HTTP response");
+            .map_err(|e| format!("failed to read HTTP response: {e}"))?;
         if n == 0 {
             break;
         }
@@ -53,24 +60,34 @@ async fn discover_tab(port: u16) -> String {
     }
 
     let body = String::from_utf8_lossy(&data);
-    let json_start = body.find('[').expect("no JSON array in /json response");
-    let tabs: Vec<serde_json::Value> =
-        serde_json::from_str(&body[json_start..]).expect("failed to parse /json response");
+    let json_start = body.find('[').ok_or("no JSON array in /json response")?;
+    let tabs: Vec<serde_json::Value> = serde_json::from_str(&body[json_start..])
+        .map_err(|e| format!("failed to parse /json response: {e}"))?;
 
     for tab in &tabs {
         let url = tab["url"].as_str().unwrap_or("");
         if url.contains("colonist.io") && tab["type"].as_str() == Some("page") {
             return tab["webSocketDebuggerUrl"]
                 .as_str()
-                .expect("tab missing webSocketDebuggerUrl")
-                .to_string();
+                .map(|s| s.to_string())
+                .ok_or_else(|| "tab missing webSocketDebuggerUrl".to_string());
         }
     }
-    panic!("no colonist.io tab found among {} tabs", tabs.len());
+    Err(format!(
+        "no colonist.io tab found among {} tabs",
+        tabs.len()
+    ))
 }
 
 /// Send a `Runtime.evaluate` CDP command and return the result value.
 async fn evaluate(ws: &mut WsStream, expression: &str) -> serde_json::Value {
+    try_evaluate(ws, expression)
+        .await
+        .expect("CDP evaluate failed")
+}
+
+/// Fallible version of `evaluate`.
+async fn try_evaluate(ws: &mut WsStream, expression: &str) -> Result<serde_json::Value, String> {
     let id = MSG_ID.fetch_add(1, Ordering::Relaxed);
     let msg = serde_json::json!({
         "id": id,
@@ -79,18 +96,22 @@ async fn evaluate(ws: &mut WsStream, expression: &str) -> serde_json::Value {
     });
     ws.send(Message::Text(msg.to_string().into()))
         .await
-        .expect("ws send failed");
+        .map_err(|e| format!("ws send failed: {e}"))?;
 
     loop {
-        let frame = ws.next().await.expect("ws closed").expect("ws error");
+        let frame = ws
+            .next()
+            .await
+            .ok_or("ws closed")?
+            .map_err(|e| format!("ws error: {e}"))?;
         if let Message::Text(text) = frame {
             let resp: serde_json::Value =
-                serde_json::from_str(&text).expect("invalid JSON from CDP");
+                serde_json::from_str(&text).map_err(|e| format!("invalid JSON from CDP: {e}"))?;
             if resp["id"].as_u64() == Some(id) {
                 if let Some(err) = resp.get("error") {
-                    panic!("CDP error: {err}");
+                    return Err(format!("CDP error: {err}"));
                 }
-                return resp["result"]["result"]["value"].clone();
+                return Ok(resp["result"]["result"]["value"].clone());
             }
         }
     }
@@ -216,7 +237,78 @@ pub fn run(port: u16) {
     board::print(&data.board);
 }
 
-/// Entry point: extract game data and serve via web analysis board.
+/// Lightweight CDP extraction for polling — only log, robber, current turn, dev cards.
+struct PollData {
+    events: Vec<log::GameEvent>,
+    dev_cards: Vec<DevCardKind>,
+    current_turn_color: Option<u8>,
+    robber_tile_index: Option<u8>,
+}
+
+/// JS snippet to extract robber tile index directly.
+const EXTRACT_ROBBER_JS: &str = r#"(() => {
+    let seen = new Set();
+    for (let el of document.querySelectorAll('*')) {
+        let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+        if (!fk) continue;
+        let node = el[fk];
+        for (let d = 0; d < 50 && node; d++) {
+            if (seen.has(node)) { node = node.return; continue; }
+            seen.add(node);
+            let p = node.memoizedProps;
+            if (p && p.gameValidator && p.gameValidator.gameState) {
+                let ri = p.gameValidator.gameState.mechanicRobberState?.locationTileIndex;
+                return JSON.stringify(ri != null ? ri : null);
+            }
+            node = node.return;
+        }
+    }
+    return 'null';
+})()"#;
+
+/// Connect to Chrome and extract only what's needed for incremental updates.
+async fn poll_game_data(port: u16) -> Result<PollData, String> {
+    let ws_url = try_discover_tab(port).await?;
+    let (mut ws, _) = connect_async(&ws_url)
+        .await
+        .map_err(|e| format!("CDP connect: {e}"))?;
+
+    // Log entries
+    let result = try_evaluate(&mut ws, EXTRACT_LOG_JS).await?;
+    let json_str = result.as_str().unwrap_or("[]");
+    let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
+    let events = log::parse(&entries);
+
+    // Dev cards
+    let cards_json = try_evaluate(&mut ws, board::EXTRACT_CARDS_JS).await?;
+    let cards_str = cards_json.as_str().unwrap_or("[]");
+    let card_enums: Vec<u64> = serde_json::from_str(cards_str).unwrap_or_default();
+    let dev_cards: Vec<DevCardKind> = card_enums
+        .iter()
+        .filter_map(|&c| log::card_to_dev(c))
+        .collect();
+
+    // Current turn
+    let players_json = try_evaluate(&mut ws, board::EXTRACT_PLAYERS_JS).await?;
+    let players_str = players_json.as_str().unwrap_or("{}");
+    let players_obj: serde_json::Value = serde_json::from_str(players_str).unwrap_or_default();
+    let current_turn_color: Option<u8> = players_obj["currentTurnColor"].as_u64().map(|c| c as u8);
+
+    // Robber
+    let robber_json = try_evaluate(&mut ws, EXTRACT_ROBBER_JS).await?;
+    let robber_tile_index = robber_json.as_u64().map(|i| i as u8);
+
+    ws.close(None).await.ok();
+
+    Ok(PollData {
+        events,
+        dev_cards,
+        current_turn_color,
+        robber_tile_index,
+    })
+}
+
+/// Entry point: extract game data and serve via web analysis board with live polling.
 pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
@@ -225,12 +317,24 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     board::print(&data.board);
 
     let mut timeline = state::build_timeline(&data.board, &data.events);
-    let color_map = state::discover_colors(&data.events);
+    // Derive color map from player list (first player → P1, second → P2).
+    let color_map: Vec<(u8, canopy::player::Player)> = data
+        .player_names
+        .iter()
+        .take(2)
+        .enumerate()
+        .map(|(i, &(color, _))| {
+            let pid = if i == 0 {
+                canopy::player::Player::One
+            } else {
+                canopy::player::Player::Two
+            };
+            (color, pid)
+        })
+        .collect();
+    let initial_event_count = data.events.len();
 
     // Apply dev card identities to the final timeline state if available.
-    // CDP extraction sees only the local player's hand. Identify which
-    // internal player is local by matching the extracted resource hand
-    // against our log-tracked hands.
     if !data.dev_cards.is_empty() {
         if let Some(last) = timeline.last_mut() {
             let local_player = local_player(data.local_color, &color_map);
@@ -247,6 +351,12 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
         }
     }
 
+    // Save the last state for incremental processing.
+    let last_state = timeline
+        .last()
+        .map(|e| e.state.clone())
+        .expect("empty timeline");
+
     let timeline_pairs: Vec<(String, crate::game::state::GameState)> =
         timeline.into_iter().map(|e| (e.label, e.state)).collect();
     let mut names = ["P1".to_string(), "P2".to_string()];
@@ -262,13 +372,166 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync> =
         Arc::new(HeuristicEvaluator::default());
 
-    eprintln!("serving colonist board on port {serve_port}");
-    rt.block_on(canopy::server::serve_with_timeline(
-        serve_port,
-        timeline_pairs,
+    // Create session manually with the initial timeline.
+    let mut initial_session = canopy::server::GameSession::with_state(
+        timeline_pairs[0].1.clone(),
         evaluator,
-        presenter,
+        presenter.clone(),
         200,
         [true, true],
+    );
+    initial_session.load_timeline(timeline_pairs);
+    let session = Arc::new(tokio::sync::Mutex::new(initial_session));
+
+    let (notify_tx, notify_rx) = tokio::sync::watch::channel(0u64);
+
+    // Build coordinate maps for incremental processing.
+    let (terrains, numbers, port_resources) = board::to_layout(&data.board);
+    let topology = Arc::new(crate::game::topology::Topology::from_layout(
+        terrains,
+        numbers,
+        port_resources,
+    ));
+    let corner_map = board::build_corner_map(&topology);
+    let edge_map = board::build_edge_map(&topology);
+
+    // Spawn polling task.
+    let poll_session = session.clone();
+    let poll_board = data.board;
+    let poll_local_color = data.local_color;
+    rt.spawn(async move {
+        let mut committed_event_count = initial_event_count;
+        let mut last_state = last_state;
+        let mut generation = 0u64;
+
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            let poll = match poll_game_data(cdp_port).await {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("poll error: {e}");
+                    continue;
+                }
+            };
+
+            let total_events = poll.events.len();
+            eprintln!("poll ok: {total_events} events (committed {committed_event_count})");
+            if total_events <= committed_event_count {
+                // No new events — still update robber/turn/dev cards on final state.
+                let mut updated = false;
+                {
+                    let mut session = poll_session.lock().await;
+                    if let Some(robber_idx) = poll.robber_tile_index {
+                        session.update_final_state(|s| {
+                            s.robber = crate::game::board::TileId(robber_idx);
+                        });
+                        updated = true;
+                    }
+                    if let Some(color) = poll.current_turn_color {
+                        if let Some(pid) = state::player_of_color(&color_map, color) {
+                            session.update_final_state(|s| {
+                                s.current_player = pid;
+                            });
+                            updated = true;
+                        }
+                    }
+                    if !poll.dev_cards.is_empty() {
+                        if let Some(lp) =
+                            poll_local_color.and_then(|c| state::player_of_color(&color_map, c))
+                        {
+                            session.update_final_state(|s| {
+                                state::apply_dev_cards(s, lp, &poll.dev_cards);
+                            });
+                            updated = true;
+                        }
+                    }
+                }
+                if updated {
+                    generation += 1;
+                    let _ = notify_tx.send(generation);
+                }
+                continue;
+            }
+
+            // Process new events.
+            let new_events = &poll.events[committed_event_count..];
+            eprintln!(
+                "poll: {} new events (total {})",
+                new_events.len(),
+                total_events
+            );
+
+            let new_entries = state::process_new_events(
+                &mut last_state,
+                new_events,
+                &color_map,
+                &corner_map,
+                &edge_map,
+                &poll_board,
+            );
+
+            // Apply robber, current turn, dev cards to last_state.
+            if let Some(robber_idx) = poll.robber_tile_index {
+                last_state.robber = crate::game::board::TileId(robber_idx);
+            }
+            if let Some(color) = poll.current_turn_color {
+                if let Some(pid) = state::player_of_color(&color_map, color) {
+                    last_state.current_player = pid;
+                }
+            }
+            if !poll.dev_cards.is_empty() {
+                if let Some(lp) =
+                    poll_local_color.and_then(|c| state::player_of_color(&color_map, c))
+                {
+                    state::apply_dev_cards(&mut last_state, lp, &poll.dev_cards);
+                }
+            }
+
+            committed_event_count = total_events;
+
+            {
+                let mut session = poll_session.lock().await;
+
+                if !new_entries.is_empty() {
+                    let pairs: Vec<(String, crate::game::state::GameState)> = new_entries
+                        .into_iter()
+                        .map(|e| (e.label, e.state))
+                        .collect();
+                    session.extend_timeline(pairs);
+                }
+
+                // Update final state with robber/turn/dev cards.
+                if let Some(robber_idx) = poll.robber_tile_index {
+                    session.update_final_state(|s| {
+                        s.robber = crate::game::board::TileId(robber_idx);
+                    });
+                }
+                if let Some(color) = poll.current_turn_color {
+                    if let Some(pid) = state::player_of_color(&color_map, color) {
+                        session.update_final_state(|s| {
+                            s.current_player = pid;
+                        });
+                    }
+                }
+                if !poll.dev_cards.is_empty() {
+                    if let Some(lp) =
+                        poll_local_color.and_then(|c| state::player_of_color(&color_map, c))
+                    {
+                        session.update_final_state(|s| {
+                            state::apply_dev_cards(s, lp, &poll.dev_cards);
+                        });
+                    }
+                }
+            }
+
+            generation += 1;
+            let _ = notify_tx.send(generation);
+        }
+    });
+
+    eprintln!("serving colonist board on port {serve_port} (live polling every 5s)");
+    rt.block_on(canopy::server::serve_live(
+        serve_port, session, presenter, notify_rx,
     ));
 }

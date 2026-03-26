@@ -12,7 +12,7 @@ use axum::{
     Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, watch};
 use tower_http::services::ServeDir;
 
 use crate::eval::Evaluator;
@@ -136,6 +136,139 @@ pub async fn serve_with_timeline<G: Game + 'static>(
     println!("Analysis board: http://localhost:{port}");
     let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
     axum::serve(listener, app).await.unwrap();
+}
+
+/// Launch the web analysis board with a shared session and live-update notifications.
+///
+/// The caller owns the `Arc<Mutex<GameSession>>` and a `watch::Sender<u64>`.
+/// A polling task can extend the session's timeline, then send a generation
+/// bump through the watch channel. Connected clients receive a state push.
+pub async fn serve_live<G: Game + 'static>(
+    port: u16,
+    session: Arc<Mutex<GameSession<G>>>,
+    presenter: Arc<dyn GamePresenter<G> + Send + Sync>,
+    notify: watch::Receiver<u64>,
+) {
+    let static_dir = presenter.static_dir().to_path_buf();
+
+    let app = Router::new()
+        .route(
+            "/ws",
+            axum::routing::get({
+                let session = session.clone();
+                let notify = notify.clone();
+                move |ws: WebSocketUpgrade| {
+                    let session = session.clone();
+                    let notify = notify.clone();
+                    async move {
+                        ws.on_upgrade(move |socket| handle_live_socket(socket, session, notify))
+                    }
+                }
+            }),
+        )
+        .fallback_service(ServeDir::new(&static_dir));
+
+    let addr = format!("0.0.0.0:{port}");
+    println!("Analysis board: http://localhost:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
+async fn handle_live_socket<G: Game + 'static>(
+    mut socket: WebSocket,
+    session: Arc<Mutex<GameSession<G>>>,
+    mut notify: watch::Receiver<u64>,
+) {
+    // Send initial state.
+    {
+        let session = session.lock().await;
+        let msg = session.state_msg();
+        if send_msg(&mut socket, &msg).await.is_err() {
+            return;
+        }
+    }
+
+    loop {
+        tokio::select! {
+            ws_result = socket.recv() => {
+                let ws_msg = match ws_result {
+                    Some(Ok(msg)) => msg,
+                    _ => break,
+                };
+                let text = match ws_msg {
+                    Message::Text(t) => t,
+                    Message::Close(_) => break,
+                    _ => continue,
+                };
+                let client_msg: ClientMsg = match serde_json::from_str(&text) {
+                    Ok(m) => m,
+                    Err(e) => {
+                        let _ = send_msg(
+                            &mut socket,
+                            &ServerMsg::Error {
+                                message: format!("Invalid message: {e}"),
+                            },
+                        )
+                        .await;
+                        continue;
+                    }
+                };
+                let mut session = session.lock().await;
+                let responses = match &client_msg {
+                    ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {
+                        match session.begin_search(&client_msg) {
+                            Err(msgs) => msgs,
+                            Ok(sims_total) => {
+                                let mut evals = vec![];
+                                let mut last_progress = 0;
+                                let result = loop {
+                                    if let Some(result) = session.search_tick(&mut evals) {
+                                        break result;
+                                    }
+                                    if let Some((snap, labels)) = session.snapshot_with_labels() {
+                                        if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
+                                            last_progress = snap.total_simulations;
+                                            if send_msg(
+                                                &mut socket,
+                                                &ServerMsg::SearchProgress {
+                                                    snapshot: snap,
+                                                    action_labels: labels,
+                                                    sims_total,
+                                                },
+                                            )
+                                            .await
+                                            .is_err()
+                                            {
+                                                return;
+                                            }
+                                        }
+                                    }
+                                };
+                                session.finish_search(&client_msg, result)
+                            }
+                        }
+                    }
+                    _ => session.handle(client_msg),
+                };
+                for msg in responses {
+                    if send_msg(&mut socket, &msg).await.is_err() {
+                        return;
+                    }
+                }
+            }
+            result = notify.changed() => {
+                if result.is_err() {
+                    // Sender dropped (polling task died) — stop watching.
+                    break;
+                }
+                let session = session.lock().await;
+                let msg = session.state_msg();
+                if send_msg(&mut socket, &msg).await.is_err() {
+                    return;
+                }
+            }
+        }
+    }
 }
 
 async fn handle_socket<G: Game + 'static>(
