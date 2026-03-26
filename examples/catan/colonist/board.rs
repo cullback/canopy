@@ -73,6 +73,73 @@ pub const EXTRACT_JS: &str = r#"(() => {
     return JSON.stringify({ tiles, ports, corners, edges, robber });
 })()"#;
 
+/// JS snippet to extract the local player's dev card hand from the React
+/// component tree. Returns a JSON array of colonist cardEnum values
+/// (11=Knight, 12=VictoryPoint, 13=Monopoly, 14=RoadBuilding, 15=YearOfPlenty).
+///
+/// The hand is in a `cardState` prop (map of `{cardEnum: count}`) on a
+/// component rendered for the local player's card tray.
+pub const EXTRACT_CARDS_JS: &str = r#"(() => {
+    let seen = new Set();
+    for (let el of document.querySelectorAll('*')) {
+        let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+        if (!fk) continue;
+        let node = el[fk];
+        for (let d = 0; d < 30 && node; d++) {
+            if (seen.has(node)) { node = node.return; continue; }
+            seen.add(node);
+            let p = node.memoizedProps;
+            if (p && p.cardState && typeof p.cardState === 'object' && !Array.isArray(p.cardState)) {
+                let cards = [];
+                for (let [k, count] of Object.entries(p.cardState)) {
+                    let e = parseInt(k);
+                    if (e >= 11 && e <= 15) {
+                        for (let i = 0; i < count; i++) cards.push(e);
+                    }
+                }
+                if (cards.length > 0) return JSON.stringify(cards);
+            }
+            node = node.return;
+        }
+    }
+    return '[]';
+})()"#;
+
+/// JS snippet to extract player names/colors, local player, and current turn.
+/// Returns JSON: `{players: [{username, color}], localColor: N|null, currentTurnColor: N|null}`.
+///
+/// Local player is identified by matching `localStorage.userState.username`
+/// against `gameValidator.userStates`.
+pub const EXTRACT_PLAYERS_JS: &str = r#"(() => {
+    let seen = new Set();
+    for (let el of document.querySelectorAll('*')) {
+        let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+        if (!fk) continue;
+        let node = el[fk];
+        for (let d = 0; d < 50 && node; d++) {
+            if (seen.has(node)) { node = node.return; continue; }
+            seen.add(node);
+            let p = node.memoizedProps;
+            if (p && p.gameValidator && p.gameValidator.userStates) {
+                let users = p.gameValidator.userStates;
+                let players = users.map(u => ({username: u.username, color: u.selectedColor}));
+                let localColor = null;
+                try {
+                    let me = JSON.parse(localStorage.getItem('userState'))?.username;
+                    if (me) {
+                        let match = users.find(u => u.username === me);
+                        if (match) localColor = match.selectedColor;
+                    }
+                } catch {}
+                let currentTurnColor = p.gameValidator.gameState?.currentState?.currentTurnPlayerColor ?? null;
+                return JSON.stringify({players, localColor, currentTurnColor});
+            }
+            node = node.return;
+        }
+    }
+    return '{"players":[],"localColor":null}';
+})()"#;
+
 // -- Types --------------------------------------------------------------------
 
 #[derive(Debug)]

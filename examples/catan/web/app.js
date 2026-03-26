@@ -151,6 +151,11 @@ function updatePlayerPanel(idx, state) {
   const pf = frame.players[idx];
   if (!pf) return;
 
+  // Player name
+  if (state.player_names && state.player_names[idx]) {
+    document.getElementById(`p${idx}-name`).textContent = state.player_names[idx];
+  }
+
   // VP
   document.getElementById(`p${idx}-vp`).textContent = pf.vp;
 
@@ -174,6 +179,12 @@ function updatePlayerPanel(idx, state) {
       chip.textContent = `${pf.dev_cards[d]} ${DEV_CARD_NAMES[d]}`;
       devEl.appendChild(chip);
     }
+  }
+  if (pf.hidden_dev_cards > 0) {
+    const chip = document.createElement('span');
+    chip.className = 'dev-chip hidden-dev';
+    chip.textContent = `${pf.hidden_dev_cards} unknown`;
+    devEl.appendChild(chip);
   }
 
   // Stats: knights played + awards

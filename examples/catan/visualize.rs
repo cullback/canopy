@@ -57,6 +57,7 @@ pub struct PlayerFrame {
     hand: [u8; 5],
     vp: u8,
     dev_cards: [u8; 5],
+    hidden_dev_cards: u8,
     knights: u8,
     trade_ratios: [u8; 5],
 }
@@ -200,6 +201,7 @@ fn player_frame(state: &GameState, pid: Player) -> PlayerFrame {
         hand: ps.hand.0,
         vp: state.total_vps(pid),
         dev_cards: ps.dev_cards.0,
+        hidden_dev_cards: ps.hidden_dev_cards,
         knights: ps.knights_played,
         trade_ratios: ps.trade_ratios,
     }

@@ -14,11 +14,22 @@ use crate::visualize;
 pub struct CatanPresenter {
     static_dir: PathBuf,
     dice: Dice,
+    /// Optional player names: [P1 name, P2 name].
+    player_names: Option<[String; 2]>,
 }
 
 impl CatanPresenter {
     pub fn new(static_dir: PathBuf, dice: Dice) -> Self {
-        Self { static_dir, dice }
+        Self {
+            static_dir,
+            dice,
+            player_names: None,
+        }
+    }
+
+    pub fn with_player_names(mut self, names: [String; 2]) -> Self {
+        self.player_names = Some(names);
+        self
     }
 }
 
@@ -27,14 +38,18 @@ impl GamePresenter<GameState> for CatanPresenter {
         let board = visualize::build_board(state);
         let frame = visualize::capture_frame(state, "", state.current_player as u8, None);
 
-        serde_json::json!({
+        let mut v = serde_json::json!({
             "board": board,
             "frame": frame,
             "turn": state.turn_number,
             "current_player": state.current_player as u8,
             "p1_vp": state.total_vps(Player::One),
             "p2_vp": state.total_vps(Player::Two),
-        })
+        });
+        if let Some(ref names) = self.player_names {
+            v["player_names"] = serde_json::json!(names);
+        }
+        v
     }
 
     fn action_label(&self, state: &GameState, action: usize) -> String {

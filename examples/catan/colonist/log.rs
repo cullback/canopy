@@ -13,18 +13,18 @@ fn card_to_resource(card: u64) -> Option<Resource> {
     match card {
         1 => Some(Resource::Lumber),
         2 => Some(Resource::Brick),
-        3 => Some(Resource::Grain),
-        4 => Some(Resource::Wool),
+        3 => Some(Resource::Wool),
+        4 => Some(Resource::Grain),
         5 => Some(Resource::Ore),
         _ => None,
     }
 }
 
 /// Colonist cardEnum → DevCardKind. Cards 10+ are dev cards.
-fn card_to_dev(card: u64) -> Option<DevCardKind> {
+pub(crate) fn card_to_dev(card: u64) -> Option<DevCardKind> {
     match card {
         11 => Some(DevCardKind::Knight),
-        // 12 => VictoryPoint (not seen yet, inferred from gap)
+        12 => Some(DevCardKind::VictoryPoint),
         13 => Some(DevCardKind::Monopoly),
         14 => Some(DevCardKind::RoadBuilding),
         15 => Some(DevCardKind::YearOfPlenty),
@@ -192,6 +192,12 @@ pub enum GameEvent {
         player: u8,
         count: u8,
         resource: Resource,
+    },
+
+    // Discard on 7
+    Discard {
+        player: u8,
+        resources: ResourceArray,
     },
 
     // Achievements
@@ -419,6 +425,16 @@ fn parse_entry(
             Some(GameEvent::TileBlocked {
                 dice_number: dn,
                 resource: rt,
+            })
+        }
+
+        // Discard on 7
+        55 => {
+            let cards = text["cardEnums"].as_array()?;
+            let resources = cards_to_resources(cards);
+            Some(GameEvent::Discard {
+                player: player(),
+                resources,
             })
         }
 
@@ -655,6 +671,17 @@ pub fn print(events: &[GameEvent]) {
                 println!(
                     "  {} played dev card (enum {card_enum})",
                     color_name(*player)
+                );
+            }
+            GameEvent::Discard {
+                player, resources, ..
+            } => {
+                let h = hands.entry(*player).or_default();
+                h.sub(*resources);
+                println!(
+                    "  {} discarded {}",
+                    color_name(*player),
+                    fmt_resources(resources)
                 );
             }
             GameEvent::LongestRoad { player } => {

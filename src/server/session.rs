@@ -21,6 +21,9 @@ struct HistoryEntry<G> {
     action: usize,   // action taken from this state
     label: String,   // human-readable label (empty for unlabeled)
     is_chance: bool, // true for auto-resolved chance outcomes
+    /// Pre-computed next state for timeline entries where the action can't be
+    /// replayed through `apply_action` (e.g. colonist replay snapshots).
+    next_state: Option<G>,
 }
 
 /// Owns the game state, search tree, evaluator, and presenter.
@@ -128,6 +131,30 @@ impl<G: Game + 'static> GameSession<G> {
         self.cursor = 0;
         let state = self.presenter.new_game(log.seed);
         self.search.reset(state);
+    }
+
+    /// Load an externally-built timeline (e.g. from colonist.io replay).
+    ///
+    /// Each entry is `(label, state)`. The first entry is the initial state;
+    /// subsequent entries are states after events described by their label.
+    /// Redo navigates forward using `next_state` (no `apply_action`).
+    pub fn load_timeline(&mut self, timeline: Vec<(String, G)>) {
+        if timeline.is_empty() {
+            return;
+        }
+        self.search.reset(timeline[0].1.clone());
+        self.history.clear();
+        self.cursor = 0;
+
+        for i in 0..timeline.len() - 1 {
+            self.history.push(HistoryEntry {
+                state: timeline[i].1.clone(),
+                action: usize::MAX, // sentinel — not a real game action
+                label: timeline[i + 1].0.clone(),
+                is_chance: false,
+                next_state: Some(timeline[i + 1].1.clone()),
+            });
+        }
     }
 
     /// Process a client message and return response messages.
@@ -286,7 +313,12 @@ impl<G: Game + 'static> GameSession<G> {
                 if self.cursor < self.history.len() {
                     // Replay the stored decision + any following chance outcomes.
                     loop {
-                        self.search.apply_action(self.history[self.cursor].action);
+                        let entry = &self.history[self.cursor];
+                        if let Some(ref next) = entry.next_state {
+                            self.search.reset(next.clone());
+                        } else {
+                            self.search.apply_action(entry.action);
+                        }
                         self.cursor += 1;
                         let at_chance =
                             self.cursor < self.history.len() && self.history[self.cursor].is_chance;
@@ -424,6 +456,7 @@ impl<G: Game + 'static> GameSession<G> {
             action,
             label,
             is_chance,
+            next_state: None,
         });
         self.cursor += 1;
         self.search.apply_action(action);
