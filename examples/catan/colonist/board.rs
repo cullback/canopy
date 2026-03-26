@@ -49,25 +49,11 @@ pub const EXTRACT_JS: &str = r#"(() => {
     let corners = gmTs?.tileCornerStates || {};
     let edges = gmTs?.tileEdgeStates || {};
 
-    // Robber: find the last MoveRobber (type 11) log entry and match its
-    // tileInfo (tileType + diceNumber) against the tile array to get coords.
+    // Robber: use mechanicRobberState.locationTileIndex to index tiles directly.
     let robber = null;
-    let vs = document.querySelector('[class*="virtualScroller"]');
-    if (vs) {
-        let fk2 = Object.keys(vs).find(k => k.startsWith('__reactFiber'));
-        let logNode = fk2 && vs[fk2].return?.return;
-        let children = logNode?.memoizedProps?.children;
-        if (Array.isArray(children)) {
-            for (let i = children.length - 1; i >= 0; i--) {
-                let e = children[i]?.props?.gameLogData?.text;
-                if (e?.type === 11 && e.tileInfo && tiles) {
-                    let ti = e.tileInfo;
-                    let match = tiles.find(t => t.type === ti.tileType && t.diceNumber === ti.diceNumber);
-                    if (match) robber = { x: match.x, y: match.y };
-                    break;
-                }
-            }
-        }
+    let ri = gv.gameState?.mechanicRobberState?.locationTileIndex;
+    if (ri != null && tiles && tiles[ri]) {
+        robber = { x: tiles[ri].x, y: tiles[ri].y };
     }
 
     return JSON.stringify({ tiles, ports, corners, edges, robber });
