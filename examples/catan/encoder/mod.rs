@@ -113,7 +113,7 @@ pub(super) fn opponent_expected_dev_cards(
     // dev_cards already includes bought_this_turn (both incremented on buy)
     let opp_hand_size: f32 =
         opp_player.dev_cards.0.iter().sum::<u8>() as f32 + opp_player.hidden_dev_cards as f32;
-    let deck_remaining = state.dev_deck.total_remaining() as f32;
+    let deck_remaining = state.dev_deck.total as f32;
     let total_unknown = deck_remaining + opp_hand_size;
 
     let mut out = [0.0; 5];

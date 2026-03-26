@@ -97,7 +97,7 @@ impl Game for GameState {
             }
             Phase::DevCardDraw => {
                 let kind = DevCardKind::ALL[action];
-                self.dev_deck.remove(kind);
+                self.dev_deck.total -= 1;
                 self.current_mut().dev_cards[kind] += 1;
                 self.current_mut().dev_cards_bought_this_turn[kind] += 1;
                 self.phase = Phase::Main;
@@ -132,8 +132,8 @@ impl Game for GameState {
                 }
             }
             Phase::DevCardDraw => {
-                for (i, &kind) in DevCardKind::ALL.iter().enumerate() {
-                    let count = self.dev_deck.remaining_of(kind);
+                let pool = self.unknown_dev_pool();
+                for (i, &count) in pool.iter().enumerate() {
                     if count > 0 {
                         buf.push((i, count as u32));
                     }
@@ -167,19 +167,19 @@ impl Game for GameState {
                 Some(ALL_RESOURCES.len() - 1)
             }
             Phase::DevCardDraw => {
-                let total = self.dev_deck.total_remaining();
+                let pool = self.unknown_dev_pool();
+                let total: u8 = pool.iter().sum();
                 if total == 0 {
                     return None;
                 }
                 let mut pick = rng.u8(..total);
-                for (i, &kind) in DevCardKind::ALL.iter().enumerate() {
-                    let c = self.dev_deck.remaining_of(kind);
+                for (i, &c) in pool.iter().enumerate() {
                     if pick < c {
                         return Some(i);
                     }
                     pick -= c;
                 }
-                Some(DevCardKind::ALL.len() - 1)
+                Some(pool.len() - 1)
             }
             _ => None,
         }
@@ -189,15 +189,16 @@ impl Game for GameState {
         for pid in [Player::One, Player::Two] {
             let n = self.players[pid].hidden_dev_cards;
             for _ in 0..n {
-                let total = self.dev_deck.total_remaining();
+                let pool = self.unknown_dev_pool();
+                let total: u8 = pool.iter().sum();
                 if total == 0 {
                     break;
                 }
                 let mut pick = rng.u8(..total);
-                for kind in DevCardKind::ALL {
-                    let c = self.dev_deck.remaining_of(kind);
+                for (i, &c) in pool.iter().enumerate() {
                     if pick < c {
-                        self.dev_deck.remove(kind);
+                        let kind = DevCardKind::ALL[i];
+                        self.dev_deck.total -= 1;
                         self.players[pid].dev_cards[kind] += 1;
                         break;
                     }
@@ -538,7 +539,7 @@ pub fn apply_hidden_dev_card_buy(state: &mut GameState) {
     state.current_mut().hand.sub(DEV_CARD_COST);
     state.bank.add(DEV_CARD_COST);
     state.current_mut().hidden_dev_cards += 1;
-    state.dev_deck.remove_unknown();
+    state.dev_deck.total -= 1;
 }
 
 fn apply_play_knight(state: &mut GameState) {
@@ -731,7 +732,7 @@ mod tests {
         SETTLEMENT_END, SETTLEMENT_START, maritime_id, road_id, robber_id, settlement_id, yop_id,
     };
     use super::board::AdjacencyBitboards;
-    use super::dev_card::{DevCardDeck, DevCardKind};
+    use super::dev_card::{DevCardArray, DevCardKind};
     use super::dice::Dice;
     use super::resource::{DEV_CARD_COST, Resource, SETTLEMENT_COST};
     use super::*;
@@ -740,6 +741,20 @@ mod tests {
 
     fn make_state_with_seed(seed: u64) -> GameState {
         GameState::from_seed(seed, Dice::default())
+    }
+
+    /// Set up the dev deck so that `unknown_dev_pool()` returns exactly `pool`.
+    /// Puts the difference between the original deck and the target pool into
+    /// Player::Two's `dev_cards_played` (arbitrary, but keeps P1's hand clean).
+    fn force_dev_pool(state: &mut GameState, pool: [u8; 5]) {
+        use super::state::ORIGINAL_DEV_DECK;
+        let mut played = DevCardArray::default();
+        for t in 0..5 {
+            played.0[t] = ORIGINAL_DEV_DECK[t] - pool[t];
+        }
+        state.players[Player::Two].dev_cards_played = played;
+        state.players[Player::One].dev_cards_played = DevCardArray::default();
+        state.dev_deck.total = pool.iter().sum();
     }
 
     /// Play through the 4-settlement setup phase using random actions.
@@ -1808,8 +1823,8 @@ mod tests {
         state.players[Player::One].building_vps = 12;
         state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
 
-        // Stack the deck with only VP cards
-        state.dev_deck = DevCardDeck::from_counts([0, 1, 0, 0, 0]);
+        // Force the pool so only 1 VP card remains
+        force_dev_pool(&mut state, [0, 1, 0, 0, 0]);
         state.players[Player::One].hand.add(DEV_CARD_COST);
 
         apply(&mut state, ActionId(BUY_DEV_CARD));
@@ -2230,7 +2245,7 @@ mod tests {
         // Buy a VP dev card → 15 → win
         state.players[Player::One].building_vps = 12;
         state.players[Player::One].dev_cards[DevCardKind::VictoryPoint] = 2;
-        state.dev_deck = DevCardDeck::from_counts([0, 1, 0, 0, 0]);
+        force_dev_pool(&mut state, [0, 1, 0, 0, 0]);
         state.players[Player::One].hand.add(DEV_CARD_COST);
 
         apply(&mut state, ActionId(BUY_DEV_CARD));

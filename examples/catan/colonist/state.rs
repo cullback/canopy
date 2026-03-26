@@ -238,7 +238,7 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                     state.players[pid].hand.sub(DEV_CARD_COST);
                     state.bank.add(DEV_CARD_COST);
                     state.players[pid].hidden_dev_cards += 1;
-                    state.dev_deck.remove_unknown();
+                    state.dev_deck.total -= 1;
                 }
             }
             GameEvent::Stole {
@@ -664,7 +664,7 @@ fn process_post_setup(
                     state.players[pid].hand.sub(DEV_CARD_COST);
                     state.bank.add(DEV_CARD_COST);
                     state.players[pid].hidden_dev_cards += 1;
-                    state.dev_deck.remove_unknown();
+                    state.dev_deck.total -= 1;
                 }
                 pending_label = Some(format!(
                     "{} buys dev card",
@@ -881,8 +881,7 @@ pub fn process_new_events(
 
 /// Apply extracted dev card identities to a game state.
 ///
-/// Converts `hidden_dev_cards` into concrete `dev_cards` entries and removes
-/// specific card types from the deck instead of `remove_unknown()`.
+/// Converts `hidden_dev_cards` into concrete `dev_cards` entries.
 pub fn apply_dev_cards(state: &mut GameState, player: Player, cards: &[DevCardKind]) {
     let ps = &mut state.players[player];
     let concrete_count = cards.len() as u8;

@@ -5,6 +5,9 @@ use canopy::player::{PerPlayer, Player};
 
 use super::board::TileId;
 use super::dev_card::{DevCardArray, DevCardDeck, DevCardKind};
+
+/// Original deck composition: 14 knights, 5 VP, 2 road building, 2 year of plenty, 2 monopoly.
+pub const ORIGINAL_DEV_DECK: [u8; 5] = [14, 5, 2, 2, 2];
 use super::dice::Dice;
 use super::resource::ResourceArray;
 use super::road::RoadNetwork;
@@ -217,6 +220,22 @@ impl GameState {
     /// True total VP: buildings + longest road + largest army + VP dev cards.
     pub fn total_vps(&self, pid: Player) -> u8 {
         self.public_vps(pid) + self.players[pid].dev_cards[DevCardKind::VictoryPoint]
+    }
+
+    /// Cards not accounted for by any player's hand or played pile.
+    ///
+    /// In self-play this equals the exact bank contents. In competition it
+    /// includes the bank plus opponent hidden cards — correct for both
+    /// hypergeometric estimation and marginal sampling.
+    pub fn unknown_dev_pool(&self) -> [u8; 5] {
+        let mut pool = ORIGINAL_DEV_DECK;
+        for pid in [Player::One, Player::Two] {
+            for t in 0..5 {
+                pool[t] -= self.players[pid].dev_cards.0[t];
+                pool[t] -= self.players[pid].dev_cards_played.0[t];
+            }
+        }
+        pool
     }
 }
 
