@@ -72,6 +72,41 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    /// Create a session with an explicit initial state.
+    pub fn with_state(
+        state: G,
+        evaluator: Arc<dyn Evaluator<G> + Sync>,
+        presenter: Arc<dyn GamePresenter<G>>,
+        default_sims: u32,
+        human_players: [bool; 2],
+    ) -> Self {
+        let config = Config {
+            num_simulations: default_sims,
+            ..Config::default()
+        };
+        let search = Search::new(state, config);
+
+        Self {
+            search,
+            evaluator,
+            presenter,
+            rng: fastrand::Rng::new(),
+            configs: [
+                PlayerConfig {
+                    simulations: default_sims,
+                    human: human_players[0],
+                },
+                PlayerConfig {
+                    simulations: default_sims,
+                    human: human_players[1],
+                },
+            ],
+            history: Vec::new(),
+            cursor: 0,
+            seed: 0,
+        }
+    }
+
     /// Load a recorded game log for replay.
     ///
     /// Resets the game with the log's seed, replays all actions into history

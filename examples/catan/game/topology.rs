@@ -15,7 +15,7 @@ pub struct Topology {
 
 /// For a hex, corner i is shared with specific corners of adjacent hexes.
 /// This maps (hex_direction, corner_of_neighbor) pairs that share each corner.
-const SHARED_CORNERS: [[(Direction, u8); 2]; 6] = [
+pub const SHARED_CORNERS: [[(Direction, u8); 2]; 6] = [
     // Corner 0 (North)
     [(Direction::Northeast, 4), (Direction::Northwest, 2)],
     // Corner 1 (NE)
@@ -34,7 +34,7 @@ const SHARED_CORNERS: [[(Direction, u8); 2]; 6] = [
 /// Edge i connects corner i and corner (i+1)%6.
 /// Edge i is shared with the neighbor in direction EDGE_NEIGHBOR_DIR[i],
 /// specifically their edge (i+3)%6 (the opposite edge).
-const EDGE_NEIGHBOR_DIR: [Direction; 6] = [
+pub const EDGE_NEIGHBOR_DIR: [Direction; 6] = [
     Direction::Northeast, // edge 0 (N-NE) shared with NE neighbor
     Direction::East,      // edge 1 (NE-SE) shared with E neighbor
     Direction::Southeast, // edge 2 (SE-S) shared with SE neighbor
@@ -102,7 +102,7 @@ const TOKEN_SEQUENCE: [u8; 18] = [5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9, 4, 
 
 /// Port positions: (water hex, direction from water toward adjacent land hex).
 /// Derived from catanatron reference cube coords converted to axial (q=x, r=z).
-const PORT_SPECS: [(Hex, Direction); 9] = [
+pub const PORT_SPECS: [(Hex, Direction); 9] = [
     (Hex::new(3, 0), Direction::West),       // land: (2,0)
     (Hex::new(1, 2), Direction::Northwest),  // land: (1,1)
     (Hex::new(-1, 3), Direction::Northwest), // land: (-1,2)
@@ -147,25 +147,36 @@ impl Topology {
     }
 
     fn build(rng: &mut fastrand::Rng) -> Self {
-        // Shuffle terrains
         let mut terrains = TERRAIN_POOL;
         rng.shuffle(&mut terrains);
 
-        // Shuffle ports
+        let mut numbers = [None; 19];
+        let mut token_iter = TOKEN_SEQUENCE.iter().copied();
+        for (i, &t) in terrains.iter().enumerate() {
+            if t != Terrain::Desert {
+                numbers[i] = Some(token_iter.next().unwrap());
+            }
+        }
+
         let mut port_resources = PORT_POOL;
         rng.shuffle(&mut port_resources);
 
-        // Assign terrains to hex positions, then place tokens in LAND_HEXES order
+        Self::from_layout(terrains, numbers, port_resources)
+    }
+
+    /// Build a topology from an explicit board layout.
+    ///
+    /// - `terrains[i]`: terrain at `LAND_HEXES[i]`
+    /// - `numbers[i]`: dice number at `LAND_HEXES[i]`, `None` for desert
+    /// - `port_resources[i]`: resource for port at `PORT_SPECS[i]`, `None` = generic 3:1
+    pub fn from_layout(
+        terrains: [Terrain; 19],
+        numbers: [Option<u8>; 19],
+        port_resources: [Option<Resource>; 9],
+    ) -> Self {
         let mut tile_data = [(Hex::new(0, 0), Terrain::Desert, None); 19];
         for i in 0..19 {
-            tile_data[i].0 = LAND_HEXES[i];
-            tile_data[i].1 = terrains[i];
-        }
-        let mut token_iter = TOKEN_SEQUENCE.iter().copied();
-        for hex_idx in 0..19 {
-            if terrains[hex_idx] != Terrain::Desert {
-                tile_data[hex_idx].2 = Some(token_iter.next().unwrap());
-            }
+            tile_data[i] = (LAND_HEXES[i], terrains[i], numbers[i]);
         }
 
         // --- Build node and edge mappings ---
@@ -604,5 +615,52 @@ mod tests {
         let mut tok_sorted = NUMBER_TOKENS;
         tok_sorted.sort();
         assert_eq!(seq_sorted, tok_sorted);
+    }
+
+    /// from_layout produces the same topology as build when given the same
+    /// terrain, number, and port assignments.
+    #[test]
+    fn from_layout_matches_build() {
+        for seed in [0, 42, 123, 999] {
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let t_build = Topology::build(&mut rng);
+
+            // Reconstruct the same inputs build() would pass to from_layout
+            let mut rng = fastrand::Rng::with_seed(seed);
+            let mut terrains = TERRAIN_POOL;
+            rng.shuffle(&mut terrains);
+
+            let mut numbers = [None; 19];
+            let mut token_iter = TOKEN_SEQUENCE.iter().copied();
+            for (i, &t) in terrains.iter().enumerate() {
+                if t != Terrain::Desert {
+                    numbers[i] = Some(token_iter.next().unwrap());
+                }
+            }
+
+            let mut port_resources = PORT_POOL;
+            rng.shuffle(&mut port_resources);
+
+            let t_layout = Topology::from_layout(terrains, numbers, port_resources);
+
+            // Compare terrains
+            for (a, b) in t_build.tiles.iter().zip(t_layout.tiles.iter()) {
+                assert_eq!(a.terrain, b.terrain, "seed {seed}: terrain mismatch");
+                assert_eq!(a.nodes, b.nodes, "seed {seed}: tile nodes mismatch");
+                assert_eq!(a.edges, b.edges, "seed {seed}: tile edges mismatch");
+            }
+            // Compare ports
+            for (a, b) in t_build.nodes.iter().zip(t_layout.nodes.iter()) {
+                assert_eq!(
+                    a.port, b.port,
+                    "seed {seed}: port mismatch at node {:?}",
+                    a.id
+                );
+            }
+            assert_eq!(
+                t_build.robber_start, t_layout.robber_start,
+                "seed {seed}: robber mismatch"
+            );
+        }
     }
 }

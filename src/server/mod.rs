@@ -62,6 +62,43 @@ pub async fn serve<G: Game + 'static>(
     axum::serve(listener, app).await.unwrap();
 }
 
+/// Launch the web analysis board with a pre-built game state.
+pub async fn serve_with_state<G: Game + 'static>(
+    port: u16,
+    state: G,
+    evaluator: Arc<dyn Evaluator<G> + Sync>,
+    presenter: Arc<dyn GamePresenter<G>>,
+    default_sims: u32,
+    human_players: [bool; 2],
+) {
+    let static_dir = presenter.static_dir().to_path_buf();
+    let session = Arc::new(Mutex::new(GameSession::with_state(
+        state,
+        evaluator,
+        presenter,
+        default_sims,
+        human_players,
+    )));
+
+    let app = Router::new()
+        .route(
+            "/ws",
+            axum::routing::get({
+                let session = session.clone();
+                move |ws: WebSocketUpgrade| {
+                    let session = session.clone();
+                    async move { ws.on_upgrade(move |socket| handle_socket(socket, session)) }
+                }
+            }),
+        )
+        .fallback_service(ServeDir::new(&static_dir));
+
+    let addr = format!("0.0.0.0:{port}");
+    println!("Analysis board: http://localhost:{port}");
+    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+    axum::serve(listener, app).await.unwrap();
+}
+
 async fn handle_socket<G: Game + 'static>(
     mut socket: WebSocket,
     session: Arc<Mutex<GameSession<G>>>,

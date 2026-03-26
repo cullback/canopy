@@ -40,6 +40,8 @@ tracing-subscriber = { version = "0.3", features = ["fmt", "env-filter"] }
 
 [dev-dependencies]
 canopy = { path = ".", features = ["cli", "visualize", "server", "nn"] }
+futures-util = "0.3"
+tokio-tungstenite = "0.26"
 
 [[example]]
 name = "pig"
