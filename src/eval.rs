@@ -37,6 +37,14 @@ impl Evaluation {
             wdl: wdl_from_scalar(value),
         }
     }
+
+    /// Uniform-logit evaluation with an explicit WDL distribution.
+    pub fn uniform_wdl(num_actions: usize, wdl: [f32; 3]) -> Self {
+        Self {
+            policy_logits: vec![0.0; num_actions],
+            wdl,
+        }
+    }
 }
 
 /// Evaluates a game state, producing policy logits and a value estimate.
@@ -90,12 +98,20 @@ impl<G: Game> Evaluator<G> for RolloutEvaluator {
     fn evaluate(&self, state: &G, rng: &mut fastrand::Rng) -> Evaluation {
         assert!(self.num_rollouts > 0, "num_rollouts must be at least 1");
         let mut action_buf = Vec::with_capacity(G::NUM_ACTIONS);
-        let mut total = 0.0f32;
+        let mut wdl = [0.0f32; 3];
+        let n = self.num_rollouts as f32;
         for _ in 0..self.num_rollouts {
             let mut s = state.clone();
-            total += rollout(&mut s, &mut action_buf, rng);
+            let reward = rollout(&mut s, &mut action_buf, rng);
+            if reward > 0.0 {
+                wdl[0] += 1.0 / n;
+            } else if reward < 0.0 {
+                wdl[2] += 1.0 / n;
+            } else {
+                wdl[1] += 1.0 / n;
+            }
         }
-        Evaluation::uniform(G::NUM_ACTIONS, total / self.num_rollouts as f32)
+        Evaluation::uniform_wdl(G::NUM_ACTIONS, wdl)
     }
 }
 
@@ -148,8 +164,11 @@ impl<G: Game> Evaluators<G> {
     }
 }
 
+/// Maximum actions per rollout before declaring a draw.
+const ROLLOUT_MAX_STEPS: u32 = 10_000;
+
 fn rollout<G: Game>(state: &mut G, action_buf: &mut Vec<usize>, rng: &mut fastrand::Rng) -> f32 {
-    loop {
+    for _ in 0..ROLLOUT_MAX_STEPS {
         match state.status() {
             Status::Terminal(reward) => return reward,
             Status::Ongoing => {
@@ -164,4 +183,5 @@ fn rollout<G: Game>(state: &mut G, action_buf: &mut Vec<usize>, rng: &mut fastra
             }
         }
     }
+    0.0 // draw if rollout exceeds step limit
 }
