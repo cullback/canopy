@@ -50,6 +50,12 @@
   color: #999;
   font-style: italic;
 }
+.dev-chip.dev-estimate {
+  background: #2a2a3a;
+  color: #8888aa;
+  font-style: italic;
+  font-size: 0.65rem;
+}
 
 /* Tree explorer toggle */
 .tree-children { display: none; }

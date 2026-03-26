@@ -7,6 +7,7 @@ const controls = new Controls(session);
 
 const RESOURCE_NAMES = ['lumber', 'brick', 'wool', 'grain', 'ore'];
 const DEV_CARD_NAMES = ['Knight', 'VP', 'Road Building', 'Year of Plenty', 'Monopoly'];
+const DEV_SHORT = ['Kn', 'VP', 'RB', 'YP', 'Mo'];
 
 let currentState = null;
 let currentBoard = null;
@@ -39,6 +40,7 @@ session.on('GameState', (msg) => {
   // Player panels
   updatePlayerPanel(0, state);
   updatePlayerPanel(1, state);
+  updateBank(state);
 
   // Highlight active player
   document.getElementById('player-0').classList.toggle('active', msg.current_player === 0);
@@ -181,10 +183,24 @@ function updatePlayerPanel(idx, state) {
     }
   }
   if (pf.hidden_dev_cards > 0) {
-    const chip = document.createElement('span');
-    chip.className = 'dev-chip hidden-dev';
-    chip.textContent = `${pf.hidden_dev_cards} unknown`;
-    devEl.appendChild(chip);
+    const est = state.expected_dev && state.expected_dev[idx];
+    const hasEstimate = est && est.some(v => v > 0);
+    if (hasEstimate) {
+      // Show hypergeometric expected distribution
+      for (let d = 0; d < 5; d++) {
+        if (est[d] >= 0.05) {
+          const chip = document.createElement('span');
+          chip.className = 'dev-chip dev-estimate';
+          chip.textContent = `~${est[d].toFixed(1)} ${DEV_SHORT[d]}`;
+          devEl.appendChild(chip);
+        }
+      }
+    } else {
+      const chip = document.createElement('span');
+      chip.className = 'dev-chip hidden-dev';
+      chip.textContent = `${pf.hidden_dev_cards} unknown`;
+      devEl.appendChild(chip);
+    }
   }
 
   // Stats: knights played + awards
@@ -198,6 +214,25 @@ function updatePlayerPanel(idx, state) {
     parts.push(`Largest Army: ${frame.largest_army[1]}`);
   }
   statsEl.textContent = parts.join(' · ');
+}
+
+function updateBank(state) {
+  const bankEl = document.getElementById('bank-dev');
+  if (!bankEl) return;
+  bankEl.innerHTML = '';
+  const pool = state.frame && state.frame.dev_pool;
+  if (!pool) return;
+  for (let d = 0; d < 5; d++) {
+    if (pool[d] > 0) {
+      const chip = document.createElement('span');
+      chip.className = 'dev-chip';
+      chip.textContent = `${pool[d]} ${DEV_SHORT[d]}`;
+      bankEl.appendChild(chip);
+    }
+  }
+  if (pool.every(v => v === 0)) {
+    bankEl.textContent = 'Empty';
+  }
 }
 
 // ── Keyboard shortcuts ────────────────────────────────────────────────

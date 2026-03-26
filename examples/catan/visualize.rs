@@ -50,6 +50,7 @@ pub struct ReplayFrame {
     buildings: [BuildingsFrame; 2],
     longest_road: Option<[u8; 2]>,
     largest_army: Option<[u8; 2]>,
+    dev_pool: [u8; 5],
 }
 
 #[derive(Serialize)]
@@ -238,6 +239,7 @@ pub fn capture_frame(
         ],
         longest_road: state.longest_road.map(|(p, len)| [p as u8, len]),
         largest_army: state.largest_army.map(|(p, cnt)| [p as u8, cnt]),
+        dev_pool: state.unknown_dev_pool(),
     }
 }
 
