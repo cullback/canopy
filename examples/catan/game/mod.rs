@@ -536,6 +536,7 @@ fn apply_buy_dev_card(state: &mut GameState) {
 
 /// Buy a dev card without revealing it (for colonist replay / competition).
 /// The card stays hidden; determinize will assign it before MCTS rollouts.
+#[allow(dead_code)]
 pub fn apply_hidden_dev_card_buy(state: &mut GameState) {
     state.current_mut().hand.sub(DEV_CARD_COST);
     state.bank.add(DEV_CARD_COST);

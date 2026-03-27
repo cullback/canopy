@@ -191,7 +191,7 @@ pub enum Terrain {
     Grain,
     Wool,
     Ore,
-    Unknown(u64),
+    Unknown(()),
 }
 
 impl Terrain {
@@ -203,10 +203,11 @@ impl Terrain {
             3 => Terrain::Wool,
             4 => Terrain::Grain,
             5 => Terrain::Ore,
-            _ => Terrain::Unknown(t),
+            _ => Terrain::Unknown(()),
         }
     }
 
+    #[allow(dead_code)]
     fn resource(self) -> Option<Resource> {
         match self {
             Terrain::Lumber => Some(Resource::Lumber),

@@ -141,12 +141,10 @@ pub enum GameEvent {
     },
     BuildSettlement {
         player: u8,
-        vp: bool,
         corner: Option<CornerCoord>,
     },
     BuildCity {
         player: u8,
-        vp: bool,
         corner: Option<CornerCoord>,
     },
 
@@ -159,6 +157,7 @@ pub enum GameEvent {
         victim: u8,
         resources: ResourceArray,
     },
+    #[allow(dead_code)]
     StoleUnknown {
         player: u8,
         victim: u8,
@@ -291,7 +290,6 @@ fn parse_entry(
         // Build
         5 => {
             let piece = text["pieceEnum"].as_u64()?;
-            let vp = text["isVp"].as_bool().unwrap_or(false);
             let corner = parse_corner(text);
             let edge = parse_edge(text);
             match piece {
@@ -301,12 +299,10 @@ fn parse_entry(
                 }),
                 2 => Some(GameEvent::BuildSettlement {
                     player: player(),
-                    vp,
                     corner,
                 }),
                 3 => Some(GameEvent::BuildCity {
                     player: player(),
-                    vp,
                     corner,
                 }),
                 _ => None,

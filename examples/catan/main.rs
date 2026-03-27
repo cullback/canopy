@@ -47,7 +47,7 @@ fn main() {
             max_actions: 2000,
             epochs: 2,
             lr: 0.0005,
-            mcts_sims: 400,
+            mcts_sims: 800,
             train_batch_size: 1024,
             leaf_batch_size: 8,
             concurrent_games: 512,
