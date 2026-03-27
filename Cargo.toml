@@ -14,6 +14,7 @@ visualize = ["serde"]
 server = ["serde", "dep:axum", "dep:tower-http", "dep:tokio"]
 nn = [
   "serde",
+  "cli",
   "dep:burn",
   "dep:crossbeam-channel",
   "dep:csv",

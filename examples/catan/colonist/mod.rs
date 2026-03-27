@@ -461,6 +461,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let mut initial_session = canopy::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,
+        "rollout",
         presenter.clone(),
         200,
         [true, true],

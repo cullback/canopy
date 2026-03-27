@@ -642,6 +642,7 @@ impl<G: Game + 'static> GameCli<G> {
         rt.block_on(crate::server::serve(
             opts.port,
             evaluator,
+            &opts.eval_name,
             presenter,
             opts.simulations,
             opts.human_players,

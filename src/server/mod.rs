@@ -29,6 +29,7 @@ const PROGRESS_INTERVAL: u32 = 10;
 pub async fn serve<G: Game + 'static>(
     port: u16,
     evaluator: Arc<dyn Evaluator<G> + Sync>,
+    eval_name: &str,
     presenter: Arc<dyn GamePresenter<G>>,
     default_sims: u32,
     human_players: [bool; 2],
@@ -37,7 +38,8 @@ pub async fn serve<G: Game + 'static>(
     let static_dir = presenter.static_dir().to_path_buf();
     let replay = replay.map(Arc::new);
 
-    let mut initial_session = GameSession::new(evaluator, presenter, default_sims, human_players);
+    let mut initial_session =
+        GameSession::new(evaluator, eval_name, presenter, default_sims, human_players);
     if let Some(log) = &replay {
         initial_session.load_replay(log);
     }
@@ -67,6 +69,7 @@ pub async fn serve_with_state<G: Game + 'static>(
     port: u16,
     state: G,
     evaluator: Arc<dyn Evaluator<G> + Sync>,
+    eval_name: &str,
     presenter: Arc<dyn GamePresenter<G>>,
     default_sims: u32,
     human_players: [bool; 2],
@@ -75,6 +78,7 @@ pub async fn serve_with_state<G: Game + 'static>(
     let session = Arc::new(Mutex::new(GameSession::with_state(
         state,
         evaluator,
+        eval_name,
         presenter,
         default_sims,
         human_players,
@@ -112,6 +116,7 @@ pub async fn serve_with_timeline<G: Game + 'static>(
     let mut initial_session = GameSession::with_state(
         timeline[0].1.clone(),
         evaluator,
+        "unknown",
         presenter,
         default_sims,
         human_players,

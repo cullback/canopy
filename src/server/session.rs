@@ -31,6 +31,7 @@ struct HistoryEntry<G> {
 pub struct GameSession<G: Game> {
     search: Search<G>,
     evaluator: Arc<dyn Evaluator<G> + Sync>,
+    eval_name: String,
     presenter: Arc<dyn GamePresenter<G>>,
     rng: fastrand::Rng,
     configs: [PlayerConfig; 2],
@@ -42,6 +43,7 @@ pub struct GameSession<G: Game> {
 impl<G: Game + 'static> GameSession<G> {
     pub fn new(
         evaluator: Arc<dyn Evaluator<G> + Sync>,
+        eval_name: impl Into<String>,
         presenter: Arc<dyn GamePresenter<G>>,
         default_sims: u32,
         human_players: [bool; 2],
@@ -57,6 +59,7 @@ impl<G: Game + 'static> GameSession<G> {
         Self {
             search,
             evaluator,
+            eval_name: eval_name.into(),
             presenter,
             rng: fastrand::Rng::new(),
             configs: [
@@ -79,6 +82,7 @@ impl<G: Game + 'static> GameSession<G> {
     pub fn with_state(
         state: G,
         evaluator: Arc<dyn Evaluator<G> + Sync>,
+        eval_name: impl Into<String>,
         presenter: Arc<dyn GamePresenter<G>>,
         default_sims: u32,
         human_players: [bool; 2],
@@ -92,6 +96,7 @@ impl<G: Game + 'static> GameSession<G> {
         Self {
             search,
             evaluator,
+            eval_name: eval_name.into(),
             presenter,
             rng: fastrand::Rng::new(),
             configs: [
