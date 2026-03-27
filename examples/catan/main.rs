@@ -27,7 +27,7 @@ use model::init_nexus;
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
-    setup.add_evaluator("heuristic", canopy::eval::RolloutEvaluator::default());
+    setup.add_evaluator("rollout", canopy::eval::RolloutEvaluator::default());
 
     // Encoders
     setup.add_encoder("nexus", Arc::new(NexusEncoder));
@@ -46,15 +46,15 @@ fn main() {
             replay_buffer_samples: 350_000,
             max_actions: 2000,
             epochs: 2,
-            lr: 0.0002,
-            mcts_sims: 1200,
+            lr: 0.0005,
+            mcts_sims: 400,
             train_batch_size: 1024,
             leaf_batch_size: 8,
             concurrent_games: 512,
             gumbel_m: 16,
             explore_actions: 16,
             q_weight_ramp_iters: 60,
-            aux_value_horizons: vec![10, 30, 100],
+            aux_value_horizons: vec![10, 50, 150],
             ..TrainConfig::default()
         },
     );
