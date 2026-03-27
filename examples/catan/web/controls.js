@@ -37,23 +37,16 @@ class Controls {
 
     document.getElementById('btn-bot-move').addEventListener('click', () => {
       if (this.searching) return;
-      const sims = parseInt(document.getElementById('sims-slider').value);
+      const sims = parseInt(document.getElementById('sims-input').value);
       this.setSearching(true);
-      this.session.send({ type: 'BotMove', simulations: sims || null });
+      this.session.send({ type: 'BotMove', simulations: sims });
     });
 
     document.getElementById('btn-run-sims').addEventListener('click', () => {
       if (this.searching) return;
-      const count = parseInt(document.getElementById('sims-slider').value);
+      const count = parseInt(document.getElementById('sims-input').value);
       this.setSearching(true);
       this.session.send({ type: 'RunSims', count });
-    });
-
-    // Sims slider
-    const simsSlider = document.getElementById('sims-slider');
-    const simsValue = document.getElementById('sims-value');
-    simsSlider.addEventListener('input', () => {
-      simsValue.textContent = simsSlider.value;
     });
 
     // Speed slider
@@ -96,9 +89,9 @@ class Controls {
   startAutoplay() {
     if (this.autoplayInterval) return;
     const tick = () => {
-      const sims = parseInt(document.getElementById('sims-slider').value);
+      const sims = parseInt(document.getElementById('sims-input').value);
       this.setSearching(true);
-      this.session.send({ type: 'BotMove', simulations: sims || null });
+      this.session.send({ type: 'BotMove', simulations: sims });
     };
     tick();
     this.autoplayInterval = setInterval(tick, this.autoplayDelay);

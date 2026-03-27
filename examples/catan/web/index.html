@@ -98,8 +98,7 @@ tailwind.config = {
     <button id="btn-bot-move" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Bot Move</button>
     <div class="flex items-center gap-1.5 text-xs text-gray-300">
       <label class="flex items-center gap-1">Sims:
-        <input type="range" id="sims-slider" min="0" max="2000" value="200" step="10" class="w-20 accent-accent">
-        <span id="sims-value">200</span>
+        <input type="number" id="sims-input" min="0" max="10000" value="400" step="50" class="w-16 bg-bg-3 border border-gray-700 text-gray-200 rounded px-1.5 py-0.5 text-xs">
       </label>
     </div>
     <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Run Sims</button>

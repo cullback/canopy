@@ -31,6 +31,7 @@ struct HistoryEntry<G> {
 pub struct GameSession<G: Game> {
     search: Search<G>,
     evaluator: Arc<dyn Evaluator<G> + Sync>,
+    #[allow(dead_code)]
     eval_name: String,
     presenter: Arc<dyn GamePresenter<G>>,
     rng: fastrand::Rng,
@@ -45,16 +46,11 @@ impl<G: Game + 'static> GameSession<G> {
         evaluator: Arc<dyn Evaluator<G> + Sync>,
         eval_name: impl Into<String>,
         presenter: Arc<dyn GamePresenter<G>>,
-        default_sims: u32,
         human_players: [bool; 2],
     ) -> Self {
         let seed = fastrand::u64(..);
         let state = presenter.new_game(seed);
-        let config = Config {
-            num_simulations: default_sims,
-            ..Config::default()
-        };
-        let search = Search::new(state, config);
+        let search = Search::new(state, Config::default());
 
         Self {
             search,
@@ -64,11 +60,11 @@ impl<G: Game + 'static> GameSession<G> {
             rng: fastrand::Rng::new(),
             configs: [
                 PlayerConfig {
-                    simulations: default_sims,
+                    simulations: 400,
                     human: human_players[0],
                 },
                 PlayerConfig {
-                    simulations: default_sims,
+                    simulations: 400,
                     human: human_players[1],
                 },
             ],
@@ -84,14 +80,9 @@ impl<G: Game + 'static> GameSession<G> {
         evaluator: Arc<dyn Evaluator<G> + Sync>,
         eval_name: impl Into<String>,
         presenter: Arc<dyn GamePresenter<G>>,
-        default_sims: u32,
         human_players: [bool; 2],
     ) -> Self {
-        let config = Config {
-            num_simulations: default_sims,
-            ..Config::default()
-        };
-        let search = Search::new(state, config);
+        let search = Search::new(state, Config::default());
 
         Self {
             search,
@@ -101,11 +92,11 @@ impl<G: Game + 'static> GameSession<G> {
             rng: fastrand::Rng::new(),
             configs: [
                 PlayerConfig {
-                    simulations: default_sims,
+                    simulations: 400,
                     human: human_players[0],
                 },
                 PlayerConfig {
-                    simulations: default_sims,
+                    simulations: 400,
                     human: human_players[1],
                 },
             ],

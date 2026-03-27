@@ -463,7 +463,6 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
         evaluator,
         "rollout",
         presenter.clone(),
-        200,
         [true, true],
     );
     initial_session.load_timeline(timeline_pairs);

@@ -121,12 +121,6 @@ pub fn serve_command() -> Command {
                 .help("Evaluator name"),
         )
         .arg(
-            Arg::new("sims")
-                .long("sims")
-                .default_value("200")
-                .help("Default MCTS simulations per action"),
-        )
-        .arg(
             Arg::new("human")
                 .long("human")
                 .default_value("none")
@@ -145,7 +139,6 @@ pub fn serve_command() -> Command {
 pub struct ServeOptions {
     pub port: u16,
     pub eval_name: String,
-    pub simulations: u32,
     pub human_players: [bool; 2],
     pub replay: Option<PathBuf>,
 }
@@ -159,11 +152,6 @@ pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
         .parse()
         .expect("invalid port");
     let eval_name = matches.get_one::<String>("eval").unwrap().clone();
-    let simulations: u32 = matches
-        .get_one::<String>("sims")
-        .unwrap()
-        .parse()
-        .expect("invalid sims");
     let human = matches.get_one::<String>("human").unwrap().as_str();
     let human_players = match human {
         "p1" => [true, false],
@@ -175,7 +163,6 @@ pub fn parse_serve(matches: &ArgMatches) -> ServeOptions {
     ServeOptions {
         port,
         eval_name,
-        simulations,
         human_players,
         replay,
     }
@@ -644,7 +631,6 @@ impl<G: Game + 'static> GameCli<G> {
             evaluator,
             &opts.eval_name,
             presenter,
-            opts.simulations,
             opts.human_players,
             replay,
         ));

@@ -31,15 +31,13 @@ pub async fn serve<G: Game + 'static>(
     evaluator: Arc<dyn Evaluator<G> + Sync>,
     eval_name: &str,
     presenter: Arc<dyn GamePresenter<G>>,
-    default_sims: u32,
     human_players: [bool; 2],
     replay: Option<GameLog>,
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
     let replay = replay.map(Arc::new);
 
-    let mut initial_session =
-        GameSession::new(evaluator, eval_name, presenter, default_sims, human_players);
+    let mut initial_session = GameSession::new(evaluator, eval_name, presenter, human_players);
     if let Some(log) = &replay {
         initial_session.load_replay(log);
     }
@@ -71,7 +69,6 @@ pub async fn serve_with_state<G: Game + 'static>(
     evaluator: Arc<dyn Evaluator<G> + Sync>,
     eval_name: &str,
     presenter: Arc<dyn GamePresenter<G>>,
-    default_sims: u32,
     human_players: [bool; 2],
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
@@ -80,7 +77,6 @@ pub async fn serve_with_state<G: Game + 'static>(
         evaluator,
         eval_name,
         presenter,
-        default_sims,
         human_players,
     )));
 
@@ -109,7 +105,6 @@ pub async fn serve_with_timeline<G: Game + 'static>(
     timeline: Vec<(String, G)>,
     evaluator: Arc<dyn Evaluator<G> + Sync>,
     presenter: Arc<dyn GamePresenter<G>>,
-    default_sims: u32,
     human_players: [bool; 2],
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
@@ -118,7 +113,6 @@ pub async fn serve_with_timeline<G: Game + 'static>(
         evaluator,
         "unknown",
         presenter,
-        default_sims,
         human_players,
     );
     initial_session.load_timeline(timeline);
