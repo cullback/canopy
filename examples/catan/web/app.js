@@ -41,6 +41,7 @@ session.on('GameState', (msg) => {
   updatePlayerPanel(0, state);
   updatePlayerPanel(1, state);
   updateBank(state);
+  updateDice(state);
 
   // Highlight active player
   document.getElementById('player-0').classList.toggle('active', msg.current_player === 0);
@@ -85,8 +86,17 @@ session.on('GameState', (msg) => {
         line.style.color = '#a0a0a0';
         line.style.fontStyle = 'italic';
       }
-      line.textContent = `${i + 1}. ${text}`;
+      const parts = text.split('\n');
+      line.textContent = `${i + 1}. ${parts[0]}`;
       logView.appendChild(line);
+      for (let p = 1; p < parts.length; p++) {
+        const sub = document.createElement('div');
+        sub.style.color = '#888';
+        sub.style.fontSize = '0.85em';
+        sub.style.paddingLeft = '1.5em';
+        sub.textContent = parts[p].trim();
+        logView.appendChild(sub);
+      }
     }
     logView.scrollTop = logView.scrollHeight;
   }
@@ -232,6 +242,83 @@ function updateBank(state) {
   }
   if (pool.every(v => v === 0)) {
     bankEl.textContent = 'Empty';
+  }
+}
+
+// ── Dice probability chart ───────────────────────────────────────────
+
+// Fair 2d6 probabilities for reference line.
+const FAIR_PROBS = [1,2,3,4,5,6,5,4,3,2,1].map(v => v / 36);
+
+function updateDice(state) {
+  const panel = document.getElementById('dice-panel');
+  const dice = state.dice;
+  if (!dice) { panel.style.display = 'none'; return; }
+  panel.style.display = '';
+
+  document.getElementById('dice-cards').textContent = `(${dice.cards_left}/${dice.total_cards})`;
+
+  const chart = document.getElementById('dice-chart');
+  chart.innerHTML = '';
+
+  // Fixed scale: fair 7 probability (~16.7%) maps to ~75% of chart height,
+  // leaving headroom for sums that exceed fair odds.
+  const scale = FAIR_PROBS[5] / 0.75; // denominator so fair-7 bar is 75% tall
+  const chartH = 64;
+
+  for (let i = 0; i < 11; i++) {
+    const sum = i + 2;
+    const prob = dice.probs[i];
+    const fair = FAIR_PROBS[i];
+
+    const col = document.createElement('div');
+    col.className = 'dice-col';
+    col.style.flex = '1';
+    col.style.display = 'flex';
+    col.style.flexDirection = 'column';
+    col.style.alignItems = 'center';
+    col.style.justifyContent = 'flex-end';
+    col.style.height = chartH + 'px';
+    col.style.position = 'relative';
+
+    // Fair probability reference tick
+    const ref = document.createElement('div');
+    ref.style.position = 'absolute';
+    const labelH = 14;
+    ref.style.bottom = (labelH + Math.round(fair / scale * (chartH - labelH))) + 'px';
+    ref.style.width = '100%';
+    ref.style.height = '1px';
+    ref.style.background = '#555';
+    col.appendChild(ref);
+
+    // Actual probability bar
+    const bar = document.createElement('div');
+    const h = Math.max(1, Math.min(chartH - labelH, Math.round(prob / scale * (chartH - labelH))));
+    bar.style.width = '80%';
+    bar.style.height = h + 'px';
+    bar.style.borderRadius = '1px';
+    const ratio = fair > 0 ? prob / fair : 1;
+    if (ratio > 1.15) {
+      bar.style.background = '#e94560'; // above fair — red/hot
+    } else if (ratio < 0.85) {
+      bar.style.background = '#2a6';    // below fair — green/cold
+    } else {
+      bar.style.background = '#4a9eff'; // near fair — blue
+    }
+    col.appendChild(bar);
+
+    // Tooltip on the whole column
+    col.title = `Roll ${sum}: ${(prob * 100).toFixed(1)}% (fair: ${(fair * 100).toFixed(1)}%)`;
+
+    // Label
+    const lbl = document.createElement('div');
+    lbl.style.fontSize = '9px';
+    lbl.style.color = sum === 7 ? '#e94560' : '#888';
+    lbl.style.marginTop = '2px';
+    lbl.textContent = sum;
+    col.appendChild(lbl);
+
+    chart.appendChild(col);
   }
 }
 
