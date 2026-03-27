@@ -20,7 +20,7 @@ const _: () = assert!(
     "action space changed — update split constants below"
 );
 
-const GL: usize = 117;
+const GL: usize = 121;
 const TF: usize = 10;
 const NF: usize = 21;
 const NUM_TILES: usize = 19;

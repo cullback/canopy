@@ -124,6 +124,8 @@ pub struct GameState {
     pub longest_road: Option<(Player, u8)>,
     pub largest_army: Option<(Player, u8)>,
     pub dice: Dice,
+    pub vp_limit: u8,
+    pub discard_threshold: u8,
 }
 
 impl fmt::Debug for GameState {
@@ -176,6 +178,8 @@ impl GameState {
             longest_road: None,
             largest_army: None,
             dice,
+            vp_limit: 15,
+            discard_threshold: 9,
         }
     }
 

@@ -1,16 +1,16 @@
-//! # NexusEncoder (1441 features)
+//! # NexusEncoder (1445 features)
 //!
 //! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
 //!
-//! ## Global (117 = 7 + 49×2 + 12)
+//! ## Global (121 = 7 + 51×2 + 12)
 //!
 //! | Block              | Count |
 //! |--------------------|-------|
 //! | phase              |     7 |
-//! | per-player × 2     |    98 |
+//! | per-player × 2     |   102 |
 //! | dice               |    12 |
 //!
-//! ### Per-player (49) — cur player first
+//! ### Per-player (51) — cur player first
 //!
 //! | Feature              | Count | Norm      |
 //! |----------------------|-------|-----------|
@@ -25,6 +25,8 @@
 //! | longest_road_length  |     1 | /15       |
 //! | largest_army_award   |     1 | binary    |
 //! | victory_points       |     1 | /15       |
+//! | vp_remaining         |     1 | /vp_limit |
+//! | cards_over_threshold |     1 | /19 cap 1 |
 //! | dev_playable         |     5 | /deck_max |
 //! | dev_played           |     5 | /deck_max |
 //! | dev_bought_turn      |     5 | /deck_max |
@@ -70,17 +72,18 @@ pub struct NexusEncoder;
 
 #[allow(dead_code)]
 impl NexusEncoder {
-    pub const FEATURE_SIZE: usize = 1441;
-    pub const GLOBAL_LEN: usize = 117;
+    pub const FEATURE_SIZE: usize = 1445;
+    pub const GLOBAL_LEN: usize = 121;
     pub const TILES_F: usize = 10;
     pub const NODES_F: usize = 21;
 }
 
-/// Push 49 per-player features grouped by category.
+/// Push 51 per-player features grouped by category.
 ///
 /// Economy (26): resource_count(5), trade_ratio(5), resource_prod(5), number_prod(11)
-/// Board (7): settlement_count(1), city_count(1), road_count(1),
-///            longest_road_award(1), longest_road_length(1), largest_army_award(1), victory_points(1)
+/// Board (9): settlement_count(1), city_count(1), road_count(1),
+///            longest_road_award(1), longest_road_length(1), largest_army_award(1), victory_points(1),
+///            vp_remaining(1), cards_over_threshold(1)
 /// Dev cards (16): dev_playable(5), dev_played(5), dev_bought_turn(5), dev_played_turn(1)
 fn encode_player_nexus(
     state: &GameState,
@@ -139,6 +142,15 @@ fn encode_player_nexus(
     };
     out.push(vps as f32 / 15.0);
 
+    // vp_remaining (1): (vp_limit − vps) / vp_limit
+    let vp_remaining = state.vp_limit.saturating_sub(vps);
+    out.push(vp_remaining as f32 / state.vp_limit as f32);
+
+    // cards_over_threshold (1): min(1, max(0, hand_total − discard_threshold) / 19)
+    let hand_total = p.hand.total();
+    let over = hand_total.saturating_sub(state.discard_threshold);
+    out.push((over as f32 / 19.0).min(1.0));
+
     // ── Dev cards (16) ───────────────────────────────────────────────
 
     // dev_playable (5): per type, /deck_max, exact for cur / hypergeo for opp
@@ -185,7 +197,7 @@ impl StateEncoder<GameState> for NexusEncoder {
         // Phase one-hot (7)
         encode_phase(state, out);
 
-        // Per-player nexus (49 × 2 = 98)
+        // Per-player nexus (51 × 2 = 102)
         encode_player_nexus(state, current, &tile_numbers, out);
         encode_player_nexus(state, opp, &tile_numbers, out);
 
@@ -352,7 +364,7 @@ mod tests {
     }
 
     // ── Feature offset helpers ───────────────────────────────────────
-    const GLOBAL_OFF: usize = 117;
+    const GLOBAL_OFF: usize = 121;
 
     fn tile_feat(t: usize, f: usize) -> usize {
         GLOBAL_OFF + t * 10 + f
@@ -594,8 +606,8 @@ mod tests {
         assert_eq!(features[cur_trade + 3], 0.0, "grain 4:1 → 0.0");
         assert_eq!(features[cur_trade + 4], 0.0, "ore 4:1 → 0.0");
 
-        // Opp per-player starts at 7 + 49 = 56, trade_ratio at 56 + 5 = 61
-        let opp_trade = 56 + 5;
+        // Opp per-player starts at 7 + 51 = 58, trade_ratio at 58 + 5 = 63
+        let opp_trade = 58 + 5;
         for i in 0..5 {
             assert_eq!(features[opp_trade + i], 0.0, "opp all 4:1 → 0.0");
         }

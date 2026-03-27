@@ -25,12 +25,13 @@ use resource::{
 };
 use state::{GameState, Phase};
 
-const VP_TO_WIN: u8 = 15;
-pub(crate) const DISCARD_THRESHOLD: u8 = 9;
 pub(crate) const FRIENDLY_ROBBER_VP: u8 = 3;
 
-pub fn new_game(seed: u64, dice: Dice) -> GameState {
-    GameState::from_seed(seed, dice)
+pub fn new_game(seed: u64, dice: Dice, vp_limit: u8, discard_threshold: u8) -> GameState {
+    let mut state = GameState::from_seed(seed, dice);
+    state.vp_limit = vp_limit;
+    state.discard_threshold = discard_threshold;
+    state
 }
 
 const DICE_WEIGHTS: [(usize, u32); 11] = [
@@ -367,7 +368,7 @@ fn handle_seven(state: &mut GameState) {
     let opponent = roller.opponent();
 
     let roller_total = state.players[roller].hand.total();
-    if roller_total > DISCARD_THRESHOLD {
+    if roller_total > state.discard_threshold {
         state.phase = Phase::Discard {
             player: roller,
             remaining: roller_total / 2,
@@ -375,7 +376,7 @@ fn handle_seven(state: &mut GameState) {
         };
     } else {
         let opp_total = state.players[opponent].hand.total();
-        if opp_total > DISCARD_THRESHOLD {
+        if opp_total > state.discard_threshold {
             state.current_player = opponent;
             state.phase = Phase::Discard {
                 player: opponent,
@@ -632,7 +633,7 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
             // Roller finished discarding — check if opponent also must discard
             let other = player.opponent();
             let other_total = state.players[other].hand.total();
-            if other_total > DISCARD_THRESHOLD {
+            if other_total > state.discard_threshold {
                 state.current_player = other;
                 state.phase = Phase::Discard {
                     player: other,
@@ -669,7 +670,7 @@ fn check_victory(state: &mut GameState) {
         return;
     }
     let pid = state.current_player;
-    if state.total_vps(pid) >= VP_TO_WIN {
+    if state.total_vps(pid) >= state.vp_limit {
         state.phase = Phase::GameOver(pid);
     }
 }
@@ -990,7 +991,7 @@ mod tests {
     fn full_game_simulation() {
         for seed in 0..10u64 {
             let mut rng = fastrand::Rng::with_seed(seed);
-            let mut s = new_game(seed, Dice::default());
+            let mut s = new_game(seed, Dice::default(), 15, 9);
             let mut actions = Vec::new();
             for _ in 0..10000 {
                 if matches!(s.phase, Phase::GameOver(_)) {
@@ -1024,7 +1025,7 @@ mod tests {
         let mut results = Vec::new();
         for _ in 0..2 {
             let mut rng = fastrand::Rng::with_seed(seed);
-            let mut s = new_game(seed, Dice::default());
+            let mut s = new_game(seed, Dice::default(), 15, 9);
             let mut actions = Vec::new();
             let mut action_log = Vec::new();
             for _ in 0..10000 {

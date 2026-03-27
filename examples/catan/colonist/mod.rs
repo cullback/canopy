@@ -15,8 +15,8 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::game::dev_card::DevCardKind;
 use crate::game::dice::{BalancedDice, Dice};
-use crate::heuristic::HeuristicEvaluator;
 use crate::presenter::CatanPresenter;
+use canopy::eval::RolloutEvaluator;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -455,7 +455,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let dice = Dice::Balanced(BalancedDice::new());
     let presenter = Arc::new(CatanPresenter::new(static_dir, dice).with_player_names(names));
     let evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync> =
-        Arc::new(HeuristicEvaluator::default());
+        Arc::new(RolloutEvaluator::default());
 
     // Create session manually with the initial timeline.
     let mut initial_session = canopy::server::GameSession::with_state(

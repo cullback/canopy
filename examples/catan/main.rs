@@ -17,7 +17,6 @@ use canopy::train::TrainConfig;
 mod colonist;
 mod encoder;
 mod game;
-mod heuristic;
 mod model;
 mod presenter;
 mod visualize;
@@ -28,7 +27,7 @@ use model::init_nexus;
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
-    setup.add_evaluator("heuristic", heuristic::HeuristicEvaluator::default());
+    setup.add_evaluator("heuristic", canopy::eval::RolloutEvaluator::default());
 
     // Encoders
     setup.add_encoder("nexus", Arc::new(NexusEncoder));
@@ -68,6 +67,18 @@ fn main() {
                 .action(clap::ArgAction::SetTrue)
                 .help("Use random dice instead of balanced (default)"),
         )
+        .arg(
+            Arg::new("vp-limit")
+                .long("vp-limit")
+                .default_value("15")
+                .help("Victory points needed to win"),
+        )
+        .arg(
+            Arg::new("discard-threshold")
+                .long("discard-threshold")
+                .default_value("9")
+                .help("Hand size above which players must discard on a 7"),
+        )
         .subcommand(
             clap::Command::new("colonist")
                 .about("Connect to colonist.io via CDP and read game log")
@@ -90,6 +101,17 @@ fn main() {
     } else {
         Dice::Balanced(game::dice::BalancedDice::new())
     };
+
+    let vp_limit: u8 = matches
+        .get_one::<String>("vp-limit")
+        .unwrap()
+        .parse()
+        .expect("invalid vp-limit");
+    let discard_threshold: u8 = matches
+        .get_one::<String>("discard-threshold")
+        .unwrap()
+        .parse()
+        .expect("invalid discard-threshold");
 
     // Colonist CDP subcommand
     if let Some(sub) = matches.subcommand_matches("colonist") {
@@ -116,5 +138,7 @@ fn main() {
         return;
     }
 
-    setup.run(&matches, move |seed| game::new_game(seed, dice));
+    setup.run(&matches, move |seed| {
+        game::new_game(seed, dice, vp_limit, discard_threshold)
+    });
 }

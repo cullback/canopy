@@ -114,6 +114,6 @@ impl GamePresenter<GameState> for CatanPresenter {
     }
 
     fn new_game(&self, seed: u64) -> GameState {
-        game::new_game(seed, self.dice)
+        game::new_game(seed, self.dice, 15, 9)
     }
 }
