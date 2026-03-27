@@ -53,15 +53,24 @@ pub struct InferBatch {
 /// Shared atomic counters updated by the batcher, read by tasks for live stats.
 pub struct BatcherStats {
     pub batches: AtomicU64,
-    pub evals: AtomicU64,
+    evals: Arc<AtomicU64>,
 }
 
 impl BatcherStats {
     pub fn new() -> Self {
         Self {
             batches: AtomicU64::new(0),
-            evals: AtomicU64::new(0),
+            evals: Arc::new(AtomicU64::new(0)),
         }
+    }
+
+    pub fn evals(&self) -> &AtomicU64 {
+        &self.evals
+    }
+
+    /// Return a shared handle to the evals counter.
+    pub fn evals_counter(&self) -> Arc<AtomicU64> {
+        self.evals.clone()
     }
 
     pub fn avg_batch_size(&self) -> f64 {
@@ -323,6 +332,7 @@ pub struct InferencePipeline {
     request_tx: mpsc::Sender<InferRequest>,
     batcher_handle: std::thread::JoinHandle<()>,
     worker_handles: Vec<std::thread::JoinHandle<()>>,
+    stats: Arc<BatcherStats>,
 }
 
 impl InferencePipeline {
@@ -354,11 +364,16 @@ impl InferencePipeline {
             request_tx,
             batcher_handle,
             worker_handles,
+            stats,
         }
     }
 
     pub fn sender(&self) -> mpsc::Sender<InferRequest> {
         self.request_tx.clone()
+    }
+
+    pub fn stats(&self) -> &Arc<BatcherStats> {
+        &self.stats
     }
 
     pub fn join(self) {

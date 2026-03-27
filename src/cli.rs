@@ -691,12 +691,14 @@ impl<G: Game + 'static> GameCli<G> {
             opts.num_games,
         );
 
-        let logs = crate::tournament::tournament(
+        let eval_counter = pipeline.stats().evals_counter();
+        let logs = crate::tournament::tournament_with_stats(
             new_game,
             &eval_refs,
             &opts.configs,
             opts.num_games,
             &mut rng,
+            Some(eval_counter),
         );
 
         if let Some(dir) = &opts.log_dir {

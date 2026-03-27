@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 
 use indicatif::ProgressStyle;
 use tracing::info;
@@ -138,6 +138,17 @@ pub fn tournament<G: Game>(
     num_games: u32,
     rng: &mut fastrand::Rng,
 ) -> Vec<GameLog> {
+    tournament_with_stats(new_game, evaluators, configs, num_games, rng, None)
+}
+
+pub fn tournament_with_stats<G: Game>(
+    new_game: impl Fn(u64) -> G + Sync,
+    evaluators: &[&(dyn Evaluator<G> + Sync); 2],
+    configs: &[Config; 2],
+    num_games: u32,
+    rng: &mut fastrand::Rng,
+    eval_counter: Option<Arc<AtomicU64>>,
+) -> Vec<GameLog> {
     let n = num_games as usize;
 
     // Pre-generate all seeds for deterministic results regardless of thread count.
@@ -154,6 +165,8 @@ pub fn tournament<G: Game>(
     span.pb_set_message("0-0-0");
     span.pb_start();
 
+    let start = std::time::Instant::now();
+
     // Shared state for parallel workers.
     let next_game = AtomicUsize::new(0);
     let wins = [AtomicUsize::new(0), AtomicUsize::new(0)];
@@ -164,7 +177,29 @@ pub fn tournament<G: Game>(
         .map(|p| p.get())
         .unwrap_or(1);
 
+    let done = AtomicUsize::new(0);
+
     std::thread::scope(|s| {
+        // Ticker thread: refresh progress bar message every second.
+        if eval_counter.is_some() {
+            s.spawn(|| {
+                let ctr = eval_counter.as_ref().unwrap();
+                loop {
+                    std::thread::sleep(std::time::Duration::from_secs(1));
+                    if done.load(Ordering::Relaxed) >= n {
+                        break;
+                    }
+                    let w0 = wins[0].load(Ordering::Relaxed);
+                    let w1 = wins[1].load(Ordering::Relaxed);
+                    let d = draw_count.load(Ordering::Relaxed);
+                    let evals = ctr.load(Ordering::Relaxed);
+                    let secs = start.elapsed().as_secs_f64();
+                    let eps = if secs > 0.0 { evals as f64 / secs } else { 0.0 };
+                    span.pb_set_message(&format!("{w0}-{w1}-{d} | {eps:.0} evals/s"));
+                }
+            });
+        }
+
         for _ in 0..num_workers {
             s.spawn(|| {
                 loop {
@@ -196,6 +231,7 @@ pub fn tournament<G: Game>(
                     let d = draw_count.load(Ordering::Relaxed);
                     span.pb_set_message(&format!("{w0}-{w1}-{d}"));
                     span.pb_inc(1);
+                    done.fetch_add(1, Ordering::Relaxed);
                 }
             });
         }

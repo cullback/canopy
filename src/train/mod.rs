@@ -263,7 +263,10 @@ pub fn run_training<G>(
         ));
         sp_span.pb_start();
 
-        let stats_start_evals: u64 = servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+        let stats_start_evals: u64 = servers
+            .iter()
+            .map(|s| s.stats().evals().load(Relaxed))
+            .sum();
 
         // Keep work queues fed
         refill_work_queues(&work_txs, effective_sims, &mut rng);
@@ -279,8 +282,10 @@ pub fn run_training<G>(
                     sp_span.pb_set_position(fresh_samples as u64);
                     let elapsed_secs = iter_start.elapsed().as_secs_f64();
                     if elapsed_secs > 0.5 {
-                        let evals_now: u64 =
-                            servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+                        let evals_now: u64 = servers
+                            .iter()
+                            .map(|s| s.stats().evals().load(Relaxed))
+                            .sum();
                         let batches_now: u64 = servers
                             .iter()
                             .map(|s| s.stats().batches.load(Relaxed))
@@ -307,7 +312,10 @@ pub fn run_training<G>(
             refill_work_queues(&work_txs, effective_sims, &mut rng);
         }
         // No drain. In-flight results buffer in the channel for next iteration.
-        let evals_now: u64 = servers.iter().map(|s| s.stats().evals.load(Relaxed)).sum();
+        let evals_now: u64 = servers
+            .iter()
+            .map(|s| s.stats().evals().load(Relaxed))
+            .sum();
         let batches_now: u64 = servers
             .iter()
             .map(|s| s.stats().batches.load(Relaxed))
