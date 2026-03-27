@@ -91,12 +91,11 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
     return '[]';
 })()"#;
 
-/// JS snippet to extract player names/colors, local player, and current turn.
-/// Returns JSON: `{players: [{username, color}], localColor: N|null, currentTurnColor: N|null}`.
+/// JS snippet to extract live game metadata from the React component tree.
 ///
-/// Local player is identified by matching `localStorage.userState.username`
-/// against `gameValidator.userStates`.
-pub const EXTRACT_PLAYERS_JS: &str = r#"(() => {
+/// Returns JSON: `{players: [{username, color}], localColor, currentTurnColor, robberTileIndex}`.
+/// Combines player info and robber state into a single fiber tree walk.
+pub const EXTRACT_LIVE_JS: &str = r#"(() => {
     let seen = new Set();
     for (let el of document.querySelectorAll('*')) {
         let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
@@ -117,14 +116,50 @@ pub const EXTRACT_PLAYERS_JS: &str = r#"(() => {
                         if (match) localColor = match.selectedColor;
                     }
                 } catch {}
-                let currentTurnColor = p.gameValidator.gameState?.currentState?.currentTurnPlayerColor ?? null;
-                return JSON.stringify({players, localColor, currentTurnColor});
+                let gs = p.gameValidator.gameState;
+                let currentTurnColor = gs?.currentState?.currentTurnPlayerColor ?? null;
+                let ri = gs?.mechanicRobberState?.locationTileIndex;
+                let robberTileIndex = ri != null ? ri : null;
+                return JSON.stringify({players, localColor, currentTurnColor, robberTileIndex});
             }
             node = node.return;
         }
     }
     return '{"players":[],"localColor":null}';
 })()"#;
+
+/// Lightweight JS to extract only tileCornerStates/tileEdgeStates for building
+/// detection during polling. Uses the same `gameManager` path as `EXTRACT_JS`.
+pub const EXTRACT_BUILDINGS_JS: &str = r#"(() => {
+    let seen = new Set();
+    for (let el of document.querySelectorAll('*')) {
+        let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+        if (!fk) continue;
+        let node = el[fk];
+        for (let d = 0; d < 50 && node; d++) {
+            if (seen.has(node)) { node = node.return; continue; }
+            seen.add(node);
+            let p = node.memoizedProps;
+            if (p?.gameManager) {
+                let ts = p.gameManager?.mapController?.uiGameManager?.gameState?.mapState?.tileState;
+                let corners = ts?.tileCornerStates || {};
+                let edges = ts?.tileEdgeStates || {};
+                return JSON.stringify({corners, edges});
+            }
+            node = node.return;
+        }
+    }
+    return '{}';
+})()"#;
+
+/// Parse the lightweight buildings extraction into a `BuildingData`.
+pub fn parse_buildings_poll(json_str: &str) -> BuildingData {
+    let v: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+    extract_buildings_from(
+        v.get("corners").unwrap_or(&serde_json::Value::Null),
+        v.get("edges").unwrap_or(&serde_json::Value::Null),
+    )
+}
 
 // -- Types --------------------------------------------------------------------
 
@@ -462,11 +497,27 @@ pub struct BuildingData {
     pub robber_tile_index: Option<u8>,
 }
 
-/// Extract buildings and roads from the board data.
+/// Extract buildings and roads from the board data, including robber position.
+pub fn extract_buildings(board: &BoardData) -> BuildingData {
+    let mut data = extract_buildings_from(&board.corners, &board.edges);
+
+    if let Some(robber) = &board.robber {
+        let x = robber["x"].as_i64().unwrap_or(0) as i32;
+        let y = robber["y"].as_i64().unwrap_or(0) as i32;
+        data.robber_tile_index = LAND_HEXES
+            .iter()
+            .position(|h| h.q as i32 == x && h.r as i32 == y)
+            .map(|i| i as u8);
+    }
+
+    data
+}
+
+/// Extract buildings and roads from raw corner/edge JSON values.
 ///
 /// Corners with `owner` + `buildingType` (1=settlement, 2=city) are buildings.
 /// Edges with `owner` + `type` (1=road) are roads.
-pub fn extract_buildings(board: &BoardData) -> BuildingData {
+fn extract_buildings_from(corners: &serde_json::Value, edges: &serde_json::Value) -> BuildingData {
     let mut data = BuildingData {
         settlements: Vec::new(),
         cities: Vec::new(),
@@ -474,8 +525,7 @@ pub fn extract_buildings(board: &BoardData) -> BuildingData {
         robber_tile_index: None,
     };
 
-    // Parse corners (settlements/cities)
-    if let Some(obj) = board.corners.as_object() {
+    if let Some(obj) = corners.as_object() {
         for entry in obj.values() {
             let owner = match entry["owner"].as_u64() {
                 Some(o) => o as u8,
@@ -492,8 +542,7 @@ pub fn extract_buildings(board: &BoardData) -> BuildingData {
         }
     }
 
-    // Parse edges (roads)
-    if let Some(obj) = board.edges.as_object() {
+    if let Some(obj) = edges.as_object() {
         for entry in obj.values() {
             let owner = match entry["owner"].as_u64() {
                 Some(o) => o as u8,
@@ -502,21 +551,10 @@ pub fn extract_buildings(board: &BoardData) -> BuildingData {
             let x = entry["x"].as_i64().unwrap_or(0) as i32;
             let y = entry["y"].as_i64().unwrap_or(0) as i32;
             let z = entry["z"].as_u64().unwrap_or(0) as u8;
-            // type 1 = road
             if entry["type"].as_u64() == Some(1) {
                 data.roads.push((owner, x, y, z));
             }
         }
-    }
-
-    // Robber: (x, y) from the last MoveRobber log entry
-    if let Some(robber) = &board.robber {
-        let x = robber["x"].as_i64().unwrap_or(0) as i32;
-        let y = robber["y"].as_i64().unwrap_or(0) as i32;
-        data.robber_tile_index = LAND_HEXES
-            .iter()
-            .position(|h| h.q as i32 == x && h.r as i32 == y)
-            .map(|i| i as u8);
     }
 
     data

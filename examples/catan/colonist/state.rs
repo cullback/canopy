@@ -76,9 +76,12 @@ pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
     // Discover color → Player mapping from the log
     let color_map = discover_colors(events);
 
-    // Place buildings from board snapshot
+    // Place buildings from board snapshot (dedup checks are no-ops on fresh state)
     let buildings = board::extract_buildings(board);
-    place_buildings(&mut state, &buildings, &color_map, &corner_map, &edge_map);
+    let (ns, nc, nr) = sync_buildings(&mut state, &buildings, &color_map, &corner_map, &edge_map);
+    if ns + nc + nr > 0 {
+        eprintln!("placed {ns} settlements, {nc} cities, {nr} roads from board snapshot");
+    }
 
     // Replay log for resource hands + dice
     replay_log(&mut state, events, &color_map);
@@ -88,18 +91,8 @@ pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
         state.robber = TileId(idx);
     }
 
-    // If buildings exist, we joined mid-game: skip to main phase.
-    // Otherwise keep the initial PlaceSettlement phase from GameState::new().
-    let has_buildings = !buildings.settlements.is_empty()
-        || !buildings.cities.is_empty()
-        || !buildings.roads.is_empty();
-    if has_buildings {
-        state.phase = Phase::PreRoll;
-        state.turn_number = 1;
-        state.pre_roll = true;
-        state.setup_count = 4;
-        state.current_player = Player::One;
-    }
+    // Derive phase from building counts.
+    sync_setup_phase(&mut state);
 
     state
 }
@@ -131,68 +124,32 @@ pub fn discover_colors(events: &[GameEvent]) -> Vec<(u8, Player)> {
     map
 }
 
-fn player_of(color_map: &[(u8, Player)], color: u8) -> Option<Player> {
+/// Look up a colonist color in the color map, returning the internal `Player`.
+pub fn player_of_color(color_map: &[(u8, Player)], color: u8) -> Option<Player> {
     color_map
         .iter()
         .find(|&&(c, _)| c == color)
         .map(|&(_, p)| p)
 }
 
-/// Look up a colonist color in the color map, returning the internal `Player`.
-pub fn player_of_color(color_map: &[(u8, Player)], color: u8) -> Option<Player> {
-    player_of(color_map, color)
-}
-
-/// Place buildings and roads from the board snapshot.
-fn place_buildings(
-    state: &mut GameState,
-    buildings: &board::BuildingData,
-    color_map: &[(u8, Player)],
-    corner_map: &std::collections::HashMap<(i32, i32, u8), NodeId>,
-    edge_map: &std::collections::HashMap<(i32, i32, u8), EdgeId>,
-) {
-    let mut placed = (0u32, 0u32, 0u32);
-
-    for &(color, x, y, z) in &buildings.settlements {
-        let Some(pid) = player_of(color_map, color) else {
-            continue;
-        };
-        let Some(nid) = corner_map.get(&(x, y, z)).copied() else {
-            eprintln!("warning: settlement ({x},{y},{z}) not mapped");
-            continue;
-        };
-        place_settlement(state, pid, nid);
-        placed.0 += 1;
+/// Record a dev card being played: decrement hidden count, increment played count,
+/// and update largest army when a knight is played.
+fn play_dev_card(state: &mut GameState, pid: Player, kind: DevCardKind) {
+    state.players[pid].hidden_dev_cards = state.players[pid].hidden_dev_cards.saturating_sub(1);
+    state.players[pid].dev_cards_played[kind] += 1;
+    if kind == DevCardKind::Knight {
+        state.players[pid].knights_played += 1;
+        let knights = state.players[pid].knights_played;
+        if knights >= 3 {
+            let beats = match state.largest_army {
+                Some((_, n)) => knights > n,
+                None => true,
+            };
+            if beats {
+                state.largest_army = Some((pid, knights));
+            }
+        }
     }
-
-    for &(color, x, y, z) in &buildings.cities {
-        let Some(pid) = player_of(color_map, color) else {
-            continue;
-        };
-        let Some(nid) = corner_map.get(&(x, y, z)).copied() else {
-            eprintln!("warning: city ({x},{y},{z}) not mapped");
-            continue;
-        };
-        place_city(state, pid, nid);
-        placed.1 += 1;
-    }
-
-    for &(color, x, y, z) in &buildings.roads {
-        let Some(pid) = player_of(color_map, color) else {
-            continue;
-        };
-        let Some(eid) = edge_map.get(&(x, y, z)).copied() else {
-            eprintln!("warning: road ({x},{y},{z}) not mapped");
-            continue;
-        };
-        place_road(state, pid, eid);
-        placed.2 += 1;
-    }
-
-    eprintln!(
-        "placed {} settlements, {} cities, {} roads from board snapshot",
-        placed.0, placed.1, placed.2
-    );
 }
 
 /// Walk the log to track resource hands and dice state.
@@ -202,7 +159,7 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
     for event in events {
         match event {
             GameEvent::Roll { player, d1, d2 } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     if let Dice::Balanced(ref mut b) = state.dice {
                         b.draw(d1 + d2, pid);
                     }
@@ -210,31 +167,31 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
             }
             GameEvent::StartingResources { player, resources }
             | GameEvent::GotResources { player, resources } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                     state.bank.sub(*resources);
                 }
             }
             GameEvent::BuildRoad { player, .. } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(ROAD_COST);
                     state.bank.add(ROAD_COST);
                 }
             }
             GameEvent::BuildSettlement { player, .. } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(SETTLEMENT_COST);
                     state.bank.add(SETTLEMENT_COST);
                 }
             }
             GameEvent::BuildCity { player, .. } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(CITY_COST);
                     state.bank.add(CITY_COST);
                 }
             }
             GameEvent::BuyDevCard { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(DEV_CARD_COST);
                     state.bank.add(DEV_CARD_COST);
                     state.players[pid].hidden_dev_cards += 1;
@@ -246,15 +203,15 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                 victim,
                 resources,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                 }
-                if let Some(vid) = player_of(color_map, *victim) {
+                if let Some(vid) = player_of_color(color_map, *victim) {
                     state.players[vid].hand.sub(*resources);
                 }
             }
             GameEvent::YearOfPlentyGain { player, resources } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                     state.bank.sub(*resources);
                 }
@@ -264,7 +221,7 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                 count,
                 resource,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     let mut gained = ResourceArray::default();
                     gained[*resource] = *count;
                     state.players[pid].hand.add(gained);
@@ -281,11 +238,11 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                 given,
                 received,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*given);
                     state.players[pid].hand.add(*received);
                 }
-                if let Some(cpid) = player_of(color_map, *counterparty) {
+                if let Some(cpid) = player_of_color(color_map, *counterparty) {
                     state.players[cpid].hand.sub(*received);
                     state.players[cpid].hand.add(*given);
                 }
@@ -295,7 +252,7 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                 given,
                 received,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*given);
                     state.players[pid].hand.add(*received);
                     state.bank.add(*given);
@@ -305,51 +262,49 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
             GameEvent::Discard {
                 player, resources, ..
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*resources);
                     state.bank.add(*resources);
                 }
             }
             GameEvent::PlayedKnight { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].knights_played += 1;
-                    state.players[pid].dev_cards_played[DevCardKind::Knight] += 1;
-                    let knights = state.players[pid].knights_played;
-                    if knights >= 3 {
-                        let beats = match state.largest_army {
-                            Some((_, n)) => knights > n,
-                            None => true,
-                        };
-                        if beats {
-                            state.largest_army = Some((pid, knights));
-                        }
-                    }
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::Knight);
                 }
             }
             GameEvent::PlayedMonopoly { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].dev_cards_played[DevCardKind::Monopoly] += 1;
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::Monopoly);
                 }
             }
             GameEvent::PlayedRoadBuilding { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].dev_cards_played[DevCardKind::RoadBuilding] += 1;
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::RoadBuilding);
                 }
             }
             GameEvent::PlayedYearOfPlenty { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].dev_cards_played[DevCardKind::YearOfPlenty] += 1;
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::YearOfPlenty);
                 }
             }
             _ => {}
+        }
+    }
+}
+
+/// Update trade ratios for a player based on a node's port.
+fn update_port_access(state: &mut GameState, pid: Player, nid: NodeId) {
+    if let Some(port) = state.topology.nodes[nid.0 as usize].port {
+        match port {
+            crate::game::board::Port::Specific(r) => {
+                state.players[pid].trade_ratios[r as usize] =
+                    state.players[pid].trade_ratios[r as usize].min(2);
+            }
+            crate::game::board::Port::Generic => {
+                for ratio in &mut state.players[pid].trade_ratios {
+                    *ratio = (*ratio).min(3);
+                }
+            }
         }
     }
 }
@@ -359,23 +314,8 @@ fn place_settlement(state: &mut GameState, pid: Player, nid: NodeId) {
     state.boards[pid].settlements |= 1u64 << nid.0;
     state.players[pid].building_vps += 1;
     state.players[pid].settlements_left = state.players[pid].settlements_left.saturating_sub(1);
+    update_port_access(state, pid, nid);
 
-    // Update port access
-    if let Some(port) = state.topology.nodes[nid.0 as usize].port {
-        match port {
-            crate::game::board::Port::Specific(r) => {
-                state.players[pid].trade_ratios[r as usize] =
-                    state.players[pid].trade_ratios[r as usize].min(2);
-            }
-            crate::game::board::Port::Generic => {
-                for ratio in &mut state.players[pid].trade_ratios {
-                    *ratio = (*ratio).min(3);
-                }
-            }
-        }
-    }
-
-    // Update road network frontier
     let opp = pid.opponent();
     let opp_roads = state.boards[opp].road_network.roads;
     state.boards[pid]
@@ -385,34 +325,18 @@ fn place_settlement(state: &mut GameState, pid: Player, nid: NodeId) {
 
 /// Place a city on the board.
 fn place_city(state: &mut GameState, pid: Player, nid: NodeId) {
-    // Remove settlement if present, add city
     state.boards[pid].settlements &= !(1u64 << nid.0);
     state.boards[pid].cities |= 1u64 << nid.0;
-    // City gives 2 VP total (1 from settlement + 1 upgrade)
-    // If settlement wasn't already counted, give full 2
+    // City gives 2 VP total (1 from settlement + 1 upgrade).
+    // If settlement wasn't already counted, give full 2.
     if state.players[pid].building_vps == 0 {
         state.players[pid].building_vps = 2;
     } else {
-        state.players[pid].building_vps += 1; // +1 for upgrade
+        state.players[pid].building_vps += 1;
     }
     state.players[pid].cities_left = state.players[pid].cities_left.saturating_sub(1);
+    update_port_access(state, pid, nid);
 
-    // Port access (same as settlement)
-    if let Some(port) = state.topology.nodes[nid.0 as usize].port {
-        match port {
-            crate::game::board::Port::Specific(r) => {
-                state.players[pid].trade_ratios[r as usize] =
-                    state.players[pid].trade_ratios[r as usize].min(2);
-            }
-            crate::game::board::Port::Generic => {
-                for ratio in &mut state.players[pid].trade_ratios {
-                    *ratio = (*ratio).min(3);
-                }
-            }
-        }
-    }
-
-    // Update road network frontier
     let opp = pid.opponent();
     let opp_roads = state.boards[opp].road_network.roads;
     state.boards[pid]
@@ -437,6 +361,104 @@ fn place_road(state: &mut GameState, pid: Player, eid: crate::game::board::EdgeI
 
     // Remove from opponent's frontier
     state.boards[opp].road_network.remove_edge(eid);
+}
+
+/// Sync buildings from a board snapshot onto the game state.
+///
+/// Only places buildings that are not already present (checked via bitfields).
+/// Returns the number of new buildings placed (settlements, cities, roads).
+pub fn sync_buildings(
+    state: &mut GameState,
+    buildings: &board::BuildingData,
+    color_map: &[(u8, Player)],
+    corner_map: &std::collections::HashMap<(i32, i32, u8), NodeId>,
+    edge_map: &std::collections::HashMap<(i32, i32, u8), EdgeId>,
+) -> (u32, u32, u32) {
+    let mut placed = (0u32, 0u32, 0u32);
+
+    for &(color, x, y, z) in &buildings.settlements {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let Some(&nid) = corner_map.get(&(x, y, z)) else {
+            continue;
+        };
+        if state.boards[pid].settlements & (1u64 << nid.0) == 0 {
+            place_settlement(state, pid, nid);
+            placed.0 += 1;
+        }
+    }
+
+    for &(color, x, y, z) in &buildings.cities {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let Some(&nid) = corner_map.get(&(x, y, z)) else {
+            continue;
+        };
+        if state.boards[pid].cities & (1u64 << nid.0) == 0 {
+            place_city(state, pid, nid);
+            placed.1 += 1;
+        }
+    }
+
+    for &(color, x, y, z) in &buildings.roads {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let Some(&eid) = edge_map.get(&(x, y, z)) else {
+            continue;
+        };
+        if state.boards[pid].road_network.roads & (1u128 << eid.0) == 0 {
+            place_road(state, pid, eid);
+            placed.2 += 1;
+        }
+    }
+
+    placed
+}
+
+/// Derive the correct setup phase from building counts on the board.
+///
+/// During setup (4 settlements + 4 roads), the phase alternates between
+/// PlaceSettlement and PlaceRoad. The turn order is snake-draft:
+/// P1, P2, P2, P1. Once setup is complete, transitions to PreRoll.
+pub fn sync_setup_phase(state: &mut GameState) {
+    let total_settlements = state.boards[Player::One].settlements.count_ones()
+        + state.boards[Player::Two].settlements.count_ones();
+    let total_cities = state.boards[Player::One].cities.count_ones()
+        + state.boards[Player::Two].cities.count_ones();
+    let total_corners = total_settlements + total_cities;
+    let total_roads = state.boards[Player::One].road_network.roads.count_ones()
+        + state.boards[Player::Two].road_network.roads.count_ones();
+
+    if total_corners >= 4 && total_roads >= 4 {
+        // Setup complete.
+        state.setup_count = 4;
+        state.phase = Phase::PreRoll;
+        state.pre_roll = true;
+        state.turn_number = state.turn_number.max(1);
+        state.current_player = Player::One;
+        return;
+    }
+
+    state.setup_count = total_corners as u8;
+
+    if total_corners > total_roads {
+        state.phase = Phase::PlaceRoad;
+    } else {
+        state.phase = Phase::PlaceSettlement;
+    }
+
+    // Snake draft turn order: P1, P2, P2, P1.
+    // After each settlement+road pair, the player for the NEXT settlement:
+    //   setup_count 0 → P1, 1 → P2, 2 → P2, 3 → P1
+    // During PlaceRoad, keep the same player as the settlement.
+    state.current_player = match state.setup_count {
+        0 | 3 => Player::One,
+        1 | 2 => Player::Two,
+        _ => Player::One,
+    };
 }
 
 // -- Timeline building --------------------------------------------------------
@@ -467,7 +489,7 @@ fn is_full_log(
 }
 
 fn player_label(color: u8, color_map: &[(u8, Player)]) -> &'static str {
-    match player_of(color_map, color) {
+    match player_of_color(color_map, color) {
         Some(Player::One) => "P1",
         Some(Player::Two) => "P2",
         None => "P?",
@@ -606,7 +628,7 @@ fn process_post_setup(
         match event {
             // --- Entry-producing events ---
             GameEvent::Roll { player, d1, d2 } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     if let Dice::Balanced(ref mut b) = state.dice {
                         b.draw(d1 + d2, pid);
                     }
@@ -624,7 +646,7 @@ fn process_post_setup(
             }
 
             GameEvent::BuildRoad { player, edge } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(ROAD_COST);
                     state.bank.add(ROAD_COST);
                     if let Some(&eid) = edge.and_then(|e| edge_map.get(&e)) {
@@ -635,7 +657,7 @@ fn process_post_setup(
             }
 
             GameEvent::BuildSettlement { player, corner, .. } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(SETTLEMENT_COST);
                     state.bank.add(SETTLEMENT_COST);
                     if let Some(&nid) = corner.and_then(|c| corner_map.get(&c)) {
@@ -649,7 +671,7 @@ fn process_post_setup(
             }
 
             GameEvent::BuildCity { player, corner, .. } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(CITY_COST);
                     state.bank.add(CITY_COST);
                     if let Some(&nid) = corner.and_then(|c| corner_map.get(&c)) {
@@ -660,7 +682,7 @@ fn process_post_setup(
             }
 
             GameEvent::BuyDevCard { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(DEV_CARD_COST);
                     state.bank.add(DEV_CARD_COST);
                     state.players[pid].hidden_dev_cards += 1;
@@ -678,11 +700,11 @@ fn process_post_setup(
                 given,
                 received,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*given);
                     state.players[pid].hand.add(*received);
                 }
-                if let Some(cpid) = player_of(color_map, *counterparty) {
+                if let Some(cpid) = player_of_color(color_map, *counterparty) {
                     state.players[cpid].hand.sub(*received);
                     state.players[cpid].hand.add(*given);
                 }
@@ -698,7 +720,7 @@ fn process_post_setup(
                 given,
                 received,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*given);
                     state.players[pid].hand.add(*received);
                     state.bank.add(*given);
@@ -708,31 +730,15 @@ fn process_post_setup(
             }
 
             GameEvent::PlayedKnight { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].knights_played += 1;
-                    state.players[pid].dev_cards_played[DevCardKind::Knight] += 1;
-                    // Check largest army.
-                    let knights = state.players[pid].knights_played;
-                    if knights >= 3 {
-                        let beats_current = match state.largest_army {
-                            Some((_, n)) => knights > n,
-                            None => true,
-                        };
-                        if beats_current {
-                            state.largest_army = Some((pid, knights));
-                        }
-                    }
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::Knight);
                 }
                 pending_label = Some(format!("{} plays Knight", player_label(*player, color_map)));
             }
 
             GameEvent::PlayedMonopoly { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].dev_cards_played[DevCardKind::Monopoly] += 1;
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::Monopoly);
                 }
                 pending_label = Some(format!(
                     "{} plays Monopoly",
@@ -741,10 +747,8 @@ fn process_post_setup(
             }
 
             GameEvent::PlayedRoadBuilding { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].dev_cards_played[DevCardKind::RoadBuilding] += 1;
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::RoadBuilding);
                 }
                 pending_label = Some(format!(
                     "{} plays Road Building",
@@ -753,10 +757,8 @@ fn process_post_setup(
             }
 
             GameEvent::PlayedYearOfPlenty { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
-                    state.players[pid].hidden_dev_cards =
-                        state.players[pid].hidden_dev_cards.saturating_sub(1);
-                    state.players[pid].dev_cards_played[DevCardKind::YearOfPlenty] += 1;
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    play_dev_card(state, pid, DevCardKind::YearOfPlenty);
                 }
                 pending_label = Some(format!(
                     "{} plays Year of Plenty",
@@ -767,7 +769,7 @@ fn process_post_setup(
             // --- Silent events: mutate state, no timeline entry ---
             GameEvent::StartingResources { player, resources }
             | GameEvent::GotResources { player, resources } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                     state.bank.sub(*resources);
                 }
@@ -778,16 +780,16 @@ fn process_post_setup(
                 victim,
                 resources,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                 }
-                if let Some(vid) = player_of(color_map, *victim) {
+                if let Some(vid) = player_of_color(color_map, *victim) {
                     state.players[vid].hand.sub(*resources);
                 }
             }
 
             GameEvent::YearOfPlentyGain { player, resources } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                     state.bank.sub(*resources);
                 }
@@ -798,7 +800,7 @@ fn process_post_setup(
                 count,
                 resource,
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     let mut gained = ResourceArray::default();
                     gained[*resource] = *count;
                     state.players[pid].hand.add(gained);
@@ -813,21 +815,21 @@ fn process_post_setup(
             GameEvent::Discard {
                 player, resources, ..
             } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*resources);
                     state.bank.add(*resources);
                 }
             }
 
             GameEvent::LongestRoad { player } => {
-                if let Some(pid) = player_of(color_map, *player) {
+                if let Some(pid) = player_of_color(color_map, *player) {
                     let len = state.boards[pid].road_network.longest_road();
                     state.longest_road = Some((pid, len));
                 }
             }
 
             GameEvent::LongestRoadChanged { to, .. } => {
-                if let Some(pid) = player_of(color_map, *to) {
+                if let Some(pid) = player_of_color(color_map, *to) {
                     let len = state.boards[pid].road_network.longest_road();
                     state.longest_road = Some((pid, len));
                 }

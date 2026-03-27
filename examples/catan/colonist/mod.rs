@@ -117,16 +117,81 @@ async fn try_evaluate(ws: &mut WsStream, expression: &str) -> Result<serde_json:
     }
 }
 
-/// Extract the structured game log JSON from the React virtual scroller.
+/// Extract the structured game log JSON.
+///
+/// Strategy 1: walk up from the virtual scroller's fiber — a parent component
+/// should hold the full log array as a prop (not just visible children).
+/// Strategy 2: find `gameValidator` and search `gameState` properties.
+/// Fallback: read visible virtual scroller children (may miss scrolled entries).
 const EXTRACT_LOG_JS: &str = r#"(() => {
+    function isLogArray(v) {
+        return Array.isArray(v) && v.length > 0 && v[0]?.text?.type != null;
+    }
+    function searchProps(p) {
+        if (!p) return null;
+        for (let key of Object.keys(p)) {
+            if (isLogArray(p[key])) return p[key];
+        }
+        return null;
+    }
+    // Strategy 1: walk up from virtual scroller to find full log prop
     let vs = document.querySelector('[class*="virtualScroller"]');
-    if (!vs) return '[]';
-    let fiberKey = Object.keys(vs).find(k => k.startsWith('__reactFiber'));
-    if (!fiberKey) return '[]';
-    let node = vs[fiberKey].return?.return;
-    let children = node?.memoizedProps?.children;
-    if (!Array.isArray(children)) return '[]';
-    return JSON.stringify(children.map(c => c?.props?.gameLogData).filter(Boolean));
+    if (vs) {
+        let fk = Object.keys(vs).find(k => k.startsWith('__reactFiber'));
+        if (fk) {
+            let node = vs[fk];
+            for (let d = 0; d < 30 && node; d++) {
+                let found = searchProps(node.memoizedProps);
+                if (found) return JSON.stringify(found);
+                node = node.return;
+            }
+        }
+    }
+    // Strategy 2: find gameValidator.gameState, search its properties
+    let seen = new Set();
+    for (let el of document.querySelectorAll('*')) {
+        let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+        if (!fk) continue;
+        let node = el[fk];
+        for (let d = 0; d < 50 && node; d++) {
+            if (seen.has(node)) { node = node.return; continue; }
+            seen.add(node);
+            let p = node.memoizedProps;
+            if (p?.gameValidator) {
+                let gv = p.gameValidator;
+                // Check gameValidator top-level props
+                let found = searchProps(gv);
+                if (found) return JSON.stringify(found);
+                // Check inside gameState
+                if (gv.gameState) {
+                    found = searchProps(gv.gameState);
+                    if (found) return JSON.stringify(found);
+                    // One level deeper
+                    for (let key of Object.keys(gv.gameState)) {
+                        let v = gv.gameState[key];
+                        if (v && typeof v === 'object' && !Array.isArray(v)) {
+                            found = searchProps(v);
+                            if (found) return JSON.stringify(found);
+                        }
+                    }
+                }
+                break;
+            }
+            node = node.return;
+        }
+    }
+    // Fallback: virtual scroller visible children
+    if (vs) {
+        let fk = Object.keys(vs).find(k => k.startsWith('__reactFiber'));
+        if (fk) {
+            let n = vs[fk].return?.return;
+            let children = n?.memoizedProps?.children;
+            if (Array.isArray(children)) {
+                return JSON.stringify(children.map(c => c?.props?.gameLogData).filter(Boolean));
+            }
+        }
+    }
+    return '[]';
 })()"#;
 
 /// Extracted game data from a colonist.io session.
@@ -176,8 +241,8 @@ async fn extract_game_data(port: u16) -> ColonistData {
         eprintln!("extracted {} dev cards from React state", dev_cards.len());
     }
 
-    // Extract player names and local player identity.
-    let players_json = evaluate(&mut ws, board::EXTRACT_PLAYERS_JS).await;
+    // Extract player names, local player identity, current turn, and robber.
+    let players_json = evaluate(&mut ws, board::EXTRACT_LIVE_JS).await;
     let players_str = players_json.as_str().unwrap_or("{}");
     let players_obj: serde_json::Value = serde_json::from_str(players_str).unwrap_or_default();
     let local_color: Option<u8> = players_obj["localColor"].as_u64().map(|c| c as u8);
@@ -237,34 +302,51 @@ pub fn run(port: u16) {
     board::print(&data.board);
 }
 
-/// Lightweight CDP extraction for polling — only log, robber, current turn, dev cards.
+/// Apply live robber, current turn, and dev card state to a game state.
+///
+/// Returns whether anything changed. Buildings are handled separately
+/// (via `sync_buildings`) because they have their own logging.
+fn apply_live_state(
+    state: &mut crate::game::state::GameState,
+    poll: &PollData,
+    color_map: &[(u8, canopy::player::Player)],
+    local_color: Option<u8>,
+) -> bool {
+    let mut changed = false;
+
+    if let Some(robber_idx) = poll.robber_tile_index {
+        state.robber = crate::game::board::TileId(robber_idx);
+        changed = true;
+    }
+
+    // During setup, sync_setup_phase sets current_player from building counts.
+    // Only override post-setup.
+    if state.setup_count >= 4
+        && let Some(color) = poll.current_turn_color
+        && let Some(pid) = state::player_of_color(color_map, color)
+    {
+        state.current_player = pid;
+        changed = true;
+    }
+
+    if !poll.dev_cards.is_empty()
+        && let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c))
+    {
+        state::apply_dev_cards(state, lp, &poll.dev_cards);
+        changed = true;
+    }
+
+    changed
+}
+
+/// Lightweight CDP extraction for polling.
 struct PollData {
     events: Vec<log::GameEvent>,
     dev_cards: Vec<DevCardKind>,
     current_turn_color: Option<u8>,
     robber_tile_index: Option<u8>,
+    buildings: board::BuildingData,
 }
-
-/// JS snippet to extract robber tile index directly.
-const EXTRACT_ROBBER_JS: &str = r#"(() => {
-    let seen = new Set();
-    for (let el of document.querySelectorAll('*')) {
-        let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
-        if (!fk) continue;
-        let node = el[fk];
-        for (let d = 0; d < 50 && node; d++) {
-            if (seen.has(node)) { node = node.return; continue; }
-            seen.add(node);
-            let p = node.memoizedProps;
-            if (p && p.gameValidator && p.gameValidator.gameState) {
-                let ri = p.gameValidator.gameState.mechanicRobberState?.locationTileIndex;
-                return JSON.stringify(ri != null ? ri : null);
-            }
-            node = node.return;
-        }
-    }
-    return 'null';
-})()"#;
 
 /// Connect to Chrome and extract only what's needed for incremental updates.
 async fn poll_game_data(port: u16) -> Result<PollData, String> {
@@ -288,15 +370,17 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
         .filter_map(|&c| log::card_to_dev(c))
         .collect();
 
-    // Current turn
-    let players_json = try_evaluate(&mut ws, board::EXTRACT_PLAYERS_JS).await?;
-    let players_str = players_json.as_str().unwrap_or("{}");
-    let players_obj: serde_json::Value = serde_json::from_str(players_str).unwrap_or_default();
-    let current_turn_color: Option<u8> = players_obj["currentTurnColor"].as_u64().map(|c| c as u8);
+    // Players, current turn, and robber (single CDP call)
+    let live_json = try_evaluate(&mut ws, board::EXTRACT_LIVE_JS).await?;
+    let live_str = live_json.as_str().unwrap_or("{}");
+    let live_obj: serde_json::Value = serde_json::from_str(live_str).unwrap_or_default();
+    let current_turn_color: Option<u8> = live_obj["currentTurnColor"].as_u64().map(|c| c as u8);
+    let robber_tile_index: Option<u8> = live_obj["robberTileIndex"].as_u64().map(|i| i as u8);
 
-    // Robber
-    let robber_json = try_evaluate(&mut ws, EXTRACT_ROBBER_JS).await?;
-    let robber_tile_index = robber_json.as_u64().map(|i| i as u8);
+    // Buildings from board snapshot
+    let buildings_json = try_evaluate(&mut ws, board::EXTRACT_BUILDINGS_JS).await?;
+    let buildings_str = buildings_json.as_str().unwrap_or("{}");
+    let buildings = board::parse_buildings_poll(buildings_str);
 
     ws.close(None).await.ok();
 
@@ -305,6 +389,7 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
         dev_cards,
         current_turn_color,
         robber_tile_index,
+        buildings,
     })
 }
 
@@ -417,37 +502,39 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
 
             let total_events = poll.events.len();
             eprintln!("poll ok: {total_events} events (committed {committed_event_count})");
+
+            // Sync buildings from board snapshot (handles setup placements
+            // that lack coordinates in log entries).
+            let (ns, nc, nr) = state::sync_buildings(
+                &mut last_state,
+                &poll.buildings,
+                &color_map,
+                &corner_map,
+                &edge_map,
+            );
+            let buildings_changed = ns + nc + nr > 0;
+            if buildings_changed {
+                eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
+                state::sync_setup_phase(&mut last_state);
+            }
+
             if total_events <= committed_event_count {
-                // No new events — still update robber/turn/dev cards on final state.
-                let mut updated = false;
-                {
+                // No new events — still update robber/turn/dev cards/buildings.
+                let live_changed =
+                    apply_live_state(&mut last_state, &poll, &color_map, poll_local_color);
+                if buildings_changed || live_changed {
                     let mut session = poll_session.lock().await;
-                    if let Some(robber_idx) = poll.robber_tile_index {
-                        session.update_final_state(|s| {
-                            s.robber = crate::game::board::TileId(robber_idx);
-                        });
-                        updated = true;
-                    }
-                    if let Some(color) = poll.current_turn_color {
-                        if let Some(pid) = state::player_of_color(&color_map, color) {
-                            session.update_final_state(|s| {
-                                s.current_player = pid;
-                            });
-                            updated = true;
-                        }
-                    }
-                    if !poll.dev_cards.is_empty() {
-                        if let Some(lp) =
-                            poll_local_color.and_then(|c| state::player_of_color(&color_map, c))
-                        {
-                            session.update_final_state(|s| {
-                                state::apply_dev_cards(s, lp, &poll.dev_cards);
-                            });
-                            updated = true;
-                        }
-                    }
-                }
-                if updated {
+                    session.update_final_state(|s| {
+                        state::sync_buildings(
+                            s,
+                            &poll.buildings,
+                            &color_map,
+                            &corner_map,
+                            &edge_map,
+                        );
+                        state::sync_setup_phase(s);
+                        apply_live_state(s, &poll, &color_map, poll_local_color);
+                    });
                     generation += 1;
                     let _ = notify_tx.send(generation);
                 }
@@ -471,23 +558,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 &poll_board,
             );
 
-            // Apply robber, current turn, dev cards to last_state.
-            if let Some(robber_idx) = poll.robber_tile_index {
-                last_state.robber = crate::game::board::TileId(robber_idx);
-            }
-            if let Some(color) = poll.current_turn_color {
-                if let Some(pid) = state::player_of_color(&color_map, color) {
-                    last_state.current_player = pid;
-                }
-            }
-            if !poll.dev_cards.is_empty() {
-                if let Some(lp) =
-                    poll_local_color.and_then(|c| state::player_of_color(&color_map, c))
-                {
-                    state::apply_dev_cards(&mut last_state, lp, &poll.dev_cards);
-                }
-            }
-
+            apply_live_state(&mut last_state, &poll, &color_map, poll_local_color);
             committed_event_count = total_events;
 
             {
@@ -501,28 +572,11 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                     session.extend_timeline(pairs);
                 }
 
-                // Update final state with robber/turn/dev cards.
-                if let Some(robber_idx) = poll.robber_tile_index {
-                    session.update_final_state(|s| {
-                        s.robber = crate::game::board::TileId(robber_idx);
-                    });
-                }
-                if let Some(color) = poll.current_turn_color {
-                    if let Some(pid) = state::player_of_color(&color_map, color) {
-                        session.update_final_state(|s| {
-                            s.current_player = pid;
-                        });
-                    }
-                }
-                if !poll.dev_cards.is_empty() {
-                    if let Some(lp) =
-                        poll_local_color.and_then(|c| state::player_of_color(&color_map, c))
-                    {
-                        session.update_final_state(|s| {
-                            state::apply_dev_cards(s, lp, &poll.dev_cards);
-                        });
-                    }
-                }
+                session.update_final_state(|s| {
+                    state::sync_buildings(s, &poll.buildings, &color_map, &corner_map, &edge_map);
+                    state::sync_setup_phase(s);
+                    apply_live_state(s, &poll, &color_map, poll_local_color);
+                });
             }
 
             generation += 1;
