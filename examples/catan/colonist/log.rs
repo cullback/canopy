@@ -247,24 +247,11 @@ pub enum GameEvent {
 
 pub fn parse(entries: &[serde_json::Value]) -> Vec<GameEvent> {
     let mut events = Vec::new();
-    let mut placement_dumped = false;
     for entry in entries {
         let text = &entry["text"];
         let Some(log_type) = text["type"].as_u64() else {
             continue;
         };
-
-        // Dump first placement entry to discover coordinate field names
-        if !placement_dumped && (log_type == 4 || log_type == 5) {
-            eprintln!("--- Raw placement entry (type {log_type}) ---");
-            if let Some(obj) = text.as_object() {
-                for (k, v) in obj {
-                    eprintln!("  text.{k}: {v}");
-                }
-            }
-            placement_dumped = true;
-        }
-
         if let Some(event) = parse_entry(log_type, text, entry) {
             events.push(event);
         }
