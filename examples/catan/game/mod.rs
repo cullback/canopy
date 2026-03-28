@@ -365,7 +365,7 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
     }
 }
 
-fn handle_seven(state: &mut GameState) {
+pub fn handle_seven(state: &mut GameState) {
     let roller = state.current_player;
     let opponent = roller.opponent();
 

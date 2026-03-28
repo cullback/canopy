@@ -262,8 +262,9 @@ impl CoordMapper {
     fn rotate_corner(&self, corner: u8) -> u8 {
         let mut c = corner;
         if self.reflect {
-            // Reflection flips corner: 0↔0, 1↔5, 2↔4, 3↔3
-            c = (6 - c) % 6;
+            // Mirror (q,r,s)→(q,s,r) reflects through corners 1 and 4 (NE-SW axis).
+            // Permutation: 0↔2, 3↔5, 1 and 4 fixed.
+            c = (8 - c) % 6;
         }
         (c + self.rotation) % 6
     }
@@ -271,10 +272,8 @@ impl CoordMapper {
     fn rotate_edge(&self, edge: u8) -> u8 {
         let mut e = edge;
         if self.reflect {
-            // Mirror reflection swaps corners i↔(6-i)%6. Edge i (between corners
-            // i and i+1) maps to edge between (6-i)%6 and (6-(i+1))%6 = (5-i)%6.
-            // The resulting edge index is the lower corner: (5-i)%6.
-            e = (5 + 6 - e) % 6; // = (5-e) mod 6, avoiding underflow
+            // Mirror (q,r,s)→(q,s,r) on edges: 0↔1, 2↔5, 3↔4.
+            e = (7 - e) % 6;
         }
         (e + self.rotation) % 6
     }
@@ -336,14 +335,69 @@ pub const EXTRACT_JS: &str = r#"(() => {
 /// The hand is in a `cardState` prop (map of `{cardEnum: count}`) on a
 /// component rendered for the local player's card tray.
 pub const EXTRACT_CARDS_JS: &str = r#"(() => {
-    let seen = new Set();
+    // Try live hooks first: mechanicDevelopmentCardsState has accurate card data.
+    let localColor = null;
+    try {
+        let me = JSON.parse(localStorage.getItem('userState'))?.username;
+        if (me) {
+            let seen = new Set();
+            for (let el of document.querySelectorAll('*')) {
+                let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+                if (!fk) continue;
+                let node = el[fk];
+                for (let d = 0; d < 50 && node; d++) {
+                    if (seen.has(node)) { node = node.return; continue; }
+                    seen.add(node);
+                    let p = node.memoizedProps;
+                    if (p && p.gameValidator && p.gameValidator.userStates) {
+                        let match = p.gameValidator.userStates.find(u => u.username === me);
+                        if (match) localColor = match.selectedColor;
+                        break;
+                    }
+                    node = node.return;
+                }
+                if (localColor !== null) break;
+            }
+        }
+    } catch {}
+
+    // Walk hooks for live dev card state.
+    if (localColor !== null) {
+        let seen2 = new Set();
+        for (let el of document.querySelectorAll('*')) {
+            let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
+            if (!fk) continue;
+            let node = el[fk];
+            for (let d = 0; d < 50 && node; d++) {
+                if (seen2.has(node)) { node = node.return; continue; }
+                seen2.add(node);
+                let ms = node.memoizedState;
+                for (let i = 0; i < 30 && ms; i++) {
+                    let v = ms.memoizedState;
+                    if (v && v.mechanicDevelopmentCardsState) {
+                        let ps = v.mechanicDevelopmentCardsState.players;
+                        let me = ps && ps[localColor];
+                        if (me && me.developmentCards && me.developmentCards.cards) {
+                            let cards = me.developmentCards.cards.filter(c => c >= 11 && c <= 15);
+                            if (cards.length > 0) return JSON.stringify(cards);
+                        }
+                    }
+                    ms = ms.next;
+                }
+                node = node.return;
+            }
+        }
+    }
+
+    // Fallback: props cardState (may be stale).
+    let seen3 = new Set();
     for (let el of document.querySelectorAll('*')) {
         let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
         if (!fk) continue;
         let node = el[fk];
         for (let d = 0; d < 30 && node; d++) {
-            if (seen.has(node)) { node = node.return; continue; }
-            seen.add(node);
+            if (seen3.has(node)) { node = node.return; continue; }
+            seen3.add(node);
             let p = node.memoizedProps;
             if (p && p.cardState && typeof p.cardState === 'object' && !Array.isArray(p.cardState)) {
                 let cards = [];
@@ -363,10 +417,15 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
 
 /// JS snippet to extract live game metadata from the React component tree.
 ///
-/// Returns JSON: `{players: [{username, color}], localColor, currentTurnColor, robberTileIndex}`.
-/// Combines player info and robber state into a single fiber tree walk.
+/// Returns JSON: `{players: [{username, color}], localColor, currentTurnColor, robberHex, diceThrown, turnState}`.
+/// Player info comes from memoizedProps (gameValidator.userStates).
+/// Live game state (dice, turn) comes from React hooks (memoizedState) on a
+/// separate fiber node, since the props snapshot is stale.
 pub const EXTRACT_LIVE_JS: &str = r#"(() => {
     let seen = new Set();
+    let players = null, localColor = null, robberHex = null, tileState = null;
+    let liveGs = null;
+
     for (let el of document.querySelectorAll('*')) {
         let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
         if (!fk) continue;
@@ -374,32 +433,68 @@ pub const EXTRACT_LIVE_JS: &str = r#"(() => {
         for (let d = 0; d < 50 && node; d++) {
             if (seen.has(node)) { node = node.return; continue; }
             seen.add(node);
-            let p = node.memoizedProps;
-            if (p && p.gameValidator && p.gameValidator.userStates) {
-                let users = p.gameValidator.userStates;
-                let players = users.map(u => ({username: u.username, color: u.selectedColor}));
-                let localColor = null;
-                try {
-                    let me = JSON.parse(localStorage.getItem('userState'))?.username;
-                    if (me) {
-                        let match = users.find(u => u.username === me);
-                        if (match) localColor = match.selectedColor;
+
+            // Player info + robber from props (stale gameState is fine for these).
+            if (!players) {
+                let p = node.memoizedProps;
+                if (p && p.gameValidator && p.gameValidator.userStates) {
+                    let users = p.gameValidator.userStates;
+                    players = users.map(u => ({username: u.username, color: u.selectedColor}));
+                    try {
+                        let me = JSON.parse(localStorage.getItem('userState'))?.username;
+                        if (me) {
+                            let match = users.find(u => u.username === me);
+                            if (match) localColor = match.selectedColor;
+                        }
+                    } catch {}
+                    tileState = p.gameValidator.mapValidator?.tileState?._tiles;
+                    let gs = p.gameValidator.gameState;
+                    let ri = gs?.mechanicRobberState?.locationTileIndex;
+                    if (ri != null && tileState && tileState[ri]) {
+                        robberHex = { x: tileState[ri].state.x, y: tileState[ri].state.y };
                     }
-                } catch {}
-                let gs = p.gameValidator.gameState;
-                let currentTurnColor = gs?.currentState?.currentTurnPlayerColor ?? null;
-                let ri = gs?.mechanicRobberState?.locationTileIndex;
-                let robberHex = null;
-                let ts = p.gameValidator.mapValidator?.tileState?._tiles;
-                if (ri != null && ts && ts[ri]) {
-                    robberHex = { x: ts[ri].state.x, y: ts[ri].state.y };
                 }
-                return JSON.stringify({players, localColor, currentTurnColor, robberHex});
             }
+
+            // Live game state from hooks (different fiber node).
+            if (!liveGs) {
+                let ms = node.memoizedState;
+                for (let i = 0; i < 30 && ms; i++) {
+                    let v = ms.memoizedState;
+                    if (v && typeof v === 'object' && v.diceState && v.currentState) {
+                        liveGs = v;
+                        break;
+                    }
+                    ms = ms.next;
+                }
+            }
+
+            if (players && liveGs) break;
             node = node.return;
         }
+        if (players && liveGs) break;
     }
-    return '{"players":[],"localColor":null}';
+
+    let currentTurnColor = liveGs?.currentState?.currentTurnPlayerColor ?? null;
+    let diceThrown = liveGs?.diceState?.diceThrown ?? null;
+    let turnState = liveGs?.currentState?.turnState ?? null;
+
+    // Update robber from live state if available.
+    if (liveGs && tileState) {
+        let ri = liveGs.mechanicRobberState?.locationTileIndex;
+        if (ri != null && tileState[ri]) {
+            robberHex = { x: tileState[ri].state.x, y: tileState[ri].state.y };
+        }
+    }
+
+    return JSON.stringify({
+        players: players || [],
+        localColor,
+        currentTurnColor,
+        robberHex,
+        diceThrown,
+        turnState,
+    });
 })()"#;
 
 /// Lightweight JS to extract only tileCornerStates/tileEdgeStates for building

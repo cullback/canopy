@@ -117,6 +117,10 @@ pub fn build_game_state(
     // Derive phase from building counts.
     sync_setup_phase(&mut state, last_settle);
 
+    // Override phase based on last log event — sync_setup_phase only looks at
+    // building counts, so it can't distinguish pre-roll from post-roll.
+    sync_phase_from_log(&mut state, events, &color_map);
+
     state
 }
 
@@ -512,6 +516,77 @@ pub fn sync_setup_phase(state: &mut GameState, last_settlement: Option<NodeId>) 
     };
 }
 
+/// Refine the game phase by scanning the log tail for recent events.
+///
+/// `sync_setup_phase` sets PreRoll once setup is complete, but can't tell if a
+/// roll already happened. This function walks backwards from the last event to
+/// determine the actual phase:
+///   - Last significant event is Roll → Phase::Main, pre_roll=false
+///   - Last significant event is EndTurn / no post-setup events → PreRoll
+///   - Build/Buy/Trade after a Roll → Phase::Main (still that player's turn)
+fn sync_phase_from_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Player)]) {
+    // Only relevant once setup is complete.
+    if state.setup_count < 4 {
+        return;
+    }
+
+    // Walk backwards to find the last phase-determining event.
+    // Track whether we passed through robber-flow events (MoveRobber, Stole,
+    // Discard) before hitting the Roll, which tells us the 7-flow completed.
+    let mut saw_move_robber = false;
+    let mut saw_discard = false;
+    for event in events.iter().rev() {
+        match event {
+            GameEvent::Roll { player, d1, d2 } => {
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    state.pre_roll = false;
+                    state.current_player = pid;
+                    if d1 + d2 == 7 && !saw_move_robber {
+                        // Rolled 7 but no MoveRobber yet — still in robber flow.
+                        crate::game::handle_seven(state);
+                    } else {
+                        state.phase = Phase::Main;
+                    }
+                }
+                return;
+            }
+            GameEvent::MoveRobber { .. } => {
+                saw_move_robber = true;
+                continue;
+            }
+            GameEvent::Stole { .. } => continue,
+            GameEvent::Discard { .. } | GameEvent::RolledSeven => {
+                saw_discard = true;
+                continue;
+            }
+            GameEvent::PlayedKnight { player } => {
+                if !saw_move_robber {
+                    // Knight played but no MoveRobber yet → MoveRobber phase.
+                    if let Some(pid) = player_of_color(color_map, *player) {
+                        state.current_player = pid;
+                        state.phase = Phase::MoveRobber;
+                    }
+                    return;
+                }
+                continue;
+            }
+            // These happen within a turn (after a roll) — still Main phase.
+            GameEvent::BuildRoad { .. }
+            | GameEvent::BuildSettlement { .. }
+            | GameEvent::BuildCity { .. }
+            | GameEvent::BuyDevCard { .. }
+            | GameEvent::PlayerTrade { .. }
+            | GameEvent::BankTrade { .. }
+            | GameEvent::PlayedMonopoly { .. }
+            | GameEvent::PlayedRoadBuilding { .. }
+            | GameEvent::PlayedYearOfPlenty { .. } => continue,
+            // Resource events, starting resources, etc. — not phase-determining.
+            _ => continue,
+        }
+    }
+    // No roll found — stay at PreRoll (start of first post-setup turn).
+}
+
 // -- Timeline building --------------------------------------------------------
 
 /// Check if the log has enough setup placement events with valid coordinates
@@ -556,6 +631,17 @@ fn player_label(color: u8, color_map: &[(u8, Player)]) -> &'static str {
         Some(Player::Two) => "P2",
         None => "P?",
     }
+}
+
+/// Format a `ResourceArray` as a compact string like "2 wool, 1 grain".
+fn format_resources(r: ResourceArray) -> String {
+    use crate::game::resource::ALL_RESOURCES;
+    let parts: Vec<String> = ALL_RESOURCES
+        .iter()
+        .filter(|&&res| r[res] > 0)
+        .map(|&res| format!("{} {res}", r[res]))
+        .collect();
+    parts.join(", ")
 }
 
 /// Build complete timeline: replay setup via game actions, then track post-setup
@@ -664,6 +750,7 @@ fn process_post_setup(
     use crate::game::resource::{CITY_COST, DEV_CARD_COST, ROAD_COST, SETTLEMENT_COST};
 
     let mut pending_label: Option<String> = None;
+    let mut roll_gains: [ResourceArray; 2] = [ResourceArray::default(); 2];
     let mut turn = 0u16;
 
     for event in events {
@@ -684,7 +771,16 @@ fn process_post_setup(
 
         // Flush pending entry before the next entry-producing event.
         if is_entry {
-            if let Some(label) = pending_label.take() {
+            if let Some(mut label) = pending_label.take() {
+                let p1 = format_resources(roll_gains[0]);
+                let p2 = format_resources(roll_gains[1]);
+                if !p1.is_empty() {
+                    label.push_str(&format!("\n  P1: {p1}"));
+                }
+                if !p2.is_empty() {
+                    label.push_str(&format!("\n  P2: {p2}"));
+                }
+                roll_gains = [ResourceArray::default(); 2];
                 timeline.push(TimelineEntry {
                     label,
                     state: state.clone(),
@@ -703,7 +799,11 @@ fn process_post_setup(
                     turn += 1;
                     state.turn_number = turn;
                     state.pre_roll = false;
-                    state.phase = Phase::Main;
+                    if d1 + d2 == 7 {
+                        crate::game::handle_seven(state);
+                    } else {
+                        state.phase = Phase::Main;
+                    }
                 }
                 pending_label = Some(format!(
                     "{} rolls {}",
@@ -808,6 +908,7 @@ fn process_post_setup(
             GameEvent::PlayedKnight { player } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
                     play_dev_card(state, pid, DevCardKind::Knight);
+                    state.phase = Phase::MoveRobber;
                 }
                 pending_label = Some(format!("{} plays Knight", player_label(*player, color_map)));
             }
@@ -843,11 +944,18 @@ fn process_post_setup(
             }
 
             // --- Silent events: mutate state, no timeline entry ---
-            GameEvent::StartingResources { player, resources }
-            | GameEvent::GotResources { player, resources } => {
+            GameEvent::StartingResources { player, resources } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.add(*resources);
                     state.bank.sub(*resources);
+                }
+            }
+
+            GameEvent::GotResources { player, resources } => {
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    state.players[pid].hand.add(*resources);
+                    state.bank.sub(*resources);
+                    roll_gains[pid as usize].add(*resources);
                 }
             }
 
@@ -894,6 +1002,35 @@ fn process_post_setup(
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*resources);
                     state.bank.add(*resources);
+                    // Advance through the discard/robber flow.
+                    if let Phase::Discard {
+                        player: dp, roller, ..
+                    } = state.phase
+                    {
+                        if dp == pid {
+                            let other = pid.opponent();
+                            let other_total = state.players[other].hand.total();
+                            if pid == roller && other_total > state.discard_threshold {
+                                state.current_player = other;
+                                state.phase = Phase::Discard {
+                                    player: other,
+                                    remaining: other_total / 2,
+                                    roller,
+                                };
+                            } else {
+                                state.current_player = roller;
+                                state.phase = Phase::MoveRobber;
+                            }
+                        }
+                    }
+                }
+            }
+
+            GameEvent::MoveRobber { player } => {
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    state.current_player = pid;
+                    // Robber position is synced separately via board snapshot.
+                    state.phase = Phase::Main;
                 }
             }
 
@@ -916,7 +1053,15 @@ fn process_post_setup(
     }
 
     // Flush final pending entry.
-    if let Some(label) = pending_label {
+    if let Some(mut label) = pending_label {
+        let p1 = format_resources(roll_gains[0]);
+        let p2 = format_resources(roll_gains[1]);
+        if !p1.is_empty() {
+            label.push_str(&format!("\n  P1: {p1}"));
+        }
+        if !p2.is_empty() {
+            label.push_str(&format!("\n  P2: {p2}"));
+        }
         timeline.push(TimelineEntry {
             label,
             state: state.clone(),

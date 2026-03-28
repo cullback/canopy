@@ -15,6 +15,7 @@ use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::game::dev_card::DevCardKind;
 use crate::game::dice::{BalancedDice, Dice};
+use crate::game::state::Phase;
 use crate::presenter::CatanPresenter;
 use canopy::eval::RolloutEvaluator;
 
@@ -206,6 +207,8 @@ struct ColonistData {
     local_color: Option<u8>,
     /// Current turn player's colonist color.
     current_turn_color: Option<u8>,
+    /// Whether the dice have been thrown this turn.
+    dice_thrown: Option<bool>,
 }
 
 /// Connect to Chrome via CDP and extract game data.
@@ -247,6 +250,7 @@ async fn extract_game_data(port: u16) -> ColonistData {
     let players_obj: serde_json::Value = serde_json::from_str(players_str).unwrap_or_default();
     let local_color: Option<u8> = players_obj["localColor"].as_u64().map(|c| c as u8);
     let current_turn_color: Option<u8> = players_obj["currentTurnColor"].as_u64().map(|c| c as u8);
+    let dice_thrown: Option<bool> = players_obj["diceThrown"].as_bool();
     let player_names: Vec<(u8, String)> = players_obj["players"]
         .as_array()
         .map(|arr| {
@@ -277,6 +281,7 @@ async fn extract_game_data(port: u16) -> ColonistData {
         player_names,
         local_color,
         current_turn_color,
+        dice_thrown,
     }
 }
 
@@ -330,10 +335,30 @@ fn apply_live_state(
     if state.setup_count >= 4
         && let Some(color) = poll.current_turn_color
         && let Some(pid) = state::player_of_color(color_map, color)
-        && state.current_player != pid
     {
-        state.current_player = pid;
-        changed = true;
+        if state.current_player != pid {
+            eprintln!("live: turn changed to {pid:?}");
+            state.current_player = pid;
+            changed = true;
+        }
+
+        // Use colonist's diceState.diceThrown to detect pre-roll vs post-roll.
+        if let Some(thrown) = poll.dice_thrown {
+            let want_pre_roll = !thrown;
+            if state.pre_roll != want_pre_roll {
+                eprintln!(
+                    "live: dice_thrown={thrown} → pre_roll={want_pre_roll} (was {})",
+                    state.pre_roll
+                );
+                state.pre_roll = want_pre_roll;
+                if want_pre_roll {
+                    state.phase = Phase::PreRoll;
+                } else if matches!(state.phase, Phase::PreRoll) {
+                    state.phase = Phase::Main;
+                }
+                changed = true;
+            }
+        }
     }
 
     if !poll.dev_cards.is_empty()
@@ -352,6 +377,8 @@ struct PollData {
     events: Vec<log::GameEvent>,
     dev_cards: Vec<DevCardKind>,
     current_turn_color: Option<u8>,
+    dice_thrown: Option<bool>,
+    turn_state: Option<u8>,
     robber_hex: Option<(i32, i32)>,
     buildings: board::BuildingData,
 }
@@ -383,6 +410,8 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
     let live_str = live_json.as_str().unwrap_or("{}");
     let live_obj: serde_json::Value = serde_json::from_str(live_str).unwrap_or_default();
     let current_turn_color: Option<u8> = live_obj["currentTurnColor"].as_u64().map(|c| c as u8);
+    let dice_thrown: Option<bool> = live_obj["diceThrown"].as_bool();
+    let turn_state: Option<u8> = live_obj["turnState"].as_u64().map(|v| v as u8);
     let robber_hex: Option<(i32, i32)> = live_obj["robberHex"].as_object().and_then(|o| {
         let x = o.get("x")?.as_i64()? as i32;
         let y = o.get("y")?.as_i64()? as i32;
@@ -400,6 +429,8 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
         events,
         dev_cards,
         current_turn_color,
+        dice_thrown,
+        turn_state,
         robber_hex,
         buildings,
     })
@@ -569,11 +600,23 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
         }
     }
 
-    // Set current turn player on final state from live game data.
+    // Set current turn player and dice phase from live game data.
     if let Some(color) = data.current_turn_color {
         if let Some(pid) = state::player_of_color(&color_map, color) {
             if let Some(last) = timeline.last_mut() {
                 last.state.current_player = pid;
+            }
+        }
+    }
+    if let Some(thrown) = data.dice_thrown {
+        if let Some(last) = timeline.last_mut() {
+            if last.state.setup_count >= 4 {
+                last.state.pre_roll = !thrown;
+                if !thrown {
+                    last.state.phase = Phase::PreRoll;
+                } else if matches!(last.state.phase, Phase::PreRoll) {
+                    last.state.phase = Phase::Main;
+                }
             }
         }
     }
@@ -636,7 +679,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
         let mut pre_pending_cursor: Option<usize> = None;
 
         loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
             // Drain any actions the user played on the serve board.
             while let Ok(action) = action_rx.try_recv() {
@@ -677,6 +720,10 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
 
             if total_events <= committed_event_count {
                 // No new events — still update robber/turn/dev cards/buildings.
+                eprintln!(
+                    "poll: no new events, phase={:?} pre_roll={} dice_thrown={:?} turn_state={:?}",
+                    last_state.phase, last_state.pre_roll, poll.dice_thrown, poll.turn_state,
+                );
                 let live_changed = apply_live_state(
                     &mut last_state,
                     &poll,
@@ -811,6 +858,13 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 &edge_map,
                 &poll_board,
                 &poll_mapper,
+            );
+            eprintln!(
+                "poll: {} timeline entries, last_state phase={:?} pre_roll={} dice_thrown={:?}",
+                new_entries.len(),
+                last_state.phase,
+                last_state.pre_roll,
+                poll.dice_thrown,
             );
 
             apply_live_state(
