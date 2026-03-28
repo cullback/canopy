@@ -454,11 +454,16 @@ impl<G: Game> Search<G> {
                 self.bufs.legal.clear();
                 self.root_state.legal_actions(&mut self.bufs.legal);
                 let edges = self.tree.edges(new_root);
-                Some(
-                    (0..edges.len())
-                        .filter(|&i| self.bufs.legal.contains(&edges[i].action))
-                        .collect::<Vec<_>>(),
-                )
+                let legal_indices: Vec<usize> = (0..edges.len())
+                    .filter(|&i| self.bufs.legal.contains(&edges[i].action))
+                    .collect();
+                // If no tree edges are legal, the tree is stale — discard and
+                // start fresh rather than panicking on empty candidates.
+                if legal_indices.is_empty() {
+                    self.root = None;
+                    return self.begin_search(rng);
+                }
+                Some(legal_indices)
             } else {
                 None
             };
