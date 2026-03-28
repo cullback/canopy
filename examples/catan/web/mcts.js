@@ -13,9 +13,11 @@ class MCTSPanel {
   // Update the analysis panel with a search snapshot.
   updateSnapshot(snapshot, labels) {
     this.simsEl.textContent = `${snapshot.total_simulations} sims`;
-    const rootQ = snapshot.root_wdl[0] - snapshot.root_wdl[2];
-    this.rootQEl.textContent = `Q: ${rootQ.toFixed(3)}`;
-    this.netValEl.textContent = `Net: ${snapshot.network_value.toFixed(3)}`;
+    const [w, d, l] = snapshot.root_wdl;
+    this.rootQEl.textContent = `W ${(w*100).toFixed(0)}% D ${(d*100).toFixed(0)}% L ${(l*100).toFixed(0)}%`;
+    const nv = snapshot.network_value;
+    const nw = (nv + 1) / 2;
+    this.netValEl.textContent = `Net: ${(nw*100).toFixed(0)}%`;
 
     // Build sorted edge data
     const edges = snapshot.edges.map((e, i) => ({
@@ -53,7 +55,7 @@ class MCTSPanel {
           <div class="h-full rounded-sm transition-[width] duration-150" style="width:${pct}%;background:${qColor}"></div>
         </div>
         <span class="w-10 text-right text-gray-500 shrink-0 text-[10px]">${edge.visits}</span>
-        <span class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? q.toFixed(3) : '—'}</span>
+        <span class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—'}</span>
       `;
 
       this.barsEl.appendChild(row);

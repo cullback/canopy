@@ -102,15 +102,12 @@ tailwind.config = {
       </label>
     </div>
     <button id="btn-run-sims" class="py-1.5 px-3 text-xs bg-bg-3 border border-gray-700 text-gray-200 rounded cursor-pointer hover:bg-accent transition-colors disabled:opacity-40 disabled:cursor-default">Run Sims</button>
-<div class="flex items-center gap-2 text-xs text-gray-300">
-      <label class="flex items-center gap-1 cursor-pointer">
-        <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Autoplay
-      </label>
-      <label class="flex items-center gap-1">Delay:
-        <input type="range" id="speed-slider" min="100" max="3000" value="500" step="100" class="w-20 accent-accent">
-        <span id="speed-value">500ms</span>
-      </label>
-    </div>
+    <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+      <input type="checkbox" id="apply-toggle" class="accent-accent"> Apply
+    </label>
+    <label class="flex items-center gap-1 text-xs text-gray-300 cursor-pointer">
+      <input type="checkbox" id="autoplay-toggle" class="accent-accent"> Auto-play
+    </label>
     <div id="result-banner" class="hidden px-3 py-1 bg-accent rounded font-semibold text-sm text-white"></div>
   </div>
 </div>

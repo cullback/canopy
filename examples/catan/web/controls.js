@@ -1,11 +1,10 @@
-// Control bar: buttons, sliders, autoplay logic.
+// Control bar: buttons, apply/autoplay logic.
 
 class Controls {
   constructor(session) {
     this.session = session;
-    this.autoplayInterval = null;
-    this.autoplayDelay = 500;
     this.searching = false;
+    this.autoplay = false;
 
     this._bind();
   }
@@ -17,6 +16,34 @@ class Controls {
     runBtn.disabled = active;
     botBtn.disabled = active;
     runBtn.textContent = active ? 'Searching...' : 'Run Sims';
+  }
+
+  /// Called when RunSims completes (Snapshot received).
+  onSimsDone(snapshot) {
+    this.setSearching(false);
+    if (document.getElementById('apply-toggle').checked || this.autoplay) {
+      // Play the most-visited action from the completed search.
+      if (snapshot && snapshot.edges && snapshot.edges.length > 0) {
+        const best = snapshot.edges.reduce((a, b) => b.visits > a.visits ? b : a);
+        this.pendingAutoplay = this.autoplay;
+        this.session.send({ type: 'PlayAction', action: best.action });
+      }
+    }
+  }
+
+  /// Called when BotMove completes (BotAction received).
+  onBotDone() {
+    this.setSearching(false);
+  }
+
+  /// Called on every GameState update.
+  onStateUpdate(msg) {
+    if (this.pendingAutoplay && !msg.is_terminal) {
+      this.pendingAutoplay = false;
+      const count = parseInt(document.getElementById('sims-input').value);
+      this.setSearching(true);
+      this.session.send({ type: 'RunSims', count });
+    }
   }
 
   _bind() {
@@ -49,19 +76,7 @@ class Controls {
       this.session.send({ type: 'RunSims', count });
     });
 
-    // Speed slider
-    const speedSlider = document.getElementById('speed-slider');
-    const speedValue = document.getElementById('speed-value');
-    speedSlider.addEventListener('input', () => {
-      this.autoplayDelay = parseInt(speedSlider.value);
-      speedValue.textContent = `${this.autoplayDelay}ms`;
-      if (this.autoplayInterval) {
-        this.stopAutoplay();
-        this.startAutoplay();
-      }
-    });
-
-    // Autoplay toggle
+    // Auto-play toggle: continuous run sims → play → run sims → ...
     document.getElementById('autoplay-toggle').addEventListener('change', (e) => {
       if (e.target.checked) {
         this.startAutoplay();
@@ -87,25 +102,18 @@ class Controls {
   }
 
   startAutoplay() {
-    if (this.autoplayInterval) return;
-    const tick = () => {
-      const sims = parseInt(document.getElementById('sims-input').value);
-      this.setSearching(true);
-      this.session.send({ type: 'BotMove', simulations: sims });
-    };
-    tick();
-    this.autoplayInterval = setInterval(tick, this.autoplayDelay);
+    this.autoplay = true;
+    // Kick off the first search.
+    const count = parseInt(document.getElementById('sims-input').value);
+    this.setSearching(true);
+    this.session.send({ type: 'RunSims', count });
   }
 
   stopAutoplay() {
-    if (this.autoplayInterval) {
-      clearInterval(this.autoplayInterval);
-      this.autoplayInterval = null;
-    }
+    this.autoplay = false;
     document.getElementById('autoplay-toggle').checked = false;
   }
 
-  // Stop autoplay when game ends.
   onGameOver() {
     this.stopAutoplay();
   }

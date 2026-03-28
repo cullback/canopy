@@ -122,7 +122,7 @@ class Board {
     if (board.tiles[frame.robber]) {
       const tile = board.tiles[frame.robber];
       robberG.appendChild(this._el('circle', {
-        cx: tile.cx, cy: tile.cy, r: 8,
+        cx: tile.cx, cy: tile.cy - 18, r: 8,
         fill: '#111', stroke: '#e94560', 'stroke-width': 2
       }));
     }
@@ -232,7 +232,7 @@ class Board {
       fill: color, stroke: '#111', 'stroke-width': 1
     }));
 
-    // Number token
+    // Number token (shifted down so robber doesn't fully obscure it)
     if (number) {
       const isRed = number === 6 || number === 8;
       parent.appendChild(this._el('circle', {

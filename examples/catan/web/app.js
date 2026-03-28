@@ -114,11 +114,13 @@ session.on('GameState', (msg) => {
   } else {
     banner.classList.add('hidden');
   }
+
+  controls.onStateUpdate(msg);
 });
 
 session.on('Snapshot', (msg) => {
-  controls.setSearching(false);
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
+  controls.onSimsDone(msg.snapshot);
 });
 
 session.on('Subtree', (msg) => {
@@ -131,10 +133,10 @@ session.on('SearchProgress', (msg) => {
 });
 
 session.on('BotAction', (msg) => {
-  controls.setSearching(false);
   if (msg.snapshot) {
     mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || []);
   }
+  controls.onBotDone();
 });
 
 session.on('Error', (msg) => {
