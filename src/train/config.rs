@@ -76,6 +76,10 @@ pub struct TrainConfig {
     pub playout_cap_fast_sims: u32,
 
     // -- MCTS --
+    /// Enable SO-ISMCTS legal-action filtering at interior nodes. Required
+    /// for imperfect-information games where determinization can make stored
+    /// tree edges illegal.
+    pub filter_legal: bool,
     /// MCTS simulations per action during self-play (full-search budget).
     pub mcts_sims: u32,
     /// Gumbel-Top-k sampled actions at root. Clamped to the number of
@@ -131,6 +135,7 @@ impl Default for TrainConfig {
             playout_cap_fast_sims: 64,
 
             // MCTS
+            filter_legal: false,
             mcts_sims: 200,
             gumbel_m: 16,
             c_visit: 50.0,

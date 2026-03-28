@@ -410,10 +410,7 @@ fn apply_live_state(
         }
     }
 
-    if !poll.dev_cards.is_empty()
-        && let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c))
-        && state.players[lp].hidden_dev_cards > 0
-    {
+    if let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c)) {
         state::apply_dev_cards(
             state,
             lp,
@@ -421,7 +418,11 @@ fn apply_live_state(
             &poll.dev_cards_bought_this_turn,
             poll.played_dev_card_this_turn,
         );
-        changed = true;
+        // apply_dev_cards always syncs bought/played state; only flag changed
+        // if card identities were actually revealed.
+        if state.players[lp].hidden_dev_cards == 0 && !poll.dev_cards.is_empty() {
+            changed = true;
+        }
     }
 
     changed
@@ -704,12 +705,17 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
         Arc::new(RolloutEvaluator::default());
 
     // Create session manually with the initial timeline.
+    let mcts_config = canopy::mcts::Config {
+        filter_legal: true,
+        ..canopy::mcts::Config::default()
+    };
     let mut initial_session = canopy::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,
         "rollout",
         presenter.clone(),
         [true, true],
+        mcts_config,
     );
     initial_session.load_timeline(timeline_pairs);
     let session = Arc::new(tokio::sync::Mutex::new(initial_session));

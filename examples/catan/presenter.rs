@@ -62,20 +62,34 @@ fn fmt_gains(gains: &[u8; 5]) -> String {
 /// Returns `[[f32; 5]; 2]` — un-normalized expected counts per dev card type.
 /// For a player with no hidden cards, the row is all zeros (exact counts are
 /// already in `PlayerFrame.dev_cards`).
-fn expected_hidden_dev_cards(state: &GameState) -> [[f32; 5]; 2] {
+/// Hypergeometric expected dev card distribution for each player's hidden hand
+/// and for the bank deck.
+fn expected_hidden_dev_cards(state: &GameState) -> ([[f32; 5]; 2], [f32; 5]) {
     let pool = state.unknown_dev_pool();
     let pool_total: f32 = pool.iter().sum::<u8>() as f32;
 
-    let mut result = [[0.0f32; 5]; 2];
+    let mut players = [[0.0f32; 5]; 2];
+    let total_hidden: u8 =
+        state.players[Player::One].hidden_dev_cards + state.players[Player::Two].hidden_dev_cards;
+    let bank_cards = (state.dev_deck.total as f32) - (total_hidden as f32);
+
     for (i, &pid) in [Player::One, Player::Two].iter().enumerate() {
         let hidden = state.players[pid].hidden_dev_cards as f32;
         if hidden > 0.0 && pool_total > 0.0 {
             for t in 0..5 {
-                result[i][t] = pool[t] as f32 * hidden / pool_total;
+                players[i][t] = pool[t] as f32 * hidden / pool_total;
             }
         }
     }
-    result
+
+    let mut bank = [0.0f32; 5];
+    if bank_cards > 0.0 && pool_total > 0.0 {
+        for t in 0..5 {
+            bank[t] = pool[t] as f32 * bank_cards / pool_total;
+        }
+    }
+
+    (players, bank)
 }
 
 pub struct CatanPresenter {
@@ -105,7 +119,7 @@ impl GamePresenter<GameState> for CatanPresenter {
         let board = visualize::build_board(state);
         let frame = visualize::capture_frame(state, "", state.current_player as u8, None);
 
-        let expected_dev = expected_hidden_dev_cards(state);
+        let (expected_dev, expected_bank_dev) = expected_hidden_dev_cards(state);
 
         // Balanced dice info: normalized probabilities and deck state.
         let dice_info = match &state.dice {
@@ -133,6 +147,7 @@ impl GamePresenter<GameState> for CatanPresenter {
             "p1_vp": state.total_vps(Player::One),
             "p2_vp": state.total_vps(Player::Two),
             "expected_dev": expected_dev,
+            "expected_bank_dev": expected_bank_dev,
         });
         if let Some(dice) = dice_info {
             v["dice"] = dice;

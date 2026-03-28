@@ -48,9 +48,25 @@ impl<G: Game + 'static> GameSession<G> {
         presenter: Arc<dyn GamePresenter<G>>,
         human_players: [bool; 2],
     ) -> Self {
+        Self::with_config(
+            evaluator,
+            eval_name,
+            presenter,
+            human_players,
+            Config::default(),
+        )
+    }
+
+    pub fn with_config(
+        evaluator: Arc<dyn Evaluator<G> + Sync>,
+        eval_name: impl Into<String>,
+        presenter: Arc<dyn GamePresenter<G>>,
+        human_players: [bool; 2],
+        config: Config,
+    ) -> Self {
         let seed = fastrand::u64(..);
         let state = presenter.new_game(seed);
-        let search = Search::new(state, Config::default());
+        let search = Search::new(state, config);
 
         Self {
             search,
@@ -74,15 +90,16 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
-    /// Create a session with an explicit initial state.
+    /// Create a session with an explicit initial state and MCTS config.
     pub fn with_state(
         state: G,
         evaluator: Arc<dyn Evaluator<G> + Sync>,
         eval_name: impl Into<String>,
         presenter: Arc<dyn GamePresenter<G>>,
         human_players: [bool; 2],
+        config: Config,
     ) -> Self {
-        let search = Search::new(state, Config::default());
+        let search = Search::new(state, config);
 
         Self {
             search,

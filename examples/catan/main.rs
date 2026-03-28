@@ -47,6 +47,7 @@ fn main() {
             max_actions: 2000,
             epochs: 2,
             lr: 0.0002,
+            filter_legal: true,
             mcts_sims: 1200,
             train_batch_size: 1024,
             leaf_batch_size: 8,

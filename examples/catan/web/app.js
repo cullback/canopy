@@ -243,18 +243,35 @@ function updateBank(state) {
   const bankEl = document.getElementById('bank-dev');
   if (!bankEl) return;
   bankEl.innerHTML = '';
-  const pool = state.frame && state.frame.dev_pool;
-  if (!pool) return;
-  for (let d = 0; d < 5; d++) {
-    if (pool[d] > 0) {
-      const chip = document.createElement('span');
-      chip.className = 'dev-chip';
-      chip.textContent = `${pool[d]} ${DEV_SHORT[d]}`;
-      bankEl.appendChild(chip);
+
+  // Use hypergeometric estimate when available (colonist mode — bank is unknown).
+  const est = state.expected_bank_dev;
+  const hasEstimate = est && est.some(v => v > 0);
+
+  if (hasEstimate) {
+    for (let d = 0; d < 5; d++) {
+      if (est[d] >= 0.05) {
+        const chip = document.createElement('span');
+        chip.className = 'dev-chip dev-estimate';
+        chip.textContent = `~${est[d].toFixed(1)} ${DEV_SHORT[d]}`;
+        bankEl.appendChild(chip);
+      }
     }
-  }
-  if (pool.every(v => v === 0)) {
-    bankEl.textContent = 'Empty';
+  } else {
+    // Self-play: show exact pool counts.
+    const pool = state.frame && state.frame.dev_pool;
+    if (!pool) return;
+    for (let d = 0; d < 5; d++) {
+      if (pool[d] > 0) {
+        const chip = document.createElement('span');
+        chip.className = 'dev-chip';
+        chip.textContent = `${pool[d]} ${DEV_SHORT[d]}`;
+        bankEl.appendChild(chip);
+      }
+    }
+    if (pool.every(v => v === 0)) {
+      bankEl.textContent = 'Empty';
+    }
   }
 }
 

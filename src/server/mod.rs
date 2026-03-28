@@ -18,6 +18,7 @@ use tower_http::services::ServeDir;
 use crate::eval::Evaluator;
 use crate::game::Game;
 use crate::game_log::GameLog;
+use crate::mcts::Config;
 
 /// Send a progress snapshot every N simulations.
 const PROGRESS_INTERVAL: u32 = 10;
@@ -78,6 +79,7 @@ pub async fn serve_with_state<G: Game + 'static>(
         eval_name,
         presenter,
         human_players,
+        Config::default(),
     )));
 
     let app = Router::new()
@@ -114,6 +116,7 @@ pub async fn serve_with_timeline<G: Game + 'static>(
         "unknown",
         presenter,
         human_players,
+        Config::default(),
     );
     initial_session.load_timeline(timeline);
     let session = Arc::new(Mutex::new(initial_session));

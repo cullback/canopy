@@ -84,6 +84,11 @@ pub struct Config {
     /// stochastic or imperfect-information games; 0.0 for deterministic
     /// perfect-information games where exploration noise is unnecessary.
     pub gumbel_scale: f32,
+    /// When true, interior decision nodes filter tree edges against the
+    /// determinized state's legal actions (SO-ISMCTS). Required for games
+    /// with hidden information where redeterminization can make stored
+    /// edges illegal.
+    pub filter_legal: bool,
 }
 
 impl Default for Config {
@@ -95,6 +100,7 @@ impl Default for Config {
             c_scale: 1.0,
             leaf_batch_size: 1,
             gumbel_scale: 1.0,
+            filter_legal: false,
         }
     }
 }
@@ -203,6 +209,9 @@ struct GumbelState {
     q_min: f32,
     /// Max Q across tree (P1 perspective) for normalization.
     q_max: f32,
+    /// Root edge indices that are legal in the actual game state.
+    /// `None` when all edges are legal (fresh expansion or no filtering).
+    legal_edges: Option<Vec<usize>>,
 }
 
 /// Borrow the simulation path from a Phase (empty for root expansion).
@@ -264,6 +273,11 @@ impl<G: Game> Search<G> {
     /// Update the simulation budget (takes effect on the next search).
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
+    }
+
+    /// Enable or disable SO-ISMCTS legal-action filtering at interior nodes.
+    pub fn set_filter_legal(&mut self, enabled: bool) {
+        self.config.filter_legal = enabled;
     }
 
     /// Total visits on the current root (sum of edge visit counts), or 0 if
@@ -425,6 +439,22 @@ impl<G: Game> Search<G> {
                 _ => return self.run_vanilla_sims(rng),
             };
 
+            // When filter_legal is on, tree-reused root edges may include
+            // actions from a determinized simulation that are illegal in the
+            // actual state. Filter candidates to only legal edges.
+            let legal = if self.config.filter_legal {
+                self.bufs.legal.clear();
+                self.root_state.legal_actions(&mut self.bufs.legal);
+                let edges = self.tree.edges(new_root);
+                Some(
+                    (0..edges.len())
+                        .filter(|&i| self.bufs.legal.contains(&edges[i].action))
+                        .collect::<Vec<_>>(),
+                )
+            } else {
+                None
+            };
+
             self.gumbel = Some(init_gumbel(
                 &self.tree,
                 new_root,
@@ -432,6 +462,7 @@ impl<G: Game> Search<G> {
                 root_sign,
                 &self.config,
                 rng,
+                legal,
             ));
 
             self.run_simulations(rng)
@@ -471,7 +502,7 @@ impl<G: Game> Search<G> {
                     self.root = Some(root);
                     self.root_network_value = eval.wdl[0] - eval.wdl[2];
 
-                    // Initialize Gumbel state for root
+                    // Initialize Gumbel state for root (fresh expansion: all edges legal)
                     self.gumbel = Some(init_gumbel(
                         &self.tree,
                         root,
@@ -479,6 +510,7 @@ impl<G: Game> Search<G> {
                         sign,
                         &self.config,
                         rng,
+                        None,
                     ));
                     self.bufs.reclaim_actions(actions);
                 }
@@ -551,8 +583,9 @@ impl<G: Game> Search<G> {
                 rng,
                 &mut self.bufs,
                 Some(forced_edge),
-                |tree, node, sign| {
-                    gumbel_interior_select(tree, node, sign, config, q_bounds, &mut scratch)
+                config.filter_legal,
+                |tree, node, sign, legal| {
+                    gumbel_interior_select(tree, node, sign, config, q_bounds, &mut scratch, legal)
                 },
             );
             self.bufs.scratch = scratch;
@@ -594,8 +627,9 @@ impl<G: Game> Search<G> {
                 rng,
                 &mut self.bufs,
                 None,
-                |tree, node, sign| {
-                    gumbel_interior_select(tree, node, sign, config, q_bounds, &mut scratch)
+                config.filter_legal,
+                |tree, node, sign, legal| {
+                    gumbel_interior_select(tree, node, sign, config, q_bounds, &mut scratch, legal)
                 },
             ) {
                 SimResult::Complete => {
@@ -630,6 +664,7 @@ impl<G: Game> Search<G> {
 
 // ── Simulation ────────────────────────────────────────────────────────
 
+#[allow(clippy::too_many_arguments)]
 fn simulate<G: Game>(
     tree: &mut Tree,
     root: NodeId,
@@ -637,7 +672,8 @@ fn simulate<G: Game>(
     rng: &mut fastrand::Rng,
     bufs: &mut Bufs,
     forced_root_edge: Option<usize>,
-    mut select_decision: impl FnMut(&Tree, NodeId, f32) -> usize,
+    filter_legal: bool,
+    mut select_decision: impl FnMut(&Tree, NodeId, f32, &[usize]) -> usize,
 ) -> SimResult<G> {
     bufs.path.clear();
     let mut current = root;
@@ -648,10 +684,59 @@ fn simulate<G: Game>(
     loop {
         let edge_idx = match *tree.kind(current) {
             NodeKind::Terminal => break,
-            NodeKind::Chance => tree.sample_chance_edge(current, rng),
-            NodeKind::Decision(sign) => forced
-                .take()
-                .unwrap_or_else(|| select_decision(tree, current, sign)),
+            NodeKind::Chance => {
+                if filter_legal {
+                    // SO-ISMCTS: resample from the determinized state so the
+                    // outcome is consistent with the current information set.
+                    // If the outcome has no matching tree edge (pool composition
+                    // diverged from expansion time), abort this simulation.
+                    match state.sample_chance(rng) {
+                        Some(outcome) => {
+                            let edges = tree.edges(current);
+                            match edges.iter().position(|e| e.action == outcome) {
+                                Some(idx) => idx,
+                                None => break,
+                            }
+                        }
+                        None => break,
+                    }
+                } else {
+                    tree.sample_chance_edge(current, rng)
+                }
+            }
+            NodeKind::Decision(sign) => {
+                if let Some(f) = forced.take() {
+                    if filter_legal {
+                        let edges = tree.edges(current);
+                        bufs.legal.clear();
+                        state.legal_actions(&mut bufs.legal);
+                        if !bufs.legal.contains(&edges[f].action) {
+                            break;
+                        }
+                    }
+                    f
+                } else {
+                    let edges = tree.edges(current);
+                    if filter_legal {
+                        bufs.legal.clear();
+                        state.legal_actions(&mut bufs.legal);
+                        bufs.legal_edges.clear();
+                        for (i, edge) in edges.iter().enumerate() {
+                            if bufs.legal.contains(&edge.action) {
+                                bufs.legal_edges.push(i);
+                            }
+                        }
+                        if bufs.legal_edges.is_empty() {
+                            break;
+                        }
+                        select_decision(tree, current, sign, &bufs.legal_edges)
+                    } else {
+                        bufs.legal_edges.clear();
+                        bufs.legal_edges.extend(0..edges.len());
+                        select_decision(tree, current, sign, &bufs.legal_edges)
+                    }
+                }
+            }
         };
 
         let edges = tree.edges(current);
@@ -710,15 +795,17 @@ fn gumbel_interior_select(
     config: &Config,
     q_bounds: (f32, f32),
     scratch: &mut Vec<f32>,
+    legal_edges: &[usize],
 ) -> usize {
     let edges = tree.edges(node_id);
     let total_child_visits: u32 = edges.iter().map(|e| e.visits).sum();
     let max_visits = tree.max_edge_visits(node_id);
     let vmix_val = v_mix(tree, node_id);
 
-    // Build improved policy logits in scratch buffer, then softmax in-place
+    // Improved policy logits for legal edges only
     scratch.clear();
-    for edge in edges {
+    for &ei in legal_edges {
+        let edge = &edges[ei];
         let cq = completed_q(tree, edge, vmix_val);
         let q_norm = normalize_q(cq, q_bounds.0, q_bounds.1, sign);
         let s = sigma(q_norm, max_visits, config.c_visit, config.c_scale);
@@ -726,18 +813,18 @@ fn gumbel_interior_select(
     }
     softmax(scratch);
 
-    // Select argmax(π'(a) - N(a) / (1 + Σ N))
+    // argmax(π'(a) - N(a) / (1 + Σ N)) over legal edges
     let denom = 1.0 + total_child_visits as f32;
-    edges
+    legal_edges
         .iter()
         .enumerate()
-        .map(|(i, e)| {
-            let score = scratch[i] - e.visits as f32 / denom;
-            (i, score)
+        .map(|(scratch_idx, &edge_idx)| {
+            let score = scratch[scratch_idx] - edges[edge_idx].visits as f32 / denom;
+            (edge_idx, score)
         })
         .max_by(|a, b| a.1.total_cmp(&b.1))
         .map(|(i, _)| i)
-        .expect("decision node should have edges")
+        .expect("legal_edges should not be empty")
 }
 
 // ── Gumbel helpers ────────────────────────────────────────────────────
@@ -845,9 +932,9 @@ fn init_gumbel(
     root_sign: f32,
     config: &Config,
     rng: &mut fastrand::Rng,
+    legal_edges: Option<Vec<usize>>,
 ) -> GumbelState {
     let edges = tree.edges(root);
-    let num_edges = edges.len();
 
     let root_logits: Vec<f32> = edges.iter().map(|e| e.logit).collect();
     let scale = config.gumbel_scale;
@@ -856,19 +943,24 @@ fn init_gumbel(
         .map(|&l| scale * sample_gumbel(rng) + l)
         .collect();
 
+    // Build scored list: only include legal edges when filtering.
+    let mut scored: Vec<(usize, f32)> = if let Some(ref le) = legal_edges {
+        le.iter().map(|&i| (i, gumbel_scores[i])).collect()
+    } else {
+        gumbel_scores
+            .iter()
+            .enumerate()
+            .map(|(i, &s)| (i, s))
+            .collect()
+    };
+    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
+
     // Gumbel-Top-k: score = g + logit, take top m
     // At least 1 candidate is needed to select an action even with 0 simulations.
     let m = (config.num_sampled_actions as usize)
-        .min(num_edges)
+        .min(scored.len())
         .min(config.num_simulations as usize)
         .max(1);
-
-    let mut scored: Vec<(usize, f32)> = gumbel_scores
-        .iter()
-        .enumerate()
-        .map(|(i, &s)| (i, s))
-        .collect();
-    scored.sort_by(|a, b| b.1.total_cmp(&a.1));
     let candidates: Vec<usize> = scored.iter().take(m).map(|&(i, _)| i).collect();
 
     let schedule = Schedule::new(config.num_simulations as usize, candidates.len());
@@ -882,6 +974,7 @@ fn init_gumbel(
         sim_index: 0,
         q_min: root_value,
         q_max: root_value,
+        legal_edges,
     }
 }
 
@@ -1041,16 +1134,20 @@ fn extract_gumbel_result<G: Game>(
         .expect("candidates should not be empty");
     let selected_action = ctx.edges[selected_edge].action;
 
-    // Improved policy (training target): softmax(logit + σ(completedQ)) over ALL edges.
+    // Improved policy (training target): softmax(logit + σ(completedQ)) over legal edges.
     // Unvisited edges use v_mix as their completedQ estimate (see completed_q).
-    // This is the paper's approach but can be noisy when few edges are visited,
-    // since v_mix interpolates the value network prior with a sparse Q average.
+    // When legal_edges is set (SO-ISMCTS tree reuse), illegal edges get -inf
+    // so they receive zero probability after softmax.
     let mut improved_logits = Vec::with_capacity(ctx.edges.len());
     for (i, edge) in ctx.edges.iter().enumerate() {
-        let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
-        let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
-        let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
-        improved_logits.push(gs.root_logits[i] + s);
+        if gs.legal_edges.as_ref().is_some_and(|le| !le.contains(&i)) {
+            improved_logits.push(f32::NEG_INFINITY);
+        } else {
+            let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
+            let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
+            let s = sigma(q_norm, ctx.max_visits, config.c_visit, config.c_scale);
+            improved_logits.push(gs.root_logits[i] + s);
+        }
     }
     softmax(&mut improved_logits);
 
@@ -1059,11 +1156,12 @@ fn extract_gumbel_result<G: Game>(
         policy[edge.action] = prob;
     }
 
-    // Network's top-1 action (highest raw prior logit)
+    // Network's top-1 action (highest raw prior logit, filtered to legal edges)
     let prior_top1_action = gs
         .root_logits
         .iter()
         .enumerate()
+        .filter(|(i, _)| gs.legal_edges.as_ref().is_none_or(|le| le.contains(i)))
         .max_by(|a, b| a.1.total_cmp(b.1))
         .map(|(i, _)| ctx.edges[i].action)
         .unwrap_or(selected_action);

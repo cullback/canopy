@@ -197,6 +197,7 @@ pub fn run_training<G>(
         c_visit: config.c_visit,
         c_scale: config.c_scale,
         leaf_batch_size: config.leaf_batch_size,
+        filter_legal: config.filter_legal,
         ..Default::default()
     };
 

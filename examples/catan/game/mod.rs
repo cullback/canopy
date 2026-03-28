@@ -187,6 +187,21 @@ impl Game for GameState {
     }
 
     fn determinize(&mut self, rng: &mut fastrand::Rng) {
+        // Hide the opponent's dev cards: move their known cards into the
+        // hidden pool so the searching player (current_player) cannot see
+        // them. In colonist mode opponent cards are already hidden, so
+        // this adds 0 and is a no-op.
+        let opponent = self.current_player.opponent();
+        for kind in DevCardKind::ALL {
+            let held = self.players[opponent].dev_cards[kind];
+            self.players[opponent].hidden_dev_cards += held;
+            self.players[opponent].dev_cards[kind] = 0;
+
+            let bought = self.players[opponent].dev_cards_bought_this_turn[kind];
+            self.players[opponent].hidden_dev_cards_bought_this_turn += bought;
+            self.players[opponent].dev_cards_bought_this_turn[kind] = 0;
+        }
+
         for pid in [Player::One, Player::Two] {
             let n = self.players[pid].hidden_dev_cards;
             let mut bought = self.players[pid].hidden_dev_cards_bought_this_turn;
@@ -200,7 +215,8 @@ impl Game for GameState {
                 for (i, &c) in pool.iter().enumerate() {
                     if pick < c {
                         let kind = DevCardKind::ALL[i];
-                        self.dev_deck.total -= 1;
+                        // Don't decrement dev_deck.total — it was already
+                        // decremented when the hidden card was bought.
                         self.players[pid].dev_cards[kind] += 1;
                         if bought > 0 {
                             self.players[pid].dev_cards_bought_this_turn[kind] += 1;
@@ -568,26 +584,36 @@ pub fn apply_hidden_dev_card_buy(state: &mut GameState) {
 }
 
 fn apply_play_knight(state: &mut GameState) {
-    state.current_mut().dev_cards[DevCardKind::Knight] -= 1;
-    state.current_mut().has_played_dev_card_this_turn = true;
-    state.current_mut().dev_cards_played[DevCardKind::Knight] += 1;
-    state.current_mut().knights_played += 1;
+    let p = state.current_mut();
+    p.dev_cards[DevCardKind::Knight] -= 1;
+    p.has_played_dev_card_this_turn = true;
+    p.dev_cards_played[DevCardKind::Knight] += 1;
+    p.knights_played += 1;
 
     update_largest_army(state);
     state.phase = Phase::MoveRobber;
 }
 
 fn apply_play_road_building(state: &mut GameState) {
-    state.current_mut().dev_cards[DevCardKind::RoadBuilding] -= 1;
-    state.current_mut().has_played_dev_card_this_turn = true;
-    state.current_mut().dev_cards_played[DevCardKind::RoadBuilding] += 1;
+    let p = state.current_mut();
+    assert!(
+        p.dev_cards[DevCardKind::RoadBuilding] > 0,
+        "play_road_building with 0 RB cards: dev_cards={:?} bought={:?} played={:?}",
+        p.dev_cards.0,
+        p.dev_cards_bought_this_turn.0,
+        p.dev_cards_played.0,
+    );
+    p.dev_cards[DevCardKind::RoadBuilding] -= 1;
+    p.has_played_dev_card_this_turn = true;
+    p.dev_cards_played[DevCardKind::RoadBuilding] += 1;
     state.phase = Phase::RoadBuilding { roads_left: 2 };
 }
 
 fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
-    state.current_mut().dev_cards[DevCardKind::YearOfPlenty] -= 1;
-    state.current_mut().has_played_dev_card_this_turn = true;
-    state.current_mut().dev_cards_played[DevCardKind::YearOfPlenty] += 1;
+    let p = state.current_mut();
+    p.dev_cards[DevCardKind::YearOfPlenty] -= 1;
+    p.has_played_dev_card_this_turn = true;
+    p.dev_cards_played[DevCardKind::YearOfPlenty] += 1;
 
     if state.bank[r1] > 0 {
         state.bank[r1] -= 1;
@@ -604,9 +630,10 @@ fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
 }
 
 fn apply_monopoly(state: &mut GameState, resource: Resource) {
-    state.current_mut().dev_cards[DevCardKind::Monopoly] -= 1;
-    state.current_mut().has_played_dev_card_this_turn = true;
-    state.current_mut().dev_cards_played[DevCardKind::Monopoly] += 1;
+    let p = state.current_mut();
+    p.dev_cards[DevCardKind::Monopoly] -= 1;
+    p.has_played_dev_card_this_turn = true;
+    p.dev_cards_played[DevCardKind::Monopoly] += 1;
 
     let current = state.current_player;
     let opponent = current.opponent();

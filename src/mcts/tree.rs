@@ -97,6 +97,10 @@ pub(super) struct Bufs {
     /// Reusable buffer for softmax / improved-policy computation during
     /// interior selection (avoids per-node allocation).
     pub scratch: Vec<f32>,
+    /// Scratch buffer for `Game::legal_actions()` output during SO-ISMCTS filtering.
+    pub legal: Vec<usize>,
+    /// Edge indices that survive the legal-action intersection.
+    pub legal_edges: Vec<usize>,
     /// Recycled path Vecs to avoid per-leaf allocation.
     spare_paths: Vec<Vec<(NodeId, usize)>>,
     /// Recycled actions Vecs to avoid per-leaf allocation.

@@ -47,8 +47,9 @@ pub struct PlayerState {
     pub has_played_dev_card_this_turn: bool,
     /// Cumulative count of each dev card type played (for information tracking).
     pub dev_cards_played: DevCardArray,
-    /// Dev cards bought but not yet revealed (for colonist/competition).
-    /// During self-play this is always 0.
+    /// Dev cards bought but not yet revealed. In colonist mode, set from
+    /// the opponent's purchases. During self-play search, `determinize()`
+    /// temporarily moves the opponent's known cards here before resampling.
     pub hidden_dev_cards: u8,
     /// How many of `hidden_dev_cards` were bought this turn (cannot be played).
     /// When card identities are revealed, this transfers to `dev_cards_bought_this_turn`.
@@ -235,17 +236,27 @@ impl GameState {
         self.public_vps(pid) + self.players[pid].dev_cards[DevCardKind::VictoryPoint]
     }
 
-    /// Cards not accounted for by any player's hand or played pile.
+    /// Cards not accounted for by any player's known hand or played pile.
     ///
-    /// In self-play this equals the exact bank contents. In competition it
-    /// includes the bank plus opponent hidden cards — correct for both
-    /// hypergeometric estimation and marginal sampling.
+    /// Includes the bank plus any hidden cards. During self-play search,
+    /// `determinize()` hides the opponent's cards first, so the pool
+    /// reflects the searching player's uncertainty.
     pub fn unknown_dev_pool(&self) -> [u8; 5] {
         let mut pool = ORIGINAL_DEV_DECK;
         for pid in [Player::One, Player::Two] {
             for t in 0..5 {
-                pool[t] -= self.players[pid].dev_cards.0[t];
-                pool[t] -= self.players[pid].dev_cards_played.0[t];
+                let cards = self.players[pid].dev_cards.0[t] as u16;
+                let played = self.players[pid].dev_cards_played.0[t] as u16;
+                let sub = cards + played;
+                assert!(
+                    (pool[t] as u16) >= sub,
+                    "dev pool underflow: type={t} pool={} cards={cards} played={played} \
+                     pid={pid:?} all_cards={:?} all_played={:?}",
+                    pool[t],
+                    self.players[pid].dev_cards.0,
+                    self.players[pid].dev_cards_played.0,
+                );
+                pool[t] -= sub as u8;
             }
         }
         pool

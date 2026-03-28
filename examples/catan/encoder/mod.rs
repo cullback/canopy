@@ -80,7 +80,17 @@ pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
         Phase::MoveRobber => (4, 1.0),
         Phase::Main => (5, 1.0),
         Phase::RoadBuilding { .. } => (6, 1.0),
-        Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => unreachable!(),
+        Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => {
+            panic!(
+                "encoder saw chance phase {:?}: dev_deck={}, pool={:?}, hidden=[{},{}], cur={:?}",
+                state.phase,
+                state.dev_deck.total,
+                state.unknown_dev_pool(),
+                state.players[canopy::player::Player::One].hidden_dev_cards,
+                state.players[canopy::player::Player::Two].hidden_dev_cards,
+                state.current_player,
+            );
+        }
         Phase::GameOver(_) => unreachable!(),
     };
     for i in 0..7 {

@@ -214,6 +214,11 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
         match event {
             GameEvent::Roll { player, d1, d2 } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
+                    // Clear per-turn state for the previous player (turn change).
+                    let prev = pid.opponent();
+                    state.players[prev].dev_cards_bought_this_turn = Default::default();
+                    state.players[prev].hidden_dev_cards_bought_this_turn = 0;
+                    state.players[prev].has_played_dev_card_this_turn = false;
                     if let Dice::Balanced(ref mut b) = state.dice {
                         b.draw(d1 + d2, pid);
                     }
