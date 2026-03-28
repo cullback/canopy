@@ -189,6 +189,7 @@ impl Game for GameState {
     fn determinize(&mut self, rng: &mut fastrand::Rng) {
         for pid in [Player::One, Player::Two] {
             let n = self.players[pid].hidden_dev_cards;
+            let mut bought = self.players[pid].hidden_dev_cards_bought_this_turn;
             for _ in 0..n {
                 let pool = self.unknown_dev_pool();
                 let total: u8 = pool.iter().sum();
@@ -201,12 +202,17 @@ impl Game for GameState {
                         let kind = DevCardKind::ALL[i];
                         self.dev_deck.total -= 1;
                         self.players[pid].dev_cards[kind] += 1;
+                        if bought > 0 {
+                            self.players[pid].dev_cards_bought_this_turn[kind] += 1;
+                            bought -= 1;
+                        }
                         break;
                     }
                     pick -= c;
                 }
             }
             self.players[pid].hidden_dev_cards = 0;
+            self.players[pid].hidden_dev_cards_bought_this_turn = 0;
         }
     }
 }
@@ -455,6 +461,7 @@ fn apply_end_turn(state: &mut GameState) {
     for i in 0..5 {
         player.dev_cards_bought_this_turn.0[i] = 0;
     }
+    player.hidden_dev_cards_bought_this_turn = 0;
     player.has_played_dev_card_this_turn = false;
 
     state.current_player = state.current_player.opponent();
@@ -556,6 +563,7 @@ pub fn apply_hidden_dev_card_buy(state: &mut GameState) {
     state.current_mut().hand.sub(DEV_CARD_COST);
     state.bank.add(DEV_CARD_COST);
     state.current_mut().hidden_dev_cards += 1;
+    state.current_mut().hidden_dev_cards_bought_this_turn += 1;
     state.dev_deck.total -= 1;
 }
 

@@ -249,6 +249,7 @@ fn replay_log(state: &mut GameState, events: &[GameEvent], color_map: &[(u8, Pla
                     state.players[pid].hand.sub(DEV_CARD_COST);
                     state.bank.add(DEV_CARD_COST);
                     state.players[pid].hidden_dev_cards += 1;
+                    state.players[pid].hidden_dev_cards_bought_this_turn += 1;
                     state.dev_deck.total -= 1;
                 }
             }
@@ -1164,23 +1165,30 @@ pub fn process_new_events(
     timeline
 }
 
-/// Apply extracted dev card identities to a game state.
+/// Apply extracted dev card identities and bought-this-turn info to a game state.
 ///
 /// Converts `hidden_dev_cards` into concrete `dev_cards` entries.
-pub fn apply_dev_cards(state: &mut GameState, player: Player, cards: &[DevCardKind]) {
+/// `bought_this_turn` is the authoritative list from colonist's React state.
+pub fn apply_dev_cards(
+    state: &mut GameState,
+    player: Player,
+    cards: &[DevCardKind],
+    bought_this_turn: &[DevCardKind],
+    played_this_turn: bool,
+) {
     let ps = &mut state.players[player];
-    let concrete_count = cards.len() as u8;
-    // Only apply if we have hidden cards to resolve.
-    if ps.hidden_dev_cards == 0 {
-        return;
-    }
     // Move cards from hidden to concrete.
-    for &kind in cards {
-        ps.dev_cards[kind] += 1;
-        ps.hidden_dev_cards = ps.hidden_dev_cards.saturating_sub(1);
+    if ps.hidden_dev_cards > 0 {
+        for &kind in cards {
+            ps.dev_cards[kind] += 1;
+            ps.hidden_dev_cards = ps.hidden_dev_cards.saturating_sub(1);
+        }
+        ps.hidden_dev_cards_bought_this_turn = 0;
     }
-    eprintln!(
-        "applied {} dev card identities for {:?} ({} remain hidden)",
-        concrete_count, player, ps.hidden_dev_cards
-    );
+    // Always sync bought/played state from colonist's authoritative data.
+    ps.dev_cards_bought_this_turn = Default::default();
+    for &kind in bought_this_turn {
+        ps.dev_cards_bought_this_turn[kind] += 1;
+    }
+    ps.has_played_dev_card_this_turn = played_this_turn;
 }

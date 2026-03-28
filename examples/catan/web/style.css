@@ -45,6 +45,10 @@
   background: #4a3060;
   color: #dcc;
 }
+.dev-chip.bought-this-turn {
+  background: #3a2848;
+  color: #aa99aa;
+}
 .dev-chip.hidden-dev {
   background: #3a3a3a;
   color: #999;

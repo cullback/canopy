@@ -50,6 +50,9 @@ pub struct PlayerState {
     /// Dev cards bought but not yet revealed (for colonist/competition).
     /// During self-play this is always 0.
     pub hidden_dev_cards: u8,
+    /// How many of `hidden_dev_cards` were bought this turn (cannot be played).
+    /// When card identities are revealed, this transfers to `dev_cards_bought_this_turn`.
+    pub hidden_dev_cards_bought_this_turn: u8,
     /// VP from buildings only: +1 per settlement, +1 more per city upgrade.
     /// Does **not** include longest road, largest army, or VP dev cards.
     /// For total VP, combine with `dev_cards[VictoryPoint]` and the
@@ -75,6 +78,7 @@ impl Default for PlayerState {
             has_played_dev_card_this_turn: false,
             dev_cards_played: DevCardArray::default(),
             hidden_dev_cards: 0,
+            hidden_dev_cards_bought_this_turn: 0,
             building_vps: 0,
             trade_ratios: [4; 5],
         }

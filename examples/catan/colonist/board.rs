@@ -328,14 +328,13 @@ pub const EXTRACT_JS: &str = r#"(() => {
     return JSON.stringify({ tiles, ports, corners, edges, robber });
 })()"#;
 
-/// JS snippet to extract the local player's dev card hand from the React
-/// component tree. Returns a JSON array of colonist cardEnum values
-/// (11=Knight, 12=VictoryPoint, 13=Monopoly, 14=RoadBuilding, 15=YearOfPlenty).
+/// JS snippet to extract the local player's dev card state from the React
+/// component tree.
 ///
-/// The hand is in a `cardState` prop (map of `{cardEnum: count}`) on a
-/// component rendered for the local player's card tray.
+/// Returns JSON: `{cards: [11,...], bought_this_turn: [14,...], played_this_turn: bool}`.
+///
+/// Card enums: 11=Knight, 12=VictoryPoint, 13=Monopoly, 14=RoadBuilding, 15=YearOfPlenty.
 pub const EXTRACT_CARDS_JS: &str = r#"(() => {
-    // Try live hooks first: mechanicDevelopmentCardsState has accurate card data.
     let localColor = null;
     try {
         let me = JSON.parse(localStorage.getItem('userState'))?.username;
@@ -362,6 +361,10 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
     } catch {}
 
     // Walk hooks for live dev card state.
+    // Fields (discovered via CDP dump of mechanicDevelopmentCardsState):
+    //   me.developmentCards.cards        — array of card IDs held (11-15)
+    //   me.developmentCardsBoughtThisTurn — array of card IDs bought this turn (local player only)
+    //   me.developmentCardsUsed          — array of card IDs played this turn
     if (localColor !== null) {
         let seen2 = new Set();
         for (let el of document.querySelectorAll('*')) {
@@ -377,9 +380,16 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
                     if (v && v.mechanicDevelopmentCardsState) {
                         let ps = v.mechanicDevelopmentCardsState.players;
                         let me = ps && ps[localColor];
-                        if (me && me.developmentCards && me.developmentCards.cards) {
-                            let cards = me.developmentCards.cards.filter(c => c >= 11 && c <= 15);
-                            if (cards.length > 0) return JSON.stringify(cards);
+                        if (me) {
+                            let dc = me.developmentCards || {};
+                            let cards = (dc.cards || []).filter(c => c >= 11 && c <= 15);
+                            let bought = (me.developmentCardsBoughtThisTurn || []).filter(c => c >= 11 && c <= 15);
+                            let used = (me.developmentCardsUsed || []).filter(c => c >= 11 && c <= 15);
+                            return JSON.stringify({
+                                cards,
+                                bought_this_turn: bought,
+                                played_this_turn: used.length > 0,
+                            });
                         }
                     }
                     ms = ms.next;
@@ -389,7 +399,7 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
         }
     }
 
-    // Fallback: props cardState (may be stale).
+    // Fallback: props cardState (may be stale — no bought/played info).
     let seen3 = new Set();
     for (let el of document.querySelectorAll('*')) {
         let fk = Object.keys(el).find(k => k.startsWith('__reactFiber'));
@@ -407,12 +417,12 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
                         for (let i = 0; i < count; i++) cards.push(e);
                     }
                 }
-                if (cards.length > 0) return JSON.stringify(cards);
+                if (cards.length > 0) return JSON.stringify({cards, bought_this_turn: [], played_this_turn: false});
             }
             node = node.return;
         }
     }
-    return '[]';
+    return '{}';
 })()"#;
 
 /// JS snippet to extract live game metadata from the React component tree.

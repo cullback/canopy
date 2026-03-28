@@ -201,6 +201,10 @@ struct ColonistData {
     events: Vec<log::GameEvent>,
     /// Dev card identities extracted from the React state (may be empty).
     dev_cards: Vec<DevCardKind>,
+    /// Dev cards bought this turn (cannot be played yet).
+    dev_cards_bought_this_turn: Vec<DevCardKind>,
+    /// Whether the local player has played a dev card this turn.
+    played_dev_card_this_turn: bool,
     /// Player names keyed by colonist color.
     player_names: Vec<(u8, String)>,
     /// Local player's colonist color (the browser session owner).
@@ -234,14 +238,15 @@ async fn extract_game_data(port: u16) -> ColonistData {
 
     // Try extracting dev card hand (best-effort).
     let cards_json = evaluate(&mut ws, board::EXTRACT_CARDS_JS).await;
-    let cards_str = cards_json.as_str().unwrap_or("[]");
-    let card_enums: Vec<u64> = serde_json::from_str(cards_str).unwrap_or_default();
-    let dev_cards: Vec<DevCardKind> = card_enums
-        .iter()
-        .filter_map(|&c| log::card_to_dev(c))
-        .collect();
-    if !dev_cards.is_empty() {
-        eprintln!("extracted {} dev cards from React state", dev_cards.len());
+    let cards_str = cards_json.as_str().unwrap_or("{}");
+    let dcs = parse_dev_card_state(cards_str);
+    if !dcs.cards.is_empty() {
+        eprintln!(
+            "extracted {} dev cards from React state (bought this turn: {}, played: {})",
+            dcs.cards.len(),
+            dcs.bought_this_turn.len(),
+            dcs.played_this_turn
+        );
     }
 
     // Extract player names, local player identity, current turn, and robber.
@@ -277,11 +282,55 @@ async fn extract_game_data(port: u16) -> ColonistData {
     ColonistData {
         board,
         events,
-        dev_cards,
+        dev_cards: dcs.cards,
+        dev_cards_bought_this_turn: dcs.bought_this_turn,
+        played_dev_card_this_turn: dcs.played_this_turn,
         player_names,
         local_color,
         current_turn_color,
         dice_thrown,
+    }
+}
+
+/// Parsed dev card state from the React extraction.
+struct DevCardState {
+    cards: Vec<DevCardKind>,
+    bought_this_turn: Vec<DevCardKind>,
+    played_this_turn: bool,
+}
+
+/// Parse the JSON result from EXTRACT_CARDS_JS.
+fn parse_dev_card_state(json_str: &str) -> DevCardState {
+    let obj: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
+
+    // Object format: {cards: [11,14,...], bought_this_turn: [14,...], played_this_turn: bool}
+    let cards = obj
+        .get("cards")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().and_then(log::card_to_dev))
+                .collect()
+        })
+        .unwrap_or_default();
+    let bought_this_turn = obj
+        .get("bought_this_turn")
+        .and_then(|v| v.as_array())
+        .map(|arr| {
+            arr.iter()
+                .filter_map(|v| v.as_u64().and_then(log::card_to_dev))
+                .collect()
+        })
+        .unwrap_or_default();
+    let played_this_turn = obj
+        .get("played_this_turn")
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+
+    DevCardState {
+        cards,
+        bought_this_turn,
+        played_this_turn,
     }
 }
 
@@ -365,7 +414,13 @@ fn apply_live_state(
         && let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c))
         && state.players[lp].hidden_dev_cards > 0
     {
-        state::apply_dev_cards(state, lp, &poll.dev_cards);
+        state::apply_dev_cards(
+            state,
+            lp,
+            &poll.dev_cards,
+            &poll.dev_cards_bought_this_turn,
+            poll.played_dev_card_this_turn,
+        );
         changed = true;
     }
 
@@ -376,6 +431,8 @@ fn apply_live_state(
 struct PollData {
     events: Vec<log::GameEvent>,
     dev_cards: Vec<DevCardKind>,
+    dev_cards_bought_this_turn: Vec<DevCardKind>,
+    played_dev_card_this_turn: bool,
     current_turn_color: Option<u8>,
     dice_thrown: Option<bool>,
     turn_state: Option<u8>,
@@ -398,12 +455,8 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
 
     // Dev cards
     let cards_json = try_evaluate(&mut ws, board::EXTRACT_CARDS_JS).await?;
-    let cards_str = cards_json.as_str().unwrap_or("[]");
-    let card_enums: Vec<u64> = serde_json::from_str(cards_str).unwrap_or_default();
-    let dev_cards: Vec<DevCardKind> = card_enums
-        .iter()
-        .filter_map(|&c| log::card_to_dev(c))
-        .collect();
+    let cards_str = cards_json.as_str().unwrap_or("{}");
+    let dcs = parse_dev_card_state(cards_str);
 
     // Players, current turn, and robber (single CDP call)
     let live_json = try_evaluate(&mut ws, board::EXTRACT_LIVE_JS).await?;
@@ -427,7 +480,9 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
 
     Ok(PollData {
         events,
-        dev_cards,
+        dev_cards: dcs.cards,
+        dev_cards_bought_this_turn: dcs.bought_this_turn,
+        played_dev_card_this_turn: dcs.played_this_turn,
         current_turn_color,
         dice_thrown,
         turn_state,
@@ -596,7 +651,13 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     if !data.dev_cards.is_empty() {
         if let Some(last) = timeline.last_mut() {
             let local_player = local_player(data.local_color, &color_map);
-            state::apply_dev_cards(&mut last.state, local_player, &data.dev_cards);
+            state::apply_dev_cards(
+                &mut last.state,
+                local_player,
+                &data.dev_cards,
+                &data.dev_cards_bought_this_turn,
+                data.played_dev_card_this_turn,
+            );
         }
     }
 

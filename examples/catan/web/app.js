@@ -189,9 +189,20 @@ function updatePlayerPanel(idx, state) {
   for (let d = 0; d < 5; d++) {
     if (pf.dev_cards[d] > 0) {
       const chip = document.createElement('span');
-      chip.className = 'dev-chip';
-      chip.textContent = `${pf.dev_cards[d]} ${DEV_CARD_NAMES[d]}`;
-      devEl.appendChild(chip);
+      const bought = pf.dev_cards_bought_this_turn ? pf.dev_cards_bought_this_turn[d] : 0;
+      const playable = pf.dev_cards[d] - bought;
+      if (playable > 0) {
+        chip.className = 'dev-chip';
+        chip.textContent = `${playable} ${DEV_CARD_NAMES[d]}`;
+        devEl.appendChild(chip);
+      }
+      if (bought > 0) {
+        const bchip = document.createElement('span');
+        bchip.className = 'dev-chip bought-this-turn';
+        bchip.textContent = `${bought} ${DEV_CARD_NAMES[d]}`;
+        bchip.title = 'Bought this turn — cannot play yet';
+        devEl.appendChild(bchip);
+      }
     }
   }
   if (pf.hidden_dev_cards > 0) {
