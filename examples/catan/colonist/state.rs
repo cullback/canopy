@@ -17,7 +17,7 @@ use canopy::player::Player;
 use crate::game::board::{EdgeId, NodeId, TileId};
 use crate::game::dev_card::{DevCardDeck, DevCardKind};
 use crate::game::dice::{BalancedDice, Dice};
-use crate::game::resource::ResourceArray;
+use crate::game::resource::{Resource, ResourceArray};
 use crate::game::state::{GameState, Phase};
 use crate::game::topology::Topology;
 
@@ -159,8 +159,35 @@ pub fn player_of_color(color_map: &[(u8, Player)], color: u8) -> Option<Player> 
         .map(|&(_, p)| p)
 }
 
+/// Ensure a dev card is in the player's concrete `dev_cards` array so the
+/// engine can decrement it. Moves one card from `hidden_dev_cards` if needed.
+fn reveal_dev_card(state: &mut GameState, pid: Player, kind: DevCardKind) {
+    if state.players[pid].dev_cards[kind] == 0 && state.players[pid].hidden_dev_cards > 0 {
+        state.players[pid].hidden_dev_cards -= 1;
+        state.players[pid].dev_cards[kind] += 1;
+    }
+}
+
+/// Decode up to two resources from a `ResourceArray` (for Year of Plenty).
+fn decode_two_resources(resources: &ResourceArray) -> (Option<Resource>, Option<Resource>) {
+    use crate::game::resource::ALL_RESOURCES;
+    let mut result = [None; 2];
+    let mut idx = 0;
+    for &res in &ALL_RESOURCES {
+        for _ in 0..resources[res] {
+            if idx < 2 {
+                result[idx] = Some(res);
+                idx += 1;
+            }
+        }
+    }
+    (result[0], result[1])
+}
+
 /// Record a dev card being played: decrement hidden count, increment played count,
 /// and update largest army when a knight is played.
+///
+/// Used by `replay_log` (late-join path) which doesn't route through the engine.
 fn play_dev_card(state: &mut GameState, pid: Player, kind: DevCardKind) {
     state.players[pid].hidden_dev_cards = state.players[pid].hidden_dev_cards.saturating_sub(1);
     state.players[pid].dev_cards_played[kind] += 1;
@@ -711,11 +738,9 @@ fn build_full_timeline(
         state.setup_count
     );
 
-    // Phase 2: Post-setup events via direct state mutation.
-    // Override phase to Main so each snapshot is MCTS-ready.
-    state.phase = Phase::Main;
-    state.pre_roll = false;
-
+    // Phase 2: Post-setup events routed through the engine action system.
+    // State is in PreRoll after setup — the first Roll event transitions
+    // through ROLL → resolve, so no manual phase override needed.
     process_post_setup(
         &mut state,
         &events[event_idx..],
@@ -731,12 +756,19 @@ fn build_full_timeline(
     timeline
 }
 
-/// Process post-setup log events, mutating state and appending timeline entries
-/// at each significant event.
+/// Process post-setup log events, routing through the engine's action system
+/// where possible and appending timeline entries at each significant event.
 ///
-/// "Significant" events (rolls, builds, buys, trades, dev card plays) produce
-/// entries. Silent events (resource gains, steals, monopoly results) mutate
-/// state but are absorbed into the preceding significant event's snapshot.
+/// Actions like builds, dev card plays, discards, and bank trades flow through
+/// `apply_with_chance` so the engine handles costs, phase transitions, road
+/// networks, and longest road/army. Rolls use the engine for turn switching
+/// (END_TURN) and the PreRoll→Roll transition, but resolve dice manually to
+/// preserve exact resource tracking from GotResources events.
+///
+/// Exceptions that stay as direct mutation:
+///   - `PlayerTrade` (no action ID in the engine)
+///   - `BuyDevCard` (uses `apply_hidden_dev_card_buy` — card identity unknown)
+///   - `Stole` fallback when engine didn't enter StealResolve
 fn process_post_setup(
     state: &mut GameState,
     events: &[GameEvent],
@@ -747,11 +779,18 @@ fn process_post_setup(
     timeline: &mut Vec<TimelineEntry>,
     mapper: &CoordMapper,
 ) {
-    use crate::game::resource::{CITY_COST, DEV_CARD_COST, ROAD_COST, SETTLEMENT_COST};
+    use crate::game::action::{self, END_TURN, PLAY_KNIGHT, PLAY_ROAD_BUILDING, ROLL};
+    use crate::game::resource::ALL_RESOURCES;
 
     let mut pending_label: Option<String> = None;
     let mut roll_gains: [ResourceArray; 2] = [ResourceArray::default(); 2];
-    let mut turn = 0u16;
+
+    // Best-effort robber tile from board snapshot (correct for the last
+    // MoveRobber; may be approximate for earlier ones — same as old code).
+    let robber_tile = {
+        let buildings = board::extract_buildings(board, mapper);
+        buildings.robber_tile_index.map(TileId)
+    };
 
     for event in events {
         let is_entry = matches!(
@@ -770,36 +809,41 @@ fn process_post_setup(
         );
 
         // Flush pending entry before the next entry-producing event.
-        if is_entry {
-            if let Some(mut label) = pending_label.take() {
-                let p1 = format_resources(roll_gains[0]);
-                let p2 = format_resources(roll_gains[1]);
-                if !p1.is_empty() {
-                    label.push_str(&format!("\n  P1: {p1}"));
-                }
-                if !p2.is_empty() {
-                    label.push_str(&format!("\n  P2: {p2}"));
-                }
-                roll_gains = [ResourceArray::default(); 2];
-                timeline.push(TimelineEntry {
-                    label,
-                    state: state.clone(),
-                });
+        if is_entry && let Some(mut label) = pending_label.take() {
+            let p1 = format_resources(roll_gains[0]);
+            let p2 = format_resources(roll_gains[1]);
+            if !p1.is_empty() {
+                label.push_str(&format!("\n  P1: {p1}"));
             }
+            if !p2.is_empty() {
+                label.push_str(&format!("\n  P2: {p2}"));
+            }
+            roll_gains = [ResourceArray::default(); 2];
+            timeline.push(TimelineEntry {
+                label,
+                state: state.clone(),
+            });
         }
 
         match event {
             // --- Entry-producing events ---
             GameEvent::Roll { player, d1, d2 } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    if let Dice::Balanced(ref mut b) = state.dice {
-                        b.draw(d1 + d2, pid);
+                    // Use the engine for turn switching and PreRoll→Roll.
+                    if state.phase != Phase::Roll {
+                        if state.current_player != pid {
+                            state.apply_action(END_TURN as usize);
+                        }
+                        state.apply_action(ROLL as usize);
                     }
-                    state.current_player = pid;
-                    turn += 1;
-                    state.turn_number = turn;
+                    // Resolve dice manually — GotResources provides exact
+                    // resource tracking, so we skip distribute_resources.
                     state.pre_roll = false;
-                    if d1 + d2 == 7 {
+                    let total = d1 + d2;
+                    if let Dice::Balanced(ref mut b) = state.dice {
+                        b.draw(total, pid);
+                    }
+                    if total == 7 {
                         crate::game::handle_seven(state);
                     } else {
                         state.phase = Phase::Main;
@@ -813,29 +857,25 @@ fn process_post_setup(
             }
 
             GameEvent::BuildRoad { player, edge } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(ROAD_COST);
-                    state.bank.add(ROAD_COST);
-                    if let Some(&eid) = edge
-                        .map(|(x, y, z)| mapper.map_edge(x, y, z))
-                        .and_then(|e| edge_map.get(&e))
-                    {
-                        place_road(state, pid, eid);
-                    }
+                if let Some(&eid) = edge
+                    .map(|(x, y, z)| mapper.map_edge(x, y, z))
+                    .and_then(|e| edge_map.get(&e))
+                {
+                    crate::game::apply_with_chance(state, action::road_id(eid).0 as usize, None);
                 }
                 pending_label = Some(format!("{} builds road", player_label(*player, color_map)));
             }
 
             GameEvent::BuildSettlement { player, corner, .. } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(SETTLEMENT_COST);
-                    state.bank.add(SETTLEMENT_COST);
-                    if let Some(&nid) = corner
-                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                        .and_then(|c| corner_map.get(&c))
-                    {
-                        place_settlement(state, pid, nid);
-                    }
+                if let Some(&nid) = corner
+                    .map(|(x, y, z)| mapper.map_corner(x, y, z))
+                    .and_then(|c| corner_map.get(&c))
+                {
+                    crate::game::apply_with_chance(
+                        state,
+                        action::settlement_id(nid).0 as usize,
+                        None,
+                    );
                 }
                 pending_label = Some(format!(
                     "{} builds settlement",
@@ -844,25 +884,18 @@ fn process_post_setup(
             }
 
             GameEvent::BuildCity { player, corner, .. } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(CITY_COST);
-                    state.bank.add(CITY_COST);
-                    if let Some(&nid) = corner
-                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                        .and_then(|c| corner_map.get(&c))
-                    {
-                        place_city(state, pid, nid);
-                    }
+                if let Some(&nid) = corner
+                    .map(|(x, y, z)| mapper.map_corner(x, y, z))
+                    .and_then(|c| corner_map.get(&c))
+                {
+                    crate::game::apply_with_chance(state, action::city_id(nid).0 as usize, None);
                 }
                 pending_label = Some(format!("{} builds city", player_label(*player, color_map)));
             }
 
             GameEvent::BuyDevCard { player } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(DEV_CARD_COST);
-                    state.bank.add(DEV_CARD_COST);
-                    state.players[pid].hidden_dev_cards += 1;
-                    state.dev_deck.total -= 1;
+                if player_of_color(color_map, *player).is_some() {
+                    crate::game::apply_hidden_dev_card_buy(state);
                 }
                 pending_label = Some(format!(
                     "{} buys dev card",
@@ -876,6 +909,7 @@ fn process_post_setup(
                 given,
                 received,
             } => {
+                // No action ID — direct mutation only.
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(*given);
                     state.players[pid].hand.add(*received);
@@ -896,36 +930,30 @@ fn process_post_setup(
                 given,
                 received,
             } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(*given);
-                    state.players[pid].hand.add(*received);
-                    state.bank.add(*given);
-                    state.bank.sub(*received);
+                let give_r = ALL_RESOURCES.iter().find(|&&r| given[r] > 0).copied();
+                let recv_r = ALL_RESOURCES.iter().find(|&&r| received[r] > 0).copied();
+                if let (Some(give), Some(recv)) = (give_r, recv_r) {
+                    crate::game::apply_with_chance(
+                        state,
+                        action::maritime_id(give, recv).0 as usize,
+                        None,
+                    );
                 }
                 pending_label = Some(format!("{} bank trade", player_label(*player, color_map)));
             }
 
             GameEvent::PlayedKnight { player } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    play_dev_card(state, pid, DevCardKind::Knight);
-                    state.phase = Phase::MoveRobber;
+                    reveal_dev_card(state, pid, DevCardKind::Knight);
+                    crate::game::apply_with_chance(state, PLAY_KNIGHT as usize, None);
                 }
                 pending_label = Some(format!("{} plays Knight", player_label(*player, color_map)));
             }
 
-            GameEvent::PlayedMonopoly { player } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    play_dev_card(state, pid, DevCardKind::Monopoly);
-                }
-                pending_label = Some(format!(
-                    "{} plays Monopoly",
-                    player_label(*player, color_map)
-                ));
-            }
-
             GameEvent::PlayedRoadBuilding { player } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    play_dev_card(state, pid, DevCardKind::RoadBuilding);
+                    reveal_dev_card(state, pid, DevCardKind::RoadBuilding);
+                    crate::game::apply_with_chance(state, PLAY_ROAD_BUILDING as usize, None);
                 }
                 pending_label = Some(format!(
                     "{} plays Road Building",
@@ -935,7 +963,8 @@ fn process_post_setup(
 
             GameEvent::PlayedYearOfPlenty { player } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    play_dev_card(state, pid, DevCardKind::YearOfPlenty);
+                    // Reveal the card now; action deferred to YearOfPlentyGain.
+                    reveal_dev_card(state, pid, DevCardKind::YearOfPlenty);
                 }
                 pending_label = Some(format!(
                     "{} plays Year of Plenty",
@@ -943,83 +972,48 @@ fn process_post_setup(
                 ));
             }
 
-            // --- Silent events: mutate state, no timeline entry ---
-            GameEvent::StartingResources { player, resources } => {
+            GameEvent::PlayedMonopoly { player } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.add(*resources);
-                    state.bank.sub(*resources);
+                    // Reveal the card now; action deferred to MonopolyResult.
+                    reveal_dev_card(state, pid, DevCardKind::Monopoly);
+                }
+                pending_label = Some(format!(
+                    "{} plays Monopoly",
+                    player_label(*player, color_map)
+                ));
+            }
+
+            // --- Silent events: engine handles via preceding action ---
+            GameEvent::YearOfPlentyGain { resources, .. } => {
+                let (r1, r2) = decode_two_resources(resources);
+                if let (Some(r1), Some(r2)) = (r1, r2) {
+                    crate::game::apply_with_chance(state, action::yop_id(r1, r2).0 as usize, None);
+                } else if let Some(r1) = r1 {
+                    // Bank had only 1 resource; use same resource for both.
+                    crate::game::apply_with_chance(state, action::yop_id(r1, r1).0 as usize, None);
                 }
             }
 
-            GameEvent::GotResources { player, resources } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.add(*resources);
-                    state.bank.sub(*resources);
-                    roll_gains[pid as usize].add(*resources);
-                }
-            }
-
-            GameEvent::Stole {
-                player,
-                victim,
-                resources,
-            } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.add(*resources);
-                }
-                if let Some(vid) = player_of_color(color_map, *victim) {
-                    state.players[vid].hand.sub(*resources);
-                }
-            }
-
-            GameEvent::YearOfPlentyGain { player, resources } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.add(*resources);
-                    state.bank.sub(*resources);
-                }
-            }
-
-            GameEvent::MonopolyResult {
-                player,
-                count,
-                resource,
-            } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    let mut gained = ResourceArray::default();
-                    gained[*resource] = *count;
-                    state.players[pid].hand.add(gained);
-                    let opp = pid.opponent();
-                    let lost = state.players[opp].hand[*resource].min(*count);
-                    let mut sub = ResourceArray::default();
-                    sub[*resource] = lost;
-                    state.players[opp].hand.sub(sub);
-                }
+            GameEvent::MonopolyResult { resource, .. } => {
+                crate::game::apply_with_chance(
+                    state,
+                    action::monopoly_id(*resource).0 as usize,
+                    None,
+                );
             }
 
             GameEvent::Discard {
                 player, resources, ..
             } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(*resources);
-                    state.bank.add(*resources);
-                    // Advance through the discard/robber flow.
-                    if let Phase::Discard {
-                        player: dp, roller, ..
-                    } = state.phase
-                    {
-                        if dp == pid {
-                            let other = pid.opponent();
-                            let other_total = state.players[other].hand.total();
-                            if pid == roller && other_total > state.discard_threshold {
-                                state.current_player = other;
-                                state.phase = Phase::Discard {
-                                    player: other,
-                                    remaining: other_total / 2,
-                                    roller,
-                                };
-                            } else {
-                                state.current_player = roller;
-                                state.phase = Phase::MoveRobber;
+                if player_of_color(color_map, *player).is_some() {
+                    for &res in &ALL_RESOURCES {
+                        for _ in 0..resources[res] {
+                            if matches!(state.phase, Phase::Discard { .. }) {
+                                crate::game::apply_with_chance(
+                                    state,
+                                    action::discard_id(res).0 as usize,
+                                    None,
+                                );
                             }
                         }
                     }
@@ -1029,24 +1023,85 @@ fn process_post_setup(
             GameEvent::MoveRobber { player } => {
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.current_player = pid;
-                    // Robber position is synced separately via board snapshot.
-                    state.phase = Phase::Main;
+                    if matches!(state.phase, Phase::MoveRobber) {
+                        if let Some(tile) = robber_tile {
+                            if tile != state.robber {
+                                crate::game::apply_with_chance(
+                                    state,
+                                    action::robber_id(tile).0 as usize,
+                                    None,
+                                );
+                            } else {
+                                // Same tile — can't use engine. Manual transition.
+                                state.phase = if state.pre_roll {
+                                    Phase::Roll
+                                } else {
+                                    Phase::Main
+                                };
+                            }
+                        } else {
+                            state.phase = if state.pre_roll {
+                                Phase::Roll
+                            } else {
+                                Phase::Main
+                            };
+                        }
+                    }
                 }
             }
 
-            GameEvent::LongestRoad { player } => {
+            GameEvent::Stole {
+                player,
+                victim,
+                resources,
+            } => {
+                if matches!(state.phase, Phase::StealResolve) {
+                    // Find the resource index for the chance outcome.
+                    if let Some(idx) = ALL_RESOURCES.iter().position(|&r| resources[r] > 0) {
+                        state.apply_action(idx);
+                    }
+                } else {
+                    // Fallback: manual resource transfer.
+                    if let Some(pid) = player_of_color(color_map, *player) {
+                        state.players[pid].hand.add(*resources);
+                    }
+                    if let Some(vid) = player_of_color(color_map, *victim) {
+                        state.players[vid].hand.sub(*resources);
+                    }
+                }
+            }
+
+            GameEvent::StoleNothing { .. } | GameEvent::StoleUnknown { .. } => {
+                // If engine entered StealResolve unexpectedly, force out.
+                if matches!(state.phase, Phase::StealResolve) {
+                    state.phase = if state.pre_roll {
+                        Phase::Roll
+                    } else {
+                        Phase::Main
+                    };
+                }
+            }
+
+            GameEvent::GotResources { player, resources } => {
+                // Manual resource tracking — more reliable than engine's
+                // distribute_resources when intermediate robber position is
+                // unknown.
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    let len = state.boards[pid].road_network.longest_road();
-                    state.longest_road = Some((pid, len));
+                    state.players[pid].hand.add(*resources);
+                    state.bank.sub(*resources);
+                    roll_gains[pid as usize].add(*resources);
                 }
             }
 
-            GameEvent::LongestRoadChanged { to, .. } => {
-                if let Some(pid) = player_of_color(color_map, *to) {
-                    let len = state.boards[pid].road_network.longest_road();
-                    state.longest_road = Some((pid, len));
+            GameEvent::StartingResources { player, resources } => {
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    state.players[pid].hand.add(*resources);
+                    state.bank.sub(*resources);
                 }
             }
+
+            // Engine computes longest road/army via build/knight actions.
+            GameEvent::LongestRoad { .. } | GameEvent::LongestRoadChanged { .. } => {}
 
             _ => {}
         }
@@ -1069,11 +1124,10 @@ fn process_post_setup(
     }
 
     // Apply robber position from board snapshot to the final state.
-    let buildings = board::extract_buildings(board, mapper);
-    if let Some(idx) = buildings.robber_tile_index {
-        if let Some(last) = timeline.last_mut() {
-            last.state.robber = TileId(idx);
-        }
+    if let Some(tile) = robber_tile
+        && let Some(last) = timeline.last_mut()
+    {
+        last.state.robber = tile;
     }
 }
 

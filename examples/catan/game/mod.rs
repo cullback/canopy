@@ -211,6 +211,19 @@ impl Game for GameState {
     }
 }
 
+/// Apply an action and optionally resolve the resulting chance phase.
+///
+/// If `chance` is `Some`, the state is expected to enter a chance phase
+/// (Roll, DevCardDraw, StealResolve) after the action, and the outcome
+/// is applied immediately. This lets colonist event replay push known
+/// outcomes through the engine without sampling.
+pub fn apply_with_chance(state: &mut GameState, action: usize, chance: Option<usize>) {
+    state.apply_action(action);
+    if let Some(outcome) = chance {
+        state.apply_action(outcome);
+    }
+}
+
 #[allow(non_contiguous_range_endpoints)]
 pub fn apply(state: &mut GameState, action: ActionId) {
     match action.0 {
