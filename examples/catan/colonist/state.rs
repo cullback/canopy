@@ -549,6 +549,40 @@ pub fn sync_setup_phase(state: &mut GameState, last_settlement: Option<NodeId>) 
     };
 }
 
+/// Check whether the current player played a dev card this turn by scanning
+/// the event log backwards. Returns true if a dev card play event appears
+/// before the opponent's roll (which marks the turn boundary).
+///
+/// Pre-roll dev cards happen *before* the current player's own roll, so the
+/// current player's roll is NOT a turn boundary — the opponent's roll is.
+pub fn played_dev_card_this_turn(
+    events: &[GameEvent],
+    color_map: &[(u8, Player)],
+    current_player: Player,
+) -> bool {
+    let opponent = current_player.opponent();
+    for event in events.iter().rev() {
+        match event {
+            GameEvent::PlayedKnight { player }
+            | GameEvent::PlayedMonopoly { player }
+            | GameEvent::PlayedRoadBuilding { player }
+            | GameEvent::PlayedYearOfPlenty { player } => {
+                if player_of_color(color_map, *player) == Some(current_player) {
+                    return true;
+                }
+            }
+            // Opponent's roll marks the start of the current player's turn.
+            GameEvent::Roll { player, .. } => {
+                if player_of_color(color_map, *player) == Some(opponent) {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Refine the game phase by scanning the log tail for recent events.
 ///
 /// `sync_setup_phase` sets PreRoll once setup is complete, but can't tell if a
@@ -1046,14 +1080,14 @@ fn process_post_setup(
                             } else {
                                 // Same tile — can't use engine. Manual transition.
                                 state.phase = if state.pre_roll {
-                                    Phase::Roll
+                                    Phase::PreRoll
                                 } else {
                                     Phase::Main
                                 };
                             }
                         } else {
                             state.phase = if state.pre_roll {
-                                Phase::Roll
+                                Phase::PreRoll
                             } else {
                                 Phase::Main
                             };
@@ -1087,7 +1121,7 @@ fn process_post_setup(
                 // If engine entered StealResolve unexpectedly, force out.
                 if matches!(state.phase, Phase::StealResolve) {
                     state.phase = if state.pre_roll {
-                        Phase::Roll
+                        Phase::PreRoll
                     } else {
                         Phase::Main
                     };
@@ -1172,28 +1206,29 @@ pub fn process_new_events(
 
 /// Apply extracted dev card identities and bought-this-turn info to a game state.
 ///
-/// Converts `hidden_dev_cards` into concrete `dev_cards` entries.
-/// `bought_this_turn` is the authoritative list from colonist's React state.
+/// When React provides a non-empty card list, it's authoritative — set the
+/// player's `dev_cards` to match exactly (clearing any hidden card tracking).
+/// `has_played_dev_card_this_turn` is left to event processing (PlayedKnight
+/// etc. set it; DiceRoll clears it on turn change).
 pub fn apply_dev_cards(
     state: &mut GameState,
     player: Player,
     cards: &[DevCardKind],
     bought_this_turn: &[DevCardKind],
-    played_this_turn: bool,
 ) {
     let ps = &mut state.players[player];
-    // Move cards from hidden to concrete.
-    if ps.hidden_dev_cards > 0 {
+    // React's card list is authoritative — set dev_cards to match exactly.
+    if !cards.is_empty() {
+        ps.dev_cards = Default::default();
         for &kind in cards {
             ps.dev_cards[kind] += 1;
-            ps.hidden_dev_cards = ps.hidden_dev_cards.saturating_sub(1);
         }
+        ps.hidden_dev_cards = 0;
         ps.hidden_dev_cards_bought_this_turn = 0;
     }
-    // Always sync bought/played state from colonist's authoritative data.
+    // Always sync bought-this-turn from colonist's authoritative data.
     ps.dev_cards_bought_this_turn = Default::default();
     for &kind in bought_this_turn {
         ps.dev_cards_bought_this_turn[kind] += 1;
     }
-    ps.has_played_dev_card_this_turn = played_this_turn;
 }

@@ -62,15 +62,21 @@ fn fmt_gains(gains: &[u8; 5]) -> String {
 /// Returns `[[f32; 5]; 2]` — un-normalized expected counts per dev card type.
 /// For a player with no hidden cards, the row is all zeros (exact counts are
 /// already in `PlayerFrame.dev_cards`).
-/// Hypergeometric expected dev card distribution for each player's hidden hand
-/// and for the bank deck.
-fn expected_hidden_dev_cards(state: &GameState) -> ([[f32; 5]; 2], [f32; 5]) {
+///
+/// Bank estimate is `None` when no hidden cards exist (the unknown pool IS
+/// the bank — no uncertainty), so the frontend falls back to exact counts.
+fn expected_hidden_dev_cards(state: &GameState) -> ([[f32; 5]; 2], Option<[f32; 5]>) {
     let pool = state.unknown_dev_pool();
     let pool_total: f32 = pool.iter().sum::<u8>() as f32;
 
     let mut players = [[0.0f32; 5]; 2];
     let total_hidden: u8 =
         state.players[Player::One].hidden_dev_cards + state.players[Player::Two].hidden_dev_cards;
+
+    if total_hidden == 0 {
+        return (players, None);
+    }
+
     let bank_cards = (state.dev_deck.total as f32) - (total_hidden as f32);
 
     for (i, &pid) in [Player::One, Player::Two].iter().enumerate() {
@@ -89,7 +95,7 @@ fn expected_hidden_dev_cards(state: &GameState) -> ([[f32; 5]; 2], [f32; 5]) {
         }
     }
 
-    (players, bank)
+    (players, Some(bank))
 }
 
 pub struct CatanPresenter {
@@ -147,8 +153,10 @@ impl GamePresenter<GameState> for CatanPresenter {
             "p1_vp": state.total_vps(Player::One),
             "p2_vp": state.total_vps(Player::Two),
             "expected_dev": expected_dev,
-            "expected_bank_dev": expected_bank_dev,
         });
+        if let Some(bank_dev) = expected_bank_dev {
+            v["expected_bank_dev"] = serde_json::json!(bank_dev);
+        }
         if let Some(dice) = dice_info {
             v["dice"] = dice;
         }

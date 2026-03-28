@@ -270,6 +270,14 @@ impl<G: Game> Search<G> {
         &self.root_state
     }
 
+    /// Mutate the root state without clearing the tree.
+    ///
+    /// Use for minor corrections (e.g. robber position, turn flags) that
+    /// don't invalidate the search tree's structure.
+    pub fn update_state(&mut self, f: impl FnOnce(&mut G)) {
+        f(&mut self.root_state);
+    }
+
     /// Update the simulation budget (takes effect on the next search).
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
@@ -705,16 +713,30 @@ fn simulate<G: Game>(
                 }
             }
             NodeKind::Decision(sign) => {
+                // Use forced root edge if legal; otherwise fall through to
+                // normal selection so the simulation isn't wasted.
                 if let Some(f) = forced.take() {
-                    if filter_legal {
-                        let edges = tree.edges(current);
+                    if !filter_legal || {
                         bufs.legal.clear();
                         state.legal_actions(&mut bufs.legal);
-                        if !bufs.legal.contains(&edges[f].action) {
+                        bufs.legal.contains(&tree.edges(current)[f].action)
+                    } {
+                        f
+                    } else {
+                        // Forced edge illegal — select among legal edges instead.
+                        // bufs.legal is already populated from the check above.
+                        let edges = tree.edges(current);
+                        bufs.legal_edges.clear();
+                        for (i, edge) in edges.iter().enumerate() {
+                            if bufs.legal.contains(&edge.action) {
+                                bufs.legal_edges.push(i);
+                            }
+                        }
+                        if bufs.legal_edges.is_empty() {
                             break;
                         }
+                        select_decision(tree, current, sign, &bufs.legal_edges)
                     }
-                    f
                 } else {
                     let edges = tree.edges(current);
                     if filter_legal {

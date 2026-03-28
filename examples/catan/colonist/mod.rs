@@ -203,8 +203,6 @@ struct ColonistData {
     dev_cards: Vec<DevCardKind>,
     /// Dev cards bought this turn (cannot be played yet).
     dev_cards_bought_this_turn: Vec<DevCardKind>,
-    /// Whether the local player has played a dev card this turn.
-    played_dev_card_this_turn: bool,
     /// Player names keyed by colonist color.
     player_names: Vec<(u8, String)>,
     /// Local player's colonist color (the browser session owner).
@@ -242,10 +240,9 @@ async fn extract_game_data(port: u16) -> ColonistData {
     let dcs = parse_dev_card_state(cards_str);
     if !dcs.cards.is_empty() {
         eprintln!(
-            "extracted {} dev cards from React state (bought this turn: {}, played: {})",
+            "extracted {} dev cards from React state (bought this turn: {})",
             dcs.cards.len(),
             dcs.bought_this_turn.len(),
-            dcs.played_this_turn
         );
     }
 
@@ -284,7 +281,6 @@ async fn extract_game_data(port: u16) -> ColonistData {
         events,
         dev_cards: dcs.cards,
         dev_cards_bought_this_turn: dcs.bought_this_turn,
-        played_dev_card_this_turn: dcs.played_this_turn,
         player_names,
         local_color,
         current_turn_color,
@@ -296,14 +292,12 @@ async fn extract_game_data(port: u16) -> ColonistData {
 struct DevCardState {
     cards: Vec<DevCardKind>,
     bought_this_turn: Vec<DevCardKind>,
-    played_this_turn: bool,
 }
 
 /// Parse the JSON result from EXTRACT_CARDS_JS.
 fn parse_dev_card_state(json_str: &str) -> DevCardState {
     let obj: serde_json::Value = serde_json::from_str(json_str).unwrap_or_default();
 
-    // Object format: {cards: [11,14,...], bought_this_turn: [14,...], played_this_turn: bool}
     let cards = obj
         .get("cards")
         .and_then(|v| v.as_array())
@@ -322,15 +316,10 @@ fn parse_dev_card_state(json_str: &str) -> DevCardState {
                 .collect()
         })
         .unwrap_or_default();
-    let played_this_turn = obj
-        .get("played_this_turn")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
 
     DevCardState {
         cards,
         bought_this_turn,
-        played_this_turn,
     }
 }
 
@@ -411,18 +400,36 @@ fn apply_live_state(
     }
 
     if let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c)) {
-        state::apply_dev_cards(
-            state,
-            lp,
-            &poll.dev_cards,
-            &poll.dev_cards_bought_this_turn,
-            poll.played_dev_card_this_turn,
-        );
-        // apply_dev_cards always syncs bought/played state; only flag changed
-        // if card identities were actually revealed.
+        state::apply_dev_cards(state, lp, &poll.dev_cards, &poll.dev_cards_bought_this_turn);
         if state.players[lp].hidden_dev_cards == 0 && !poll.dev_cards.is_empty() {
             changed = true;
         }
+    }
+
+    // Derive has_played_dev_card_this_turn from the event log: walk backwards
+    // from the end; if we see a dev card play before the current player's roll,
+    // they've played one this turn.
+    if state.setup_count >= 4 {
+        let played =
+            state::played_dev_card_this_turn(&poll.events, color_map, state.current_player);
+        if state.players[state.current_player].has_played_dev_card_this_turn != played {
+            state.players[state.current_player].has_played_dev_card_this_turn = played;
+            changed = true;
+        }
+    }
+
+    // Diagnostic: dev card legality
+    if state.setup_count >= 4 {
+        let cp = state.current_player;
+        let p = &state.players[cp];
+        let kn = p.dev_cards[crate::game::dev_card::DevCardKind::Knight];
+        let kn_bought = p.dev_cards_bought_this_turn[crate::game::dev_card::DevCardKind::Knight];
+        let played = p.has_played_dev_card_this_turn;
+        let hidden = p.hidden_dev_cards;
+        eprintln!(
+            "live dev: cp={cp:?} phase={:?} knights={kn} bought_this_turn={kn_bought} played={played} hidden={hidden}",
+            state.phase
+        );
     }
 
     changed
@@ -433,7 +440,6 @@ struct PollData {
     events: Vec<log::GameEvent>,
     dev_cards: Vec<DevCardKind>,
     dev_cards_bought_this_turn: Vec<DevCardKind>,
-    played_dev_card_this_turn: bool,
     current_turn_color: Option<u8>,
     dice_thrown: Option<bool>,
     turn_state: Option<u8>,
@@ -483,7 +489,6 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
         events,
         dev_cards: dcs.cards,
         dev_cards_bought_this_turn: dcs.bought_this_turn,
-        played_dev_card_this_turn: dcs.played_this_turn,
         current_turn_color,
         dice_thrown,
         turn_state,
@@ -657,7 +662,6 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 local_player,
                 &data.dev_cards,
                 &data.dev_cards_bought_this_turn,
-                data.played_dev_card_this_turn,
             );
         }
     }
@@ -721,7 +725,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let session = Arc::new(tokio::sync::Mutex::new(initial_session));
 
     let (notify_tx, notify_rx) = tokio::sync::watch::channel(0u64);
-    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
 
     // Build coordinate maps for incremental processing.
     let (terrains, numbers, port_resources) = board::to_layout(&data.board, &mapper);
@@ -739,7 +743,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let poll_mapper = mapper;
     rt.spawn(async move {
         let mut committed_event_count = initial_event_count;
-        let mut last_state = last_state;
+        let mut committed_state = last_state;
         let mut generation = 0u64;
         let mut pending_actions: Vec<usize> = Vec::new();
         let mut pre_pending_cursor: Option<usize> = None;
@@ -748,11 +752,9 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
             tokio::time::sleep(std::time::Duration::from_secs(2)).await;
 
             // Drain any actions the user played on the serve board.
-            while let Ok(action) = action_rx.try_recv() {
+            while let Ok((cursor, action)) = action_rx.try_recv() {
                 if pending_actions.is_empty() {
-                    // Save cursor before first pending action.
-                    let session = poll_session.lock().await;
-                    pre_pending_cursor = Some(session.cursor());
+                    pre_pending_cursor = Some(cursor);
                 }
                 pending_actions.push(action);
             }
@@ -768,211 +770,143 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
             let total_events = poll.events.len();
             eprintln!("poll ok: {total_events} events (committed {committed_event_count})");
 
-            // Sync buildings from board snapshot (handles setup placements
-            // that lack coordinates in log entries).
+            // --- Mutate committed_state (single copy, single place) ---
+
             let (ns, nc, nr, last_settle) = state::sync_buildings(
-                &mut last_state,
+                &mut committed_state,
                 &poll.buildings,
                 &color_map,
                 &corner_map,
                 &edge_map,
                 &poll_mapper,
             );
-            let buildings_changed = ns + nc + nr > 0;
-            if buildings_changed {
+            if ns + nc + nr > 0 {
                 eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
-                state::sync_setup_phase(&mut last_state, last_settle);
+                state::sync_setup_phase(&mut committed_state, last_settle);
             }
 
-            if total_events <= committed_event_count {
-                // No new events — still update robber/turn/dev cards/buildings.
+            let mut entries_to_extend = Vec::new();
+            let mut needs_rollback = false;
+
+            if total_events > committed_event_count {
+                let new_events = &poll.events[committed_event_count..];
                 eprintln!(
-                    "poll: no new events, phase={:?} pre_roll={} dice_thrown={:?} turn_state={:?}",
-                    last_state.phase, last_state.pre_roll, poll.dice_thrown, poll.turn_state,
+                    "poll: {} new events (total {})",
+                    new_events.len(),
+                    total_events
                 );
-                let live_changed = apply_live_state(
-                    &mut last_state,
-                    &poll,
-                    &color_map,
-                    poll_local_color,
-                    &poll_mapper,
-                );
-                if buildings_changed || live_changed {
-                    let mut session = poll_session.lock().await;
-                    session.update_final_state(|s| {
-                        let (_, _, _, ls) = state::sync_buildings(
-                            s,
-                            &poll.buildings,
-                            &color_map,
-                            &corner_map,
-                            &edge_map,
-                            &poll_mapper,
-                        );
-                        state::sync_setup_phase(s, ls);
-                        apply_live_state(s, &poll, &color_map, poll_local_color, &poll_mapper);
-                    });
-                    generation += 1;
-                    let _ = notify_tx.send(generation);
-                }
-                continue;
-            }
 
-            // Process new events.
-            let new_events = &poll.events[committed_event_count..];
-            eprintln!(
-                "poll: {} new events (total {})",
-                new_events.len(),
-                total_events
-            );
-
-            // Check pending actions against new colonist events.
-            if !pending_actions.is_empty() {
-                match match_pending_actions(
-                    &pending_actions,
+                let live_robber = poll
+                    .robber_hex
+                    .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
+                    .map(|i| crate::game::board::TileId(i as u8));
+                let new_entries = state::process_new_events(
+                    &mut committed_state,
                     new_events,
+                    &color_map,
                     &corner_map,
                     &edge_map,
                     &poll_mapper,
-                ) {
-                    Ok(matched) if matched > 0 => {
-                        eprintln!("poll: {matched} pending actions confirmed by colonist");
-                        pending_actions.drain(..matched);
-                        if pending_actions.is_empty() {
-                            pre_pending_cursor = None;
-                        }
-                        // Skip the confirmed events — they're already applied
-                        // on the session via PlayAction. Just update our tracking
-                        // state from the full event set.
-                        let live_robber = poll
-                            .robber_hex
-                            .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
-                            .map(|i| crate::game::board::TileId(i as u8));
-                        let new_entries = state::process_new_events(
-                            &mut last_state,
-                            new_events,
-                            &color_map,
-                            &corner_map,
-                            &edge_map,
-                            &poll_mapper,
-                            live_robber,
-                        );
-                        apply_live_state(
-                            &mut last_state,
-                            &poll,
-                            &color_map,
-                            poll_local_color,
-                            &poll_mapper,
-                        );
-                        committed_event_count = total_events;
+                    live_robber,
+                );
+                committed_event_count = total_events;
 
-                        // Only extend timeline with entries beyond what was
-                        // already pending. If matched == new_entries.len(),
-                        // there's nothing extra to add.
-                        let extra: Vec<_> = new_entries
-                            .into_iter()
-                            .skip(matched)
-                            .map(|e| (e.label, e.state))
-                            .collect();
-                        if !extra.is_empty() {
-                            let mut session = poll_session.lock().await;
-                            session.extend_timeline(extra);
+                if !pending_actions.is_empty() {
+                    match match_pending_actions(
+                        &pending_actions,
+                        new_events,
+                        &corner_map,
+                        &edge_map,
+                        &poll_mapper,
+                    ) {
+                        Ok(matched) if matched > 0 => {
+                            eprintln!("poll: {matched} pending actions confirmed by colonist");
+                            pending_actions.drain(..matched);
+                            if pending_actions.is_empty() {
+                                pre_pending_cursor = None;
+                            }
+                            entries_to_extend = new_entries.into_iter().skip(matched).collect();
                         }
-
-                        {
-                            let mut session = poll_session.lock().await;
-                            session.update_final_state(|s| {
-                                let (_, _, _, ls) = state::sync_buildings(
-                                    s,
-                                    &poll.buildings,
-                                    &color_map,
-                                    &corner_map,
-                                    &edge_map,
-                                    &poll_mapper,
-                                );
-                                state::sync_setup_phase(s, ls);
-                                apply_live_state(
-                                    s,
-                                    &poll,
-                                    &color_map,
-                                    poll_local_color,
-                                    &poll_mapper,
-                                );
-                            });
+                        Ok(_) => {
+                            // No events matched yet — keep waiting.
                         }
-
-                        generation += 1;
-                        let _ = notify_tx.send(generation);
-                        continue;
-                    }
-                    Ok(_) => {
-                        // No events matched yet (0 matched) — keep waiting.
-                    }
-                    Err(()) => {
-                        // Mismatch: rollback and re-process normally.
-                        eprintln!("poll: pending action mismatch — rolling back");
-                        if let Some(cursor) = pre_pending_cursor.take() {
-                            let mut session = poll_session.lock().await;
-                            session.rollback_to_cursor(cursor);
+                        Err(()) => {
+                            eprintln!("poll: pending action mismatch — rolling back");
+                            needs_rollback = true;
+                            pending_actions.clear();
+                            entries_to_extend = new_entries;
                         }
-                        pending_actions.clear();
-                        // Fall through to normal processing below.
                     }
+                } else {
+                    entries_to_extend = new_entries;
                 }
             }
 
-            let live_robber = poll
-                .robber_hex
-                .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
-                .map(|i| crate::game::board::TileId(i as u8));
-            let new_entries = state::process_new_events(
-                &mut last_state,
-                new_events,
-                &color_map,
-                &corner_map,
-                &edge_map,
-                &poll_mapper,
-                live_robber,
-            );
-            eprintln!(
-                "poll: {} timeline entries, last_state phase={:?} pre_roll={} dice_thrown={:?}",
-                new_entries.len(),
-                last_state.phase,
-                last_state.pre_roll,
-                poll.dice_thrown,
-            );
+            // Recompute derived state from board bits — sync_buildings and
+            // process_new_events can both place the same piece, double-
+            // incrementing counters.
+            {
+                use canopy::player::Player;
+                for &pid in &[Player::One, Player::Two] {
+                    let s = committed_state.boards[pid].settlements.count_ones() as u8;
+                    let c = committed_state.boards[pid].cities.count_ones() as u8;
+                    committed_state.players[pid].building_vps = s + c * 2;
+                }
+                // Recompute longest road award.
+                let len1 = committed_state.boards[Player::One]
+                    .road_network
+                    .longest_road();
+                let len2 = committed_state.boards[Player::Two]
+                    .road_network
+                    .longest_road();
+                committed_state.longest_road = match (len1 >= 5, len2 >= 5) {
+                    (false, false) => None,
+                    (true, false) => Some((Player::One, len1)),
+                    (false, true) => Some((Player::Two, len2)),
+                    (true, true) => {
+                        if len1 > len2 {
+                            Some((Player::One, len1))
+                        } else if len2 > len1 {
+                            Some((Player::Two, len2))
+                        } else {
+                            committed_state.longest_road.map(|(pid, _)| (pid, len1))
+                        }
+                    }
+                };
+            }
 
             apply_live_state(
-                &mut last_state,
+                &mut committed_state,
                 &poll,
                 &color_map,
                 poll_local_color,
                 &poll_mapper,
             );
-            committed_event_count = total_events;
 
-            {
-                let mut session = poll_session.lock().await;
+            // --- Sync to session (one path) ---
 
-                if !new_entries.is_empty() {
-                    let pairs: Vec<(String, crate::game::state::GameState)> = new_entries
-                        .into_iter()
-                        .map(|e| (e.label, e.state))
-                        .collect();
-                    session.extend_timeline(pairs);
-                }
+            let has_updates =
+                needs_rollback || !entries_to_extend.is_empty() || pending_actions.is_empty();
+            if !has_updates {
+                continue;
+            }
 
-                session.update_final_state(|s| {
-                    let (_, _, _, ls) = state::sync_buildings(
-                        s,
-                        &poll.buildings,
-                        &color_map,
-                        &corner_map,
-                        &edge_map,
-                        &poll_mapper,
-                    );
-                    state::sync_setup_phase(s, ls);
-                    apply_live_state(s, &poll, &color_map, poll_local_color, &poll_mapper);
-                });
+            let mut session = poll_session.lock().await;
+
+            if needs_rollback && let Some(cursor) = pre_pending_cursor.take() {
+                session.rollback_to_cursor(cursor);
+            }
+
+            if !entries_to_extend.is_empty() {
+                let pairs: Vec<(String, crate::game::state::GameState)> = entries_to_extend
+                    .into_iter()
+                    .map(|e| (e.label, e.state))
+                    .collect();
+                session.extend_timeline(pairs);
+            }
+
+            if pending_actions.is_empty() {
+                session.set_final_state(committed_state.clone());
             }
 
             generation += 1;

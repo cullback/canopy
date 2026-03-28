@@ -146,19 +146,19 @@ pub async fn serve_with_timeline<G: Game + 'static>(
 /// A polling task can extend the session's timeline, then send a generation
 /// bump through the watch channel. Connected clients receive a state push.
 ///
-/// If `action_tx` is `Some`, every `PlayAction` from the client will send the
-/// action index through the channel before the response is returned. This lets
-/// a polling task track which actions the user played locally so it can match
-/// them against externally confirmed events.
+/// If `action_tx` is `Some`, every `PlayAction` from the client will send
+/// `(pre_cursor, action)` through the channel before the action is applied.
+/// `pre_cursor` is the session cursor *before* the play-ahead, so a polling
+/// task can roll back to that point on mismatch.
 pub async fn serve_live<G: Game + 'static>(
     port: u16,
     session: Arc<Mutex<GameSession<G>>>,
     presenter: Arc<dyn GamePresenter<G> + Send + Sync>,
     notify: watch::Receiver<u64>,
-    action_tx: Option<mpsc::UnboundedSender<usize>>,
+    action_tx: Option<mpsc::UnboundedSender<(usize, usize)>>,
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
-    let action_tx = action_tx.map(Arc::new);
+    let action_tx: Option<Arc<mpsc::UnboundedSender<(usize, usize)>>> = action_tx.map(Arc::new);
 
     let app = Router::new()
         .route(
@@ -191,7 +191,7 @@ async fn handle_live_socket<G: Game + 'static>(
     mut socket: WebSocket,
     session: Arc<Mutex<GameSession<G>>>,
     mut notify: watch::Receiver<u64>,
-    action_tx: Option<Arc<mpsc::UnboundedSender<usize>>>,
+    action_tx: Option<Arc<mpsc::UnboundedSender<(usize, usize)>>>,
 ) {
     // Send initial state.
     {
@@ -228,11 +228,11 @@ async fn handle_live_socket<G: Game + 'static>(
                     }
                 };
                 let mut session = session.lock().await;
-                // Intercept PlayAction: notify the polling task before processing.
+                // Intercept PlayAction: record pre-cursor, then notify polling task.
                 if let ClientMsg::PlayAction { action } = &client_msg
                     && let Some(ref tx) = action_tx
                 {
-                    let _ = tx.send(*action);
+                    let _ = tx.send((session.cursor(), *action));
                 }
                 let responses = match &client_msg {
                     ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {

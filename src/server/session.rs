@@ -232,9 +232,20 @@ impl<G: Game + 'static> GameSession<G> {
             }
         }
         if self.cursor == self.history.len() {
-            let mut state = self.search.state().clone();
-            f(&mut state);
-            self.search.reset(state);
+            self.search.update_state(&f);
+        }
+    }
+
+    /// Replace the final timeline state wholesale.
+    ///
+    /// Sets the last history entry's `next_state` and, if the cursor is at
+    /// the end, updates the search root state (preserving the MCTS tree).
+    pub fn set_final_state(&mut self, state: G) {
+        if let Some(last) = self.history.last_mut() {
+            last.next_state = Some(state.clone());
+        }
+        if self.cursor == self.history.len() {
+            self.search.update_state(|s| *s = state);
         }
     }
 

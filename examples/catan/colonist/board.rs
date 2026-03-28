@@ -331,7 +331,7 @@ pub const EXTRACT_JS: &str = r#"(() => {
 /// JS snippet to extract the local player's dev card state from the React
 /// component tree.
 ///
-/// Returns JSON: `{cards: [11,...], bought_this_turn: [14,...], played_this_turn: bool}`.
+/// Returns JSON: `{cards: [11,...], bought_this_turn: [14,...]}`.
 ///
 /// Card enums: 11=Knight, 12=VictoryPoint, 13=Monopoly, 14=RoadBuilding, 15=YearOfPlenty.
 pub const EXTRACT_CARDS_JS: &str = r#"(() => {
@@ -384,11 +384,9 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
                             let dc = me.developmentCards || {};
                             let cards = (dc.cards || []).filter(c => c >= 11 && c <= 15);
                             let bought = (me.developmentCardsBoughtThisTurn || []).filter(c => c >= 11 && c <= 15);
-                            let used = (me.developmentCardsUsed || []).filter(c => c >= 11 && c <= 15);
                             return JSON.stringify({
                                 cards,
                                 bought_this_turn: bought,
-                                played_this_turn: used.length > 0,
                             });
                         }
                     }
@@ -417,7 +415,7 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
                         for (let i = 0; i < count; i++) cards.push(e);
                     }
                 }
-                if (cards.length > 0) return JSON.stringify({cards, bought_this_turn: [], played_this_turn: false});
+                if (cards.length > 0) return JSON.stringify({cards, bought_this_turn: []});
             }
             node = node.return;
         }
