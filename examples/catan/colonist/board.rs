@@ -7,8 +7,278 @@
 use std::collections::HashMap;
 
 use crate::game::board::{EdgeId, NodeId, Terrain as CanopyTerrain};
+use crate::game::hex::Hex;
 use crate::game::resource::Resource;
-use crate::game::topology::{EDGE_NEIGHBOR_DIR, LAND_HEXES, PORT_SPECS, SHARED_CORNERS, Topology};
+use crate::game::topology::{
+    EDGE_NEIGHBOR_DIR, LAND_HEXES, PORT_SPECS, SHARED_CORNERS, TOKEN_SEQUENCE, Topology,
+};
+
+// -- Coordinate orientation mapper --------------------------------------------
+
+/// Maps colonist.io coordinates to our canonical LAND_HEXES orientation.
+///
+/// Colonist boards may apply the number token spiral starting from any of the
+/// 6 corners and in either CW or CCW direction (12 D6 orientations). We detect
+/// which orientation is used and apply the inverse transform so the model sees
+/// the canonical layout it was trained on.
+#[derive(Clone, Debug)]
+pub struct CoordMapper {
+    pub rotation: u8,
+    pub reflect: bool,
+}
+
+impl CoordMapper {
+    /// Identity mapper (no transformation).
+    pub fn identity() -> Self {
+        Self {
+            rotation: 0,
+            reflect: false,
+        }
+    }
+
+    /// Detect the board orientation by brute-forcing all 12 D6 transforms.
+    ///
+    /// For each transform, applies it to the colonist tile coords, maps to
+    /// LAND_HEXES indices, reads non-desert numbers in index order, and checks
+    /// against TOKEN_SEQUENCE.
+    pub fn detect(tiles: &[Tile]) -> Self {
+        for reflect in [false, true] {
+            for rotation in 0..6u8 {
+                let mapper = Self { rotation, reflect };
+                if mapper.matches_token_sequence(tiles) {
+                    let label = if reflect {
+                        format!("R{rotation} reflected")
+                    } else {
+                        format!("R{rotation}")
+                    };
+                    eprintln!("detected orientation: {label}");
+                    return mapper;
+                }
+            }
+        }
+
+        // Debug: show what the identity mapper produces for diagnostics.
+        let identity = Self::identity();
+        identity.debug_token_order(tiles);
+
+        eprintln!("warning: could not detect board orientation, using identity");
+        identity
+    }
+
+    fn matches_token_sequence(&self, tiles: &[Tile]) -> bool {
+        let hex_to_land: HashMap<(i32, i32), usize> = LAND_HEXES
+            .iter()
+            .enumerate()
+            .map(|(i, h)| ((h.q as i32, h.r as i32), i))
+            .collect();
+
+        // Build array: for each LAND_HEXES index, what number token is there?
+        let mut numbers_by_index: [Option<u8>; 19] = [None; 19];
+        let mut land_count = 0u32;
+        for tile in tiles {
+            let (mx, my) = self.map_hex(tile.x, tile.y);
+            if let Some(&idx) = hex_to_land.get(&(mx, my)) {
+                land_count += 1;
+                if tile.dice_number > 0 {
+                    numbers_by_index[idx] = Some(tile.dice_number);
+                }
+                // else: desert, leave as None
+            }
+            // Skip water/port hexes that don't map to LAND_HEXES.
+        }
+
+        // All 19 land hexes must be accounted for.
+        if land_count != 19 {
+            return false;
+        }
+
+        // Read non-desert numbers in LAND_HEXES index order, compare to TOKEN_SEQUENCE.
+        let numbers: Vec<u8> = numbers_by_index.iter().filter_map(|&n| n).collect();
+        numbers.len() == 18 && numbers == TOKEN_SEQUENCE
+    }
+
+    fn debug_token_order(&self, tiles: &[Tile]) {
+        const SPIRAL_ORDER: [usize; 19] = [
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 17, 16, 15, 14, 13, 18,
+        ];
+
+        let hex_to_land: HashMap<(i32, i32), usize> = LAND_HEXES
+            .iter()
+            .enumerate()
+            .map(|(i, h)| ((h.q as i32, h.r as i32), i))
+            .collect();
+
+        let mut numbers_by_index: [Option<u8>; 19] = [None; 19];
+        let mut land_count = 0u32;
+        let mut unmapped = Vec::new();
+        for tile in tiles {
+            let (mx, my) = self.map_hex(tile.x, tile.y);
+            if let Some(&idx) = hex_to_land.get(&(mx, my)) {
+                land_count += 1;
+                if tile.dice_number > 0 {
+                    numbers_by_index[idx] = Some(tile.dice_number);
+                }
+            } else {
+                unmapped.push((tile.x, tile.y, mx, my, tile.dice_number));
+            }
+        }
+
+        eprintln!(
+            "debug detect: land_count={land_count}, unmapped={}",
+            unmapped.len()
+        );
+        for (ox, oy, mx, my, d) in &unmapped {
+            eprintln!("  unmapped tile ({ox},{oy}) -> ({mx},{my}) dice={d}");
+        }
+
+        eprintln!("numbers_by_index (LAND_HEXES order):");
+        for (i, n) in numbers_by_index.iter().enumerate() {
+            let hex = LAND_HEXES[i];
+            eprintln!("  [{i:2}] ({:2},{:2}) = {:?}", hex.q, hex.r, n);
+        }
+
+        let spiral_nums: Vec<String> = SPIRAL_ORDER
+            .iter()
+            .map(|&idx| match numbers_by_index[idx] {
+                Some(n) => format!("{n}"),
+                None => "--".to_string(),
+            })
+            .collect();
+        eprintln!("spiral order:    [{}]", spiral_nums.join(", "));
+        eprintln!("TOKEN_SEQUENCE:  {:?}", TOKEN_SEQUENCE);
+
+        let index_nums: Vec<String> = numbers_by_index
+            .iter()
+            .map(|n| match n {
+                Some(v) => format!("{v}"),
+                None => "--".to_string(),
+            })
+            .collect();
+        eprintln!("index order:     [{}]", index_nums.join(", "));
+    }
+
+    /// Apply the D6 transform to a hex coordinate.
+    pub fn map_hex(&self, x: i32, y: i32) -> (i32, i32) {
+        // Convert axial (q, r) to cube (q, r, s) where s = -q - r
+        let (mut q, mut r, mut s) = (x, y, -x - y);
+
+        // Optional mirror reflection: swap r and s (reflects through the q axis,
+        // i.e. the N-S axis of the hex grid). This reverses CW↔CCW ring direction.
+        if self.reflect {
+            std::mem::swap(&mut r, &mut s);
+        }
+
+        // Apply rotation: each step is a 60° CW rotation in cube coords
+        for _ in 0..self.rotation {
+            let new_q = -r;
+            let new_r = -s;
+            let new_s = -q;
+            q = new_q;
+            r = new_r;
+            s = new_s;
+        }
+        let _ = s; // axial only needs q, r
+
+        (q, r)
+    }
+
+    /// Transform a colonist corner (x, y, z) to canonical coordinates.
+    ///
+    /// z ∈ {0, 1}: z=0 → corner 0 (N), z=1 → corner 3 (S).
+    /// After rotating the hex, the corner index rotates too. We remap back
+    /// to z=0/z=1 by finding which shared-corner alias gives a valid canonical
+    /// representation.
+    pub fn map_corner(&self, x: i32, y: i32, z: u8) -> (i32, i32, u8) {
+        if self.rotation == 0 && !self.reflect {
+            return (x, y, z);
+        }
+        let corner = if z == 0 { 0u8 } else { 3u8 };
+        let rotated_corner = self.rotate_corner(corner);
+        let (hx, hy) = self.map_hex(x, y);
+
+        // If rotated corner is already 0 or 3, we can use it directly
+        if rotated_corner == 0 {
+            return (hx, hy, 0);
+        }
+        if rotated_corner == 3 {
+            return (hx, hy, 1);
+        }
+
+        // Otherwise find an adjacent hex where this corner is 0 or 3
+        let hex = Hex::new(hx as i8, hy as i8);
+        for &(dir, neighbor_corner) in &SHARED_CORNERS[rotated_corner as usize] {
+            if neighbor_corner == 0 || neighbor_corner == 3 {
+                let nb = hex.neighbor(dir);
+                let nz = if neighbor_corner == 0 { 0 } else { 1 };
+                return (nb.q as i32, nb.r as i32, nz);
+            }
+        }
+
+        // Fallback (shouldn't happen): return as-is with best guess
+        (hx, hy, z)
+    }
+
+    /// Transform a colonist edge (x, y, z) to canonical coordinates.
+    ///
+    /// z ∈ {0, 1, 2}: z=0 → edge 5, z=1 → edge 4, z=2 → edge 3.
+    /// After rotating the hex, the edge index rotates too. We remap back
+    /// to z=0/1/2 by finding a canonical representation.
+    pub fn map_edge(&self, x: i32, y: i32, z: u8) -> (i32, i32, u8) {
+        if self.rotation == 0 && !self.reflect {
+            return (x, y, z);
+        }
+        let edge = match z {
+            0 => 5u8,
+            1 => 4u8,
+            2 => 3u8,
+            _ => return (x, y, z),
+        };
+        let rotated_edge = self.rotate_edge(edge);
+        let (hx, hy) = self.map_hex(x, y);
+
+        // Canonical edges are 3, 4, 5 → z values 2, 1, 0
+        if rotated_edge >= 3 {
+            let nz = 5 - rotated_edge; // 3→2, 4→1, 5→0
+            return (hx, hy, nz);
+        }
+
+        // Edge 0-2: use the neighbor hex where this is the opposite edge (3-5)
+        let hex = Hex::new(hx as i8, hy as i8);
+        let neighbor_dir = EDGE_NEIGHBOR_DIR[rotated_edge as usize];
+        let nb = hex.neighbor(neighbor_dir);
+        let opposite = (rotated_edge + 3) % 6;
+        let nz = 5 - opposite;
+        (nb.q as i32, nb.r as i32, nz)
+    }
+
+    /// LAND_HEXES index for a transformed hex coordinate, or None.
+    pub fn tile_index(&self, x: i32, y: i32) -> Option<usize> {
+        let (mx, my) = self.map_hex(x, y);
+        LAND_HEXES
+            .iter()
+            .position(|h| h.q as i32 == mx && h.r as i32 == my)
+    }
+
+    fn rotate_corner(&self, corner: u8) -> u8 {
+        let mut c = corner;
+        if self.reflect {
+            // Reflection flips corner: 0↔0, 1↔5, 2↔4, 3↔3
+            c = (6 - c) % 6;
+        }
+        (c + self.rotation) % 6
+    }
+
+    fn rotate_edge(&self, edge: u8) -> u8 {
+        let mut e = edge;
+        if self.reflect {
+            // Mirror reflection swaps corners i↔(6-i)%6. Edge i (between corners
+            // i and i+1) maps to edge between (6-i)%6 and (6-(i+1))%6 = (5-i)%6.
+            // The resulting edge index is the lower corner: (5-i)%6.
+            e = (5 + 6 - e) % 6; // = (5-e) mod 6, avoiding underflow
+        }
+        (e + self.rotation) % 6
+    }
+}
 
 // -- Extraction JS ------------------------------------------------------------
 
@@ -119,8 +389,12 @@ pub const EXTRACT_LIVE_JS: &str = r#"(() => {
                 let gs = p.gameValidator.gameState;
                 let currentTurnColor = gs?.currentState?.currentTurnPlayerColor ?? null;
                 let ri = gs?.mechanicRobberState?.locationTileIndex;
-                let robberTileIndex = ri != null ? ri : null;
-                return JSON.stringify({players, localColor, currentTurnColor, robberTileIndex});
+                let robberHex = null;
+                let ts = p.gameValidator.mapValidator?.tileState?._tiles;
+                if (ri != null && ts && ts[ri]) {
+                    robberHex = { x: ts[ri].state.x, y: ts[ri].state.y };
+                }
+                return JSON.stringify({players, localColor, currentTurnColor, robberHex});
             }
             node = node.return;
         }
@@ -292,7 +566,7 @@ pub fn parse(json_str: &str) -> Option<BoardData> {
                 x: t["x"].as_i64()? as i32,
                 y: t["y"].as_i64()? as i32,
                 terrain: Terrain::from_type(t["type"].as_u64()?),
-                dice_number: t["diceNumber"].as_u64()? as u8,
+                dice_number: t["diceNumber"].as_u64().unwrap_or(0) as u8,
             })
         })
         .collect();
@@ -359,6 +633,7 @@ impl PortType {
 /// PORT_SPECS position respectively.
 pub fn to_layout(
     board: &BoardData,
+    mapper: &CoordMapper,
 ) -> ([CanopyTerrain; 19], [Option<u8>; 19], [Option<Resource>; 9]) {
     // Map colonist tile (x,y) → LAND_HEXES index
     let hex_to_land: HashMap<(i32, i32), usize> = LAND_HEXES
@@ -371,15 +646,16 @@ pub fn to_layout(
     let mut numbers = [None; 19];
 
     for tile in &board.tiles {
-        if let Some(&idx) = hex_to_land.get(&(tile.x, tile.y)) {
+        let (mx, my) = mapper.map_hex(tile.x, tile.y);
+        if let Some(&idx) = hex_to_land.get(&(mx, my)) {
             terrains[idx] = tile.terrain.to_canopy();
             if tile.dice_number > 0 {
                 numbers[idx] = Some(tile.dice_number);
             }
         } else {
             eprintln!(
-                "warning: colonist tile ({},{}) not found in LAND_HEXES",
-                tile.x, tile.y
+                "warning: colonist tile ({},{}) mapped to ({},{}) not found in LAND_HEXES",
+                tile.x, tile.y, mx, my
             );
         }
     }
@@ -404,15 +680,16 @@ pub fn to_layout(
     let mut port_resources = [None; 9];
 
     for port in &board.ports {
+        let (mx, my) = mapper.map_hex(port.x, port.y);
         let idx = water_to_port
-            .get(&(port.x, port.y))
-            .or_else(|| land_to_port.get(&(port.x, port.y)));
+            .get(&(mx, my))
+            .or_else(|| land_to_port.get(&(mx, my)));
         if let Some(&idx) = idx {
             port_resources[idx] = port.port_type.to_resource();
         } else {
             eprintln!(
-                "warning: colonist port ({},{},{}) not matched to PORT_SPECS",
-                port.x, port.y, port.z
+                "warning: colonist port ({},{},{}) mapped to ({},{}) not matched to PORT_SPECS",
+                port.x, port.y, port.z, mx, my
             );
         }
     }
@@ -499,15 +776,16 @@ pub struct BuildingData {
 }
 
 /// Extract buildings and roads from the board data, including robber position.
-pub fn extract_buildings(board: &BoardData) -> BuildingData {
+pub fn extract_buildings(board: &BoardData, mapper: &CoordMapper) -> BuildingData {
     let mut data = extract_buildings_from(&board.corners, &board.edges);
 
     if let Some(robber) = &board.robber {
         let x = robber["x"].as_i64().unwrap_or(0) as i32;
         let y = robber["y"].as_i64().unwrap_or(0) as i32;
+        let (mx, my) = mapper.map_hex(x, y);
         data.robber_tile_index = LAND_HEXES
             .iter()
-            .position(|h| h.q as i32 == x && h.r as i32 == y)
+            .position(|h| h.q as i32 == mx && h.r as i32 == my)
             .map(|i| i as u8);
     }
 
@@ -625,7 +903,7 @@ pub fn print(board: &BoardData) {
     );
 
     // Buildings and roads
-    let buildings = extract_buildings(board);
+    let buildings = extract_buildings(board, &CoordMapper::identity());
     println!(
         "\nBuildings: {} settlements, {} cities, {} roads",
         buildings.settlements.len(),

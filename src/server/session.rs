@@ -221,6 +221,37 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    /// Current cursor position in the history (0..=history.len()).
+    pub fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Roll back to a previous cursor position, resetting the search state.
+    ///
+    /// Truncates history beyond `target` and sets the search state to the
+    /// entry's `state` (the state *before* that entry's action).
+    pub fn rollback_to_cursor(&mut self, target: usize) {
+        if target > self.cursor {
+            return;
+        }
+        self.history.truncate(target);
+        self.cursor = target;
+        if target > 0 {
+            // Restore the state that was current at this cursor position.
+            // The entry at target-1 has a next_state or we can replay from state.
+            let entry = &self.history[target - 1];
+            if let Some(ref next) = entry.next_state {
+                self.search.reset(next.clone());
+            } else {
+                let mut state = entry.state.clone();
+                state.apply_action(entry.action);
+                self.search.reset(state);
+            }
+        } else if let Some(first) = self.history.first() {
+            self.search.reset(first.state.clone());
+        }
+    }
+
     /// Build a GameState server message for the current state (public for live push).
     pub fn state_msg(&self) -> ServerMsg {
         let state = self.search.state();

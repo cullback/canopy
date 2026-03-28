@@ -3,7 +3,7 @@ use std::sync::Arc;
 
 use canopy::player::{PerPlayer, Player};
 
-use super::board::TileId;
+use super::board::{NodeId, TileId};
 use super::dev_card::{DevCardArray, DevCardDeck, DevCardKind};
 
 /// Original deck composition: 14 knights, 5 VP, 2 road building, 2 year of plenty, 2 monopoly.
@@ -126,6 +126,10 @@ pub struct GameState {
     pub dice: Dice,
     pub vp_limit: u8,
     pub discard_threshold: u8,
+
+    /// The node of the most recently placed setup settlement. Used by
+    /// `populate_place_road` to determine which settlement needs a road.
+    pub last_setup_node: Option<NodeId>,
 }
 
 impl fmt::Debug for GameState {
@@ -180,6 +184,7 @@ impl GameState {
             dice,
             vp_limit: 15,
             discard_threshold: 9,
+            last_setup_node: None,
         }
     }
 

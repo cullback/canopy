@@ -311,12 +311,18 @@ fn apply_live_state(
     poll: &PollData,
     color_map: &[(u8, canopy::player::Player)],
     local_color: Option<u8>,
+    mapper: &board::CoordMapper,
 ) -> bool {
     let mut changed = false;
 
-    if let Some(robber_idx) = poll.robber_tile_index {
-        state.robber = crate::game::board::TileId(robber_idx);
-        changed = true;
+    if let Some((rx, ry)) = poll.robber_hex {
+        if let Some(idx) = mapper.tile_index(rx, ry) {
+            let new_robber = crate::game::board::TileId(idx as u8);
+            if state.robber != new_robber {
+                state.robber = new_robber;
+                changed = true;
+            }
+        }
     }
 
     // During setup, sync_setup_phase sets current_player from building counts.
@@ -324,6 +330,7 @@ fn apply_live_state(
     if state.setup_count >= 4
         && let Some(color) = poll.current_turn_color
         && let Some(pid) = state::player_of_color(color_map, color)
+        && state.current_player != pid
     {
         state.current_player = pid;
         changed = true;
@@ -331,6 +338,7 @@ fn apply_live_state(
 
     if !poll.dev_cards.is_empty()
         && let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c))
+        && state.players[lp].hidden_dev_cards > 0
     {
         state::apply_dev_cards(state, lp, &poll.dev_cards);
         changed = true;
@@ -344,7 +352,7 @@ struct PollData {
     events: Vec<log::GameEvent>,
     dev_cards: Vec<DevCardKind>,
     current_turn_color: Option<u8>,
-    robber_tile_index: Option<u8>,
+    robber_hex: Option<(i32, i32)>,
     buildings: board::BuildingData,
 }
 
@@ -375,7 +383,11 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
     let live_str = live_json.as_str().unwrap_or("{}");
     let live_obj: serde_json::Value = serde_json::from_str(live_str).unwrap_or_default();
     let current_turn_color: Option<u8> = live_obj["currentTurnColor"].as_u64().map(|c| c as u8);
-    let robber_tile_index: Option<u8> = live_obj["robberTileIndex"].as_u64().map(|i| i as u8);
+    let robber_hex: Option<(i32, i32)> = live_obj["robberHex"].as_object().and_then(|o| {
+        let x = o.get("x")?.as_i64()? as i32;
+        let y = o.get("y")?.as_i64()? as i32;
+        Some((x, y))
+    });
 
     // Buildings from board snapshot
     let buildings_json = try_evaluate(&mut ws, board::EXTRACT_BUILDINGS_JS).await?;
@@ -388,9 +400,138 @@ async fn poll_game_data(port: u16) -> Result<PollData, String> {
         events,
         dev_cards,
         current_turn_color,
-        robber_tile_index,
+        robber_hex,
         buildings,
     })
+}
+
+/// Check if a canopy action index matches a colonist `GameEvent`.
+///
+/// Uses the corner_map/edge_map to reverse-lookup coordinates for settlements,
+/// cities, and roads. Other action types match by event type alone.
+fn match_action_to_event(
+    action: usize,
+    event: &log::GameEvent,
+    corner_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::NodeId>,
+    edge_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::EdgeId>,
+    mapper: &board::CoordMapper,
+) -> bool {
+    use crate::game::action::*;
+    let a = action as u8;
+    match a {
+        SETTLEMENT_START..SETTLEMENT_END => {
+            let nid = crate::game::board::NodeId(a - SETTLEMENT_START);
+            match event {
+                log::GameEvent::PlaceSettlement {
+                    corner: Some((x, y, z)),
+                    ..
+                }
+                | log::GameEvent::BuildSettlement {
+                    corner: Some((x, y, z)),
+                    ..
+                } => {
+                    let mapped = mapper.map_corner(*x, *y, *z);
+                    corner_map.get(&mapped) == Some(&nid)
+                }
+                // Accept without coordinates — trust event type match.
+                log::GameEvent::PlaceSettlement { corner: None, .. }
+                | log::GameEvent::BuildSettlement { corner: None, .. } => true,
+                _ => false,
+            }
+        }
+        ROAD_START..ROAD_END => {
+            let eid = crate::game::board::EdgeId(a - ROAD_START);
+            match event {
+                log::GameEvent::PlaceRoad {
+                    edge: Some((x, y, z)),
+                    ..
+                }
+                | log::GameEvent::BuildRoad {
+                    edge: Some((x, y, z)),
+                    ..
+                } => {
+                    let mapped = mapper.map_edge(*x, *y, *z);
+                    edge_map.get(&mapped) == Some(&eid)
+                }
+                log::GameEvent::PlaceRoad { edge: None, .. }
+                | log::GameEvent::BuildRoad { edge: None, .. } => true,
+                _ => false,
+            }
+        }
+        CITY_START..CITY_END => {
+            let nid = crate::game::board::NodeId(a - CITY_START);
+            match event {
+                log::GameEvent::BuildCity {
+                    corner: Some((x, y, z)),
+                    ..
+                } => {
+                    let mapped = mapper.map_corner(*x, *y, *z);
+                    corner_map.get(&mapped) == Some(&nid)
+                }
+                log::GameEvent::BuildCity { corner: None, .. } => true,
+                _ => false,
+            }
+        }
+        BUY_DEV_CARD => matches!(event, log::GameEvent::BuyDevCard { .. }),
+        PLAY_KNIGHT => matches!(event, log::GameEvent::PlayedKnight { .. }),
+        PLAY_ROAD_BUILDING => matches!(event, log::GameEvent::PlayedRoadBuilding { .. }),
+        YOP_START..YOP_END => matches!(event, log::GameEvent::PlayedYearOfPlenty { .. }),
+        MONOPOLY_START..MONOPOLY_END => matches!(event, log::GameEvent::PlayedMonopoly { .. }),
+        MARITIME_START..MARITIME_END => matches!(event, log::GameEvent::BankTrade { .. }),
+        _ => false,
+    }
+}
+
+/// Try to match pending canopy actions against new colonist events.
+///
+/// Returns `Ok(matched_count)` if events confirm pending actions in order,
+/// or `Err(())` on the first mismatch.
+fn match_pending_actions(
+    pending: &[usize],
+    new_events: &[log::GameEvent],
+    corner_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::NodeId>,
+    edge_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::EdgeId>,
+    mapper: &board::CoordMapper,
+) -> Result<usize, ()> {
+    // Filter new events to "significant" ones (the ones that correspond to
+    // player actions, not silent resource gains etc.).
+    let significant: Vec<&log::GameEvent> = new_events
+        .iter()
+        .filter(|e| {
+            matches!(
+                e,
+                log::GameEvent::PlaceSettlement { .. }
+                    | log::GameEvent::PlaceRoad { .. }
+                    | log::GameEvent::BuildRoad { .. }
+                    | log::GameEvent::BuildSettlement { .. }
+                    | log::GameEvent::BuildCity { .. }
+                    | log::GameEvent::BuyDevCard { .. }
+                    | log::GameEvent::PlayedKnight { .. }
+                    | log::GameEvent::PlayedMonopoly { .. }
+                    | log::GameEvent::PlayedRoadBuilding { .. }
+                    | log::GameEvent::PlayedYearOfPlenty { .. }
+                    | log::GameEvent::BankTrade { .. }
+            )
+        })
+        .collect();
+
+    let mut matched = 0;
+    for (i, &action) in pending.iter().enumerate() {
+        if i >= significant.len() {
+            // Not enough events yet to confirm all pending — partial match is ok.
+            break;
+        }
+        if match_action_to_event(action, significant[i], corner_map, edge_map, mapper) {
+            matched += 1;
+        } else {
+            eprintln!(
+                "pending action mismatch: canopy action {} vs event {:?}",
+                action, significant[i]
+            );
+            return Err(());
+        }
+    }
+    Ok(matched)
 }
 
 /// Entry point: extract game data and serve via web analysis board with live polling.
@@ -401,7 +542,8 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     log::print(&data.events);
     board::print(&data.board);
 
-    let mut timeline = state::build_timeline(&data.board, &data.events);
+    let mapper = board::CoordMapper::detect(&data.board.tiles);
+    let mut timeline = state::build_timeline(&data.board, &data.events, &mapper);
     // Derive color map from player list (first player → P1, second → P2).
     let color_map: Vec<(u8, canopy::player::Player)> = data
         .player_names
@@ -469,9 +611,10 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let session = Arc::new(tokio::sync::Mutex::new(initial_session));
 
     let (notify_tx, notify_rx) = tokio::sync::watch::channel(0u64);
+    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<usize>();
 
     // Build coordinate maps for incremental processing.
-    let (terrains, numbers, port_resources) = board::to_layout(&data.board);
+    let (terrains, numbers, port_resources) = board::to_layout(&data.board, &mapper);
     let topology = Arc::new(crate::game::topology::Topology::from_layout(
         terrains,
         numbers,
@@ -484,13 +627,26 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let poll_session = session.clone();
     let poll_board = data.board;
     let poll_local_color = data.local_color;
+    let poll_mapper = mapper;
     rt.spawn(async move {
         let mut committed_event_count = initial_event_count;
         let mut last_state = last_state;
         let mut generation = 0u64;
+        let mut pending_actions: Vec<usize> = Vec::new();
+        let mut pre_pending_cursor: Option<usize> = None;
 
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+
+            // Drain any actions the user played on the serve board.
+            while let Ok(action) = action_rx.try_recv() {
+                if pending_actions.is_empty() {
+                    // Save cursor before first pending action.
+                    let session = poll_session.lock().await;
+                    pre_pending_cursor = Some(session.cursor());
+                }
+                pending_actions.push(action);
+            }
 
             let poll = match poll_game_data(cdp_port).await {
                 Ok(p) => p,
@@ -505,35 +661,42 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
 
             // Sync buildings from board snapshot (handles setup placements
             // that lack coordinates in log entries).
-            let (ns, nc, nr) = state::sync_buildings(
+            let (ns, nc, nr, last_settle) = state::sync_buildings(
                 &mut last_state,
                 &poll.buildings,
                 &color_map,
                 &corner_map,
                 &edge_map,
+                &poll_mapper,
             );
             let buildings_changed = ns + nc + nr > 0;
             if buildings_changed {
                 eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
-                state::sync_setup_phase(&mut last_state);
+                state::sync_setup_phase(&mut last_state, last_settle);
             }
 
             if total_events <= committed_event_count {
                 // No new events — still update robber/turn/dev cards/buildings.
-                let live_changed =
-                    apply_live_state(&mut last_state, &poll, &color_map, poll_local_color);
+                let live_changed = apply_live_state(
+                    &mut last_state,
+                    &poll,
+                    &color_map,
+                    poll_local_color,
+                    &poll_mapper,
+                );
                 if buildings_changed || live_changed {
                     let mut session = poll_session.lock().await;
                     session.update_final_state(|s| {
-                        state::sync_buildings(
+                        let (_, _, _, ls) = state::sync_buildings(
                             s,
                             &poll.buildings,
                             &color_map,
                             &corner_map,
                             &edge_map,
+                            &poll_mapper,
                         );
-                        state::sync_setup_phase(s);
-                        apply_live_state(s, &poll, &color_map, poll_local_color);
+                        state::sync_setup_phase(s, ls);
+                        apply_live_state(s, &poll, &color_map, poll_local_color, &poll_mapper);
                     });
                     generation += 1;
                     let _ = notify_tx.send(generation);
@@ -549,6 +712,97 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 total_events
             );
 
+            // Check pending actions against new colonist events.
+            if !pending_actions.is_empty() {
+                match match_pending_actions(
+                    &pending_actions,
+                    new_events,
+                    &corner_map,
+                    &edge_map,
+                    &poll_mapper,
+                ) {
+                    Ok(matched) if matched > 0 => {
+                        eprintln!("poll: {matched} pending actions confirmed by colonist");
+                        pending_actions.drain(..matched);
+                        if pending_actions.is_empty() {
+                            pre_pending_cursor = None;
+                        }
+                        // Skip the confirmed events — they're already applied
+                        // on the session via PlayAction. Just update our tracking
+                        // state from the full event set.
+                        let new_entries = state::process_new_events(
+                            &mut last_state,
+                            new_events,
+                            &color_map,
+                            &corner_map,
+                            &edge_map,
+                            &poll_board,
+                            &poll_mapper,
+                        );
+                        apply_live_state(
+                            &mut last_state,
+                            &poll,
+                            &color_map,
+                            poll_local_color,
+                            &poll_mapper,
+                        );
+                        committed_event_count = total_events;
+
+                        // Only extend timeline with entries beyond what was
+                        // already pending. If matched == new_entries.len(),
+                        // there's nothing extra to add.
+                        let extra: Vec<_> = new_entries
+                            .into_iter()
+                            .skip(matched)
+                            .map(|e| (e.label, e.state))
+                            .collect();
+                        if !extra.is_empty() {
+                            let mut session = poll_session.lock().await;
+                            session.extend_timeline(extra);
+                        }
+
+                        {
+                            let mut session = poll_session.lock().await;
+                            session.update_final_state(|s| {
+                                let (_, _, _, ls) = state::sync_buildings(
+                                    s,
+                                    &poll.buildings,
+                                    &color_map,
+                                    &corner_map,
+                                    &edge_map,
+                                    &poll_mapper,
+                                );
+                                state::sync_setup_phase(s, ls);
+                                apply_live_state(
+                                    s,
+                                    &poll,
+                                    &color_map,
+                                    poll_local_color,
+                                    &poll_mapper,
+                                );
+                            });
+                        }
+
+                        generation += 1;
+                        let _ = notify_tx.send(generation);
+                        continue;
+                    }
+                    Ok(_) => {
+                        // No events matched yet (0 matched) — keep waiting.
+                    }
+                    Err(()) => {
+                        // Mismatch: rollback and re-process normally.
+                        eprintln!("poll: pending action mismatch — rolling back");
+                        if let Some(cursor) = pre_pending_cursor.take() {
+                            let mut session = poll_session.lock().await;
+                            session.rollback_to_cursor(cursor);
+                        }
+                        pending_actions.clear();
+                        // Fall through to normal processing below.
+                    }
+                }
+            }
+
             let new_entries = state::process_new_events(
                 &mut last_state,
                 new_events,
@@ -556,9 +810,16 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 &corner_map,
                 &edge_map,
                 &poll_board,
+                &poll_mapper,
             );
 
-            apply_live_state(&mut last_state, &poll, &color_map, poll_local_color);
+            apply_live_state(
+                &mut last_state,
+                &poll,
+                &color_map,
+                poll_local_color,
+                &poll_mapper,
+            );
             committed_event_count = total_events;
 
             {
@@ -573,9 +834,16 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 }
 
                 session.update_final_state(|s| {
-                    state::sync_buildings(s, &poll.buildings, &color_map, &corner_map, &edge_map);
-                    state::sync_setup_phase(s);
-                    apply_live_state(s, &poll, &color_map, poll_local_color);
+                    let (_, _, _, ls) = state::sync_buildings(
+                        s,
+                        &poll.buildings,
+                        &color_map,
+                        &corner_map,
+                        &edge_map,
+                        &poll_mapper,
+                    );
+                    state::sync_setup_phase(s, ls);
+                    apply_live_state(s, &poll, &color_map, poll_local_color, &poll_mapper);
                 });
             }
 
@@ -586,6 +854,10 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
 
     eprintln!("serving colonist board on port {serve_port} (live polling every 5s)");
     rt.block_on(canopy::server::serve_live(
-        serve_port, session, presenter, notify_rx,
+        serve_port,
+        session,
+        presenter,
+        notify_rx,
+        Some(action_tx),
     ));
 }

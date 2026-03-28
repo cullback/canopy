@@ -12,7 +12,7 @@ use axum::{
     Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
 };
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, mpsc, watch};
 use tower_http::services::ServeDir;
 
 use crate::eval::Evaluator;
@@ -142,13 +142,20 @@ pub async fn serve_with_timeline<G: Game + 'static>(
 /// The caller owns the `Arc<Mutex<GameSession>>` and a `watch::Sender<u64>`.
 /// A polling task can extend the session's timeline, then send a generation
 /// bump through the watch channel. Connected clients receive a state push.
+///
+/// If `action_tx` is `Some`, every `PlayAction` from the client will send the
+/// action index through the channel before the response is returned. This lets
+/// a polling task track which actions the user played locally so it can match
+/// them against externally confirmed events.
 pub async fn serve_live<G: Game + 'static>(
     port: u16,
     session: Arc<Mutex<GameSession<G>>>,
     presenter: Arc<dyn GamePresenter<G> + Send + Sync>,
     notify: watch::Receiver<u64>,
+    action_tx: Option<mpsc::UnboundedSender<usize>>,
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
+    let action_tx = action_tx.map(Arc::new);
 
     let app = Router::new()
         .route(
@@ -156,11 +163,15 @@ pub async fn serve_live<G: Game + 'static>(
             axum::routing::get({
                 let session = session.clone();
                 let notify = notify.clone();
+                let action_tx = action_tx.clone();
                 move |ws: WebSocketUpgrade| {
                     let session = session.clone();
                     let notify = notify.clone();
+                    let action_tx = action_tx.clone();
                     async move {
-                        ws.on_upgrade(move |socket| handle_live_socket(socket, session, notify))
+                        ws.on_upgrade(move |socket| {
+                            handle_live_socket(socket, session, notify, action_tx)
+                        })
                     }
                 }
             }),
@@ -177,6 +188,7 @@ async fn handle_live_socket<G: Game + 'static>(
     mut socket: WebSocket,
     session: Arc<Mutex<GameSession<G>>>,
     mut notify: watch::Receiver<u64>,
+    action_tx: Option<Arc<mpsc::UnboundedSender<usize>>>,
 ) {
     // Send initial state.
     {
@@ -213,6 +225,12 @@ async fn handle_live_socket<G: Game + 'static>(
                     }
                 };
                 let mut session = session.lock().await;
+                // Intercept PlayAction: notify the polling task before processing.
+                if let ClientMsg::PlayAction { action } = &client_msg
+                    && let Some(ref tx) = action_tx
+                {
+                    let _ = tx.send(*action);
+                }
                 let responses = match &client_msg {
                     ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {
                         match session.begin_search(&client_msg) {

@@ -266,6 +266,14 @@ impl<G: Game> Search<G> {
         self.config.num_simulations = n;
     }
 
+    /// Total visits on the current root (sum of edge visit counts), or 0 if
+    /// the root is not yet expanded.
+    pub fn root_visits(&self) -> u32 {
+        self.root
+            .map(|r| self.tree.edges(r).iter().map(|e| e.visits).sum())
+            .unwrap_or(0)
+    }
+
     /// Read access to the MCTS config.
     pub fn config(&self) -> &Config {
         &self.config

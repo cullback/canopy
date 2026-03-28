@@ -298,6 +298,7 @@ fn apply_place_settlement(state: &mut GameState, nid: NodeId) {
     state.setup_count += 1;
 
     update_trade_ratios(state, nid, pid);
+    state.last_setup_node = Some(nid);
 
     // Update road network frontier
     let opp_roads = state.boards[opp].road_network.roads;
@@ -340,6 +341,7 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
     state.boards[opp].road_network.remove_edge(eid);
     state.current_mut().roads_placed += 1;
     state.current_mut().roads_left -= 1;
+    state.last_setup_node = None;
 
     let setup_count = state.setup_count as usize;
     match setup_count {

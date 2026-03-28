@@ -98,7 +98,7 @@ const TERRAIN_POOL: [Terrain; 19] = [
 const NUMBER_TOKENS: [u8; 18] = [2, 3, 3, 4, 4, 5, 5, 6, 6, 8, 8, 9, 9, 10, 10, 11, 11, 12];
 
 /// Official Catan number token sequence (letters A through R).
-const TOKEN_SEQUENCE: [u8; 18] = [5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9, 4, 5, 6, 3, 11];
+pub const TOKEN_SEQUENCE: [u8; 18] = [5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9, 4, 5, 6, 3, 11];
 
 /// Port positions: (water hex, direction from water toward adjacent land hex).
 /// Derived from catanatron reference cube coords converted to axial (q=x, r=z).

@@ -298,16 +298,23 @@ fn populate_place_road(state: &GameState, actions: &mut Vec<ActionId>) {
     let all_roads = state.all_roads();
     let my_roads = state.boards[pid].road_network.roads;
 
-    // The just-placed settlement is the one with no adjacent road yet.
-    let mut settlements = state.boards[pid].settlements;
-    let mut last = 0u8;
-    while settlements != 0 {
-        let nid = settlements.trailing_zeros() as u8;
-        settlements &= settlements - 1;
-        if adj.node_adj_edges[nid as usize] & my_roads == 0 {
-            last = nid;
+    // Use last_setup_node if set (correct after sync_buildings places multiple
+    // settlements at once). Fall back to heuristic: scan for a settlement with
+    // no adjacent road.
+    let last = if let Some(nid) = state.last_setup_node {
+        nid.0
+    } else {
+        let mut settlements = state.boards[pid].settlements;
+        let mut found = 0u8;
+        while settlements != 0 {
+            let nid = settlements.trailing_zeros() as u8;
+            settlements &= settlements - 1;
+            if adj.node_adj_edges[nid as usize] & my_roads == 0 {
+                found = nid;
+            }
         }
-    }
+        found
+    };
 
     let legal = adj.node_adj_edges[last as usize] & !all_roads & EDGE_MASK;
     let mut bits = legal;

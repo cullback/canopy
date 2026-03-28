@@ -21,7 +21,7 @@ use crate::game::resource::ResourceArray;
 use crate::game::state::{GameState, Phase};
 use crate::game::topology::Topology;
 
-use super::board::{self, BoardData};
+use super::board::{self, BoardData, CoordMapper};
 use super::log::GameEvent;
 
 /// A snapshot in the game timeline for undo/redo navigation.
@@ -38,21 +38,33 @@ pub struct TimelineEntry {
 ///
 /// In **late join mode** (incomplete setup data), builds from the board snapshot
 /// and returns a single-entry timeline.
-pub fn build_timeline(board: &BoardData, events: &[GameEvent]) -> Vec<TimelineEntry> {
-    let (terrains, numbers, port_resources) = board::to_layout(board);
+pub fn build_timeline(
+    board: &BoardData,
+    events: &[GameEvent],
+    mapper: &CoordMapper,
+) -> Vec<TimelineEntry> {
+    let (terrains, numbers, port_resources) = board::to_layout(board, mapper);
     let topology = Arc::new(Topology::from_layout(terrains, numbers, port_resources));
     let color_map = discover_colors(events);
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);
 
-    if is_full_log(events, &corner_map, &edge_map) {
+    if is_full_log(events, &corner_map, &edge_map, mapper) {
         eprintln!("full log detected — building complete timeline");
-        build_full_timeline(board, topology, events, &color_map, &corner_map, &edge_map)
+        build_full_timeline(
+            board,
+            topology,
+            events,
+            &color_map,
+            &corner_map,
+            &edge_map,
+            mapper,
+        )
     } else {
         eprintln!("late join — single-state timeline from board snapshot");
         vec![TimelineEntry {
             label: "Current position".into(),
-            state: build_game_state(board, events),
+            state: build_game_state(board, events, mapper),
         }]
     }
 }
@@ -61,8 +73,12 @@ pub fn build_timeline(board: &BoardData, events: &[GameEvent]) -> Vec<TimelineEn
 ///
 /// Places buildings from the board snapshot (tileCornerStates/tileEdgeStates),
 /// replays the log for resource tracking, and sets up dice state.
-pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
-    let (terrains, numbers, port_resources) = board::to_layout(board);
+pub fn build_game_state(
+    board: &BoardData,
+    events: &[GameEvent],
+    mapper: &CoordMapper,
+) -> GameState {
+    let (terrains, numbers, port_resources) = board::to_layout(board, mapper);
     let topology = Arc::new(Topology::from_layout(terrains, numbers, port_resources));
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
@@ -77,8 +93,15 @@ pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
     let color_map = discover_colors(events);
 
     // Place buildings from board snapshot (dedup checks are no-ops on fresh state)
-    let buildings = board::extract_buildings(board);
-    let (ns, nc, nr) = sync_buildings(&mut state, &buildings, &color_map, &corner_map, &edge_map);
+    let buildings = board::extract_buildings(board, mapper);
+    let (ns, nc, nr, last_settle) = sync_buildings(
+        &mut state,
+        &buildings,
+        &color_map,
+        &corner_map,
+        &edge_map,
+        mapper,
+    );
     if ns + nc + nr > 0 {
         eprintln!("placed {ns} settlements, {nc} cities, {nr} roads from board snapshot");
     }
@@ -92,7 +115,7 @@ pub fn build_game_state(board: &BoardData, events: &[GameEvent]) -> GameState {
     }
 
     // Derive phase from building counts.
-    sync_setup_phase(&mut state);
+    sync_setup_phase(&mut state, last_settle);
 
     state
 }
@@ -366,25 +389,30 @@ fn place_road(state: &mut GameState, pid: Player, eid: crate::game::board::EdgeI
 /// Sync buildings from a board snapshot onto the game state.
 ///
 /// Only places buildings that are not already present (checked via bitfields).
-/// Returns the number of new buildings placed (settlements, cities, roads).
+/// Returns `(settlements, cities, roads, last_settlement_node)` — the last
+/// settlement NodeId placed (if any), used to set `last_setup_node`.
 pub fn sync_buildings(
     state: &mut GameState,
     buildings: &board::BuildingData,
     color_map: &[(u8, Player)],
     corner_map: &std::collections::HashMap<(i32, i32, u8), NodeId>,
     edge_map: &std::collections::HashMap<(i32, i32, u8), EdgeId>,
-) -> (u32, u32, u32) {
+    mapper: &CoordMapper,
+) -> (u32, u32, u32, Option<NodeId>) {
     let mut placed = (0u32, 0u32, 0u32);
+    let mut last_settlement: Option<NodeId> = None;
 
     for &(color, x, y, z) in &buildings.settlements {
         let Some(pid) = player_of_color(color_map, color) else {
             continue;
         };
-        let Some(&nid) = corner_map.get(&(x, y, z)) else {
+        let (mx, my, mz) = mapper.map_corner(x, y, z);
+        let Some(&nid) = corner_map.get(&(mx, my, mz)) else {
             continue;
         };
         if state.boards[pid].settlements & (1u64 << nid.0) == 0 {
             place_settlement(state, pid, nid);
+            last_settlement = Some(nid);
             placed.0 += 1;
         }
     }
@@ -393,7 +421,8 @@ pub fn sync_buildings(
         let Some(pid) = player_of_color(color_map, color) else {
             continue;
         };
-        let Some(&nid) = corner_map.get(&(x, y, z)) else {
+        let (mx, my, mz) = mapper.map_corner(x, y, z);
+        let Some(&nid) = corner_map.get(&(mx, my, mz)) else {
             continue;
         };
         if state.boards[pid].cities & (1u64 << nid.0) == 0 {
@@ -406,7 +435,8 @@ pub fn sync_buildings(
         let Some(pid) = player_of_color(color_map, color) else {
             continue;
         };
-        let Some(&eid) = edge_map.get(&(x, y, z)) else {
+        let (mx, my, mz) = mapper.map_edge(x, y, z);
+        let Some(&eid) = edge_map.get(&(mx, my, mz)) else {
             continue;
         };
         if state.boards[pid].road_network.roads & (1u128 << eid.0) == 0 {
@@ -415,7 +445,7 @@ pub fn sync_buildings(
         }
     }
 
-    placed
+    (placed.0, placed.1, placed.2, last_settlement)
 }
 
 /// Derive the correct setup phase from building counts on the board.
@@ -423,7 +453,11 @@ pub fn sync_buildings(
 /// During setup (4 settlements + 4 roads), the phase alternates between
 /// PlaceSettlement and PlaceRoad. The turn order is snake-draft:
 /// P1, P2, P2, P1. Once setup is complete, transitions to PreRoll.
-pub fn sync_setup_phase(state: &mut GameState) {
+///
+/// `last_settlement` is the NodeId of the last settlement placed by
+/// `sync_buildings`. When the phase is `PlaceRoad`, this is stored in
+/// `state.last_setup_node` so `populate_place_road` picks the right node.
+pub fn sync_setup_phase(state: &mut GameState, last_settlement: Option<NodeId>) {
     let total_settlements = state.boards[Player::One].settlements.count_ones()
         + state.boards[Player::Two].settlements.count_ones();
     let total_cities = state.boards[Player::One].cities.count_ones()
@@ -435,10 +469,15 @@ pub fn sync_setup_phase(state: &mut GameState) {
     if total_corners >= 4 && total_roads >= 4 {
         // Setup complete.
         state.setup_count = 4;
-        state.phase = Phase::PreRoll;
-        state.pre_roll = true;
-        state.turn_number = state.turn_number.max(1);
-        state.current_player = Player::One;
+        // Only transition to PreRoll if the game is still in a setup phase.
+        // After the first roll, the phase will already be Main (or later) and
+        // we must not overwrite it.
+        if matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad) {
+            state.phase = Phase::PreRoll;
+            state.pre_roll = true;
+            state.turn_number = state.turn_number.max(1);
+            state.current_player = Player::One;
+        }
         return;
     }
 
@@ -446,15 +485,27 @@ pub fn sync_setup_phase(state: &mut GameState) {
 
     if total_corners > total_roads {
         state.phase = Phase::PlaceRoad;
+        if let Some(nid) = last_settlement {
+            state.last_setup_node = Some(nid);
+        }
     } else {
         state.phase = Phase::PlaceSettlement;
     }
 
     // Snake draft turn order: P1, P2, P2, P1.
-    // After each settlement+road pair, the player for the NEXT settlement:
-    //   setup_count 0 → P1, 1 → P2, 2 → P2, 3 → P1
-    // During PlaceRoad, keep the same player as the settlement.
-    state.current_player = match state.setup_count {
+    // setup_count = total corners placed.
+    //
+    // PlaceSettlement: setup_count indexes the *next* settlement to place.
+    //   0 → P1, 1 → P2, 2 → P2, 3 → P1
+    //
+    // PlaceRoad: setup_count indexes the settlement that was *just* placed,
+    // so the road-placer is one step behind (setup_count - 1).
+    let idx = if state.phase == Phase::PlaceRoad {
+        state.setup_count.saturating_sub(1)
+    } else {
+        state.setup_count
+    };
+    state.current_player = match idx {
         0 | 3 => Player::One,
         1 | 2 => Player::Two,
         _ => Player::One,
@@ -469,18 +520,29 @@ fn is_full_log(
     events: &[GameEvent],
     corner_map: &HashMap<(i32, i32, u8), NodeId>,
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
+    mapper: &CoordMapper,
 ) -> bool {
     let mut settlements = 0u32;
     let mut roads = 0u32;
     for event in events {
         match event {
             GameEvent::PlaceSettlement {
-                corner: Some(c), ..
-            } if corner_map.contains_key(c) => {
-                settlements += 1;
+                corner: Some((x, y, z)),
+                ..
+            } => {
+                let mapped = mapper.map_corner(*x, *y, *z);
+                if corner_map.contains_key(&mapped) {
+                    settlements += 1;
+                }
             }
-            GameEvent::PlaceRoad { edge: Some(e), .. } if edge_map.contains_key(e) => {
-                roads += 1;
+            GameEvent::PlaceRoad {
+                edge: Some((x, y, z)),
+                ..
+            } => {
+                let mapped = mapper.map_edge(*x, *y, *z);
+                if edge_map.contains_key(&mapped) {
+                    roads += 1;
+                }
             }
             _ => {}
         }
@@ -505,6 +567,7 @@ fn build_full_timeline(
     color_map: &[(u8, Player)],
     corner_map: &HashMap<(i32, i32, u8), NodeId>,
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
+    mapper: &CoordMapper,
 ) -> Vec<TimelineEntry> {
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
@@ -523,9 +586,10 @@ fn build_full_timeline(
         match &events[event_idx] {
             GameEvent::PlaceSettlement {
                 player,
-                corner: Some(c),
+                corner: Some((x, y, z)),
             } => {
-                if let Some(&nid) = corner_map.get(c) {
+                let mapped = mapper.map_corner(*x, *y, *z);
+                if let Some(&nid) = corner_map.get(&mapped) {
                     state.apply_action(nid.0 as usize);
                     let label = format!("{} places settlement", player_label(*player, color_map));
                     timeline.push(TimelineEntry {
@@ -536,9 +600,10 @@ fn build_full_timeline(
             }
             GameEvent::PlaceRoad {
                 player,
-                edge: Some(e),
+                edge: Some((x, y, z)),
             } => {
-                if let Some(&eid) = edge_map.get(e) {
+                let mapped = mapper.map_edge(*x, *y, *z);
+                if let Some(&eid) = edge_map.get(&mapped) {
                     state.apply_action((54 + eid.0) as usize);
                     let label = format!("{} places road", player_label(*player, color_map));
                     timeline.push(TimelineEntry {
@@ -573,6 +638,7 @@ fn build_full_timeline(
         edge_map,
         board,
         &mut timeline,
+        mapper,
     );
 
     eprintln!("timeline: {} total entries", timeline.len());
@@ -593,6 +659,7 @@ fn process_post_setup(
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
     board: &BoardData,
     timeline: &mut Vec<TimelineEntry>,
+    mapper: &CoordMapper,
 ) {
     use crate::game::resource::{CITY_COST, DEV_CARD_COST, ROAD_COST, SETTLEMENT_COST};
 
@@ -649,7 +716,10 @@ fn process_post_setup(
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(ROAD_COST);
                     state.bank.add(ROAD_COST);
-                    if let Some(&eid) = edge.and_then(|e| edge_map.get(&e)) {
+                    if let Some(&eid) = edge
+                        .map(|(x, y, z)| mapper.map_edge(x, y, z))
+                        .and_then(|e| edge_map.get(&e))
+                    {
                         place_road(state, pid, eid);
                     }
                 }
@@ -660,7 +730,10 @@ fn process_post_setup(
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(SETTLEMENT_COST);
                     state.bank.add(SETTLEMENT_COST);
-                    if let Some(&nid) = corner.and_then(|c| corner_map.get(&c)) {
+                    if let Some(&nid) = corner
+                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
+                        .and_then(|c| corner_map.get(&c))
+                    {
                         place_settlement(state, pid, nid);
                     }
                 }
@@ -674,7 +747,10 @@ fn process_post_setup(
                 if let Some(pid) = player_of_color(color_map, *player) {
                     state.players[pid].hand.sub(CITY_COST);
                     state.bank.add(CITY_COST);
-                    if let Some(&nid) = corner.and_then(|c| corner_map.get(&c)) {
+                    if let Some(&nid) = corner
+                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
+                        .and_then(|c| corner_map.get(&c))
+                    {
                         place_city(state, pid, nid);
                     }
                 }
@@ -848,7 +924,7 @@ fn process_post_setup(
     }
 
     // Apply robber position from board snapshot to the final state.
-    let buildings = board::extract_buildings(board);
+    let buildings = board::extract_buildings(board, mapper);
     if let Some(idx) = buildings.robber_tile_index {
         if let Some(last) = timeline.last_mut() {
             last.state.robber = TileId(idx);
@@ -867,6 +943,7 @@ pub fn process_new_events(
     corner_map: &HashMap<(i32, i32, u8), NodeId>,
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
     board: &BoardData,
+    mapper: &CoordMapper,
 ) -> Vec<TimelineEntry> {
     let mut timeline = Vec::new();
     process_post_setup(
@@ -877,6 +954,7 @@ pub fn process_new_events(
         edge_map,
         board,
         &mut timeline,
+        mapper,
     );
     timeline
 }
