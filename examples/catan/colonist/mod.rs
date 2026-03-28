@@ -668,7 +668,6 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
 
     // Spawn polling task.
     let poll_session = session.clone();
-    let poll_board = data.board;
     let poll_local_color = data.local_color;
     let poll_mapper = mapper;
     rt.spawn(async move {
@@ -777,14 +776,18 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                         // Skip the confirmed events — they're already applied
                         // on the session via PlayAction. Just update our tracking
                         // state from the full event set.
+                        let live_robber = poll
+                            .robber_hex
+                            .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
+                            .map(|i| crate::game::board::TileId(i as u8));
                         let new_entries = state::process_new_events(
                             &mut last_state,
                             new_events,
                             &color_map,
                             &corner_map,
                             &edge_map,
-                            &poll_board,
                             &poll_mapper,
+                            live_robber,
                         );
                         apply_live_state(
                             &mut last_state,
@@ -850,14 +853,18 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
                 }
             }
 
+            let live_robber = poll
+                .robber_hex
+                .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
+                .map(|i| crate::game::board::TileId(i as u8));
             let new_entries = state::process_new_events(
                 &mut last_state,
                 new_events,
                 &color_map,
                 &corner_map,
                 &edge_map,
-                &poll_board,
                 &poll_mapper,
+                live_robber,
             );
             eprintln!(
                 "poll: {} timeline entries, last_state phase={:?} pre_roll={} dice_thrown={:?}",

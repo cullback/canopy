@@ -741,15 +741,19 @@ fn build_full_timeline(
     // Phase 2: Post-setup events routed through the engine action system.
     // State is in PreRoll after setup — the first Roll event transitions
     // through ROLL → resolve, so no manual phase override needed.
+    let robber_tile = {
+        let buildings = board::extract_buildings(board, mapper);
+        buildings.robber_tile_index.map(TileId)
+    };
     process_post_setup(
         &mut state,
         &events[event_idx..],
         color_map,
         corner_map,
         edge_map,
-        board,
         &mut timeline,
         mapper,
+        robber_tile,
     );
 
     eprintln!("timeline: {} total entries", timeline.len());
@@ -775,22 +779,15 @@ fn process_post_setup(
     color_map: &[(u8, Player)],
     corner_map: &HashMap<(i32, i32, u8), NodeId>,
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
-    board: &BoardData,
     timeline: &mut Vec<TimelineEntry>,
     mapper: &CoordMapper,
+    robber_tile: Option<TileId>,
 ) {
     use crate::game::action::{self, END_TURN, PLAY_KNIGHT, PLAY_ROAD_BUILDING, ROLL};
-    use crate::game::resource::ALL_RESOURCES;
+    use crate::game::resource::{ALL_RESOURCES, CITY_COST, ROAD_COST, SETTLEMENT_COST};
 
     let mut pending_label: Option<String> = None;
     let mut roll_gains: [ResourceArray; 2] = [ResourceArray::default(); 2];
-
-    // Best-effort robber tile from board snapshot (correct for the last
-    // MoveRobber; may be approximate for earlier ones — same as old code).
-    let robber_tile = {
-        let buildings = board::extract_buildings(board, mapper);
-        buildings.robber_tile_index.map(TileId)
-    };
 
     for event in events {
         let is_entry = matches!(
@@ -862,6 +859,9 @@ fn process_post_setup(
                     .and_then(|e| edge_map.get(&e))
                 {
                     crate::game::apply_with_chance(state, action::road_id(eid).0 as usize, None);
+                } else if let Some(pid) = player_of_color(color_map, *player) {
+                    state.players[pid].hand.sub(ROAD_COST);
+                    state.bank.add(ROAD_COST);
                 }
                 pending_label = Some(format!("{} builds road", player_label(*player, color_map)));
             }
@@ -876,6 +876,9 @@ fn process_post_setup(
                         action::settlement_id(nid).0 as usize,
                         None,
                     );
+                } else if let Some(pid) = player_of_color(color_map, *player) {
+                    state.players[pid].hand.sub(SETTLEMENT_COST);
+                    state.bank.add(SETTLEMENT_COST);
                 }
                 pending_label = Some(format!(
                     "{} builds settlement",
@@ -889,6 +892,9 @@ fn process_post_setup(
                     .and_then(|c| corner_map.get(&c))
                 {
                     crate::game::apply_with_chance(state, action::city_id(nid).0 as usize, None);
+                } else if let Some(pid) = player_of_color(color_map, *player) {
+                    state.players[pid].hand.sub(CITY_COST);
+                    state.bank.add(CITY_COST);
                 }
                 pending_label = Some(format!("{} builds city", player_label(*player, color_map)));
             }
@@ -1141,8 +1147,8 @@ pub fn process_new_events(
     color_map: &[(u8, Player)],
     corner_map: &HashMap<(i32, i32, u8), NodeId>,
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
-    board: &BoardData,
     mapper: &CoordMapper,
+    robber_tile: Option<TileId>,
 ) -> Vec<TimelineEntry> {
     let mut timeline = Vec::new();
     process_post_setup(
@@ -1151,9 +1157,9 @@ pub fn process_new_events(
         color_map,
         corner_map,
         edge_map,
-        board,
         &mut timeline,
         mapper,
+        robber_tile,
     );
     timeline
 }
