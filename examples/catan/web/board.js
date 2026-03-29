@@ -65,6 +65,42 @@ class Board {
     // Robber layer
     this._g('robber');
 
+    // Persistent hover targets for tiles, edges, and nodes
+    const hitsG = this._g('hit-targets');
+    for (let tid = 0; tid < board.tiles.length; tid++) {
+      const tile = board.tiles[tid];
+      if (!tile) continue;
+      const el = this._el('circle', {
+        cx: tile.cx, cy: tile.cy, r: 18,
+        fill: 'transparent', 'pointer-events': 'all'
+      });
+      this._attachTooltip(el, `T${tid}`);
+      hitsG.appendChild(el);
+    }
+    for (let eid = 0; eid < board.edges.length; eid++) {
+      const edge = board.edges[eid];
+      if (!edge) continue;
+      const [n0, n1] = edge;
+      const [x0, y0] = board.nodes[n0];
+      const [x1, y1] = board.nodes[n1];
+      const el = this._el('line', {
+        x1: x0, y1: y0, x2: x1, y2: y1,
+        stroke: 'transparent', 'stroke-width': 6,
+        'stroke-linecap': 'round', 'pointer-events': 'stroke'
+      });
+      this._attachTooltip(el, `E${eid}`);
+      hitsG.appendChild(el);
+    }
+    for (let nid = 0; nid < board.nodes.length; nid++) {
+      const [x, y] = board.nodes[nid];
+      const el = this._el('circle', {
+        cx: x, cy: y, r: 7,
+        fill: 'transparent', 'pointer-events': 'all'
+      });
+      this._attachTooltip(el, `N${nid}`);
+      hitsG.appendChild(el);
+    }
+
     // Overlay for legal actions
     this._g('overlays');
   }
