@@ -368,8 +368,8 @@ fn apply_live_state(
     }
 
     // During setup, sync_setup_phase sets current_player from building counts.
-    // Only override post-setup.
-    if state.setup_count >= 4
+    // Only override post-setup (phase has left PlaceSettlement/PlaceRoad).
+    if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad)
         && let Some(color) = poll.current_turn_color
         && let Some(pid) = state::player_of_color(color_map, color)
     {
@@ -408,7 +408,7 @@ fn apply_live_state(
     // Derive has_played_dev_card_this_turn from the event log: walk backwards
     // from the end; if we see a dev card play before the current player's roll,
     // they've played one this turn.
-    if state.setup_count >= 4 {
+    if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad) {
         let played =
             state::played_dev_card_this_turn(&poll.events, color_map, state.current_player);
         if state.players[state.current_player].has_played_dev_card_this_turn != played {
@@ -634,7 +634,7 @@ pub fn run_serve(
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let data = rt.block_on(extract_game_data(cdp_port));
+    let mut data = rt.block_on(extract_game_data(cdp_port));
     log::print(&data.events);
     board::print(&data.board);
 
@@ -661,38 +661,27 @@ pub fn run_serve(
     }
     let initial_event_count = data.events.len();
 
-    // Apply dev card identities to the final timeline state if available.
-    if !data.dev_cards.is_empty() {
-        if let Some(last) = timeline.last_mut() {
-            let local_player = local_player(data.local_color, &color_map);
-            state::apply_dev_cards(
-                &mut last.state,
-                local_player,
-                &data.dev_cards,
-                &data.dev_cards_bought_this_turn,
-            );
-        }
-    }
-
-    // Set current turn player and dice phase from live game data.
-    if let Some(color) = data.current_turn_color {
-        if let Some(pid) = state::player_of_color(&color_map, color) {
-            if let Some(last) = timeline.last_mut() {
-                last.state.current_player = pid;
-            }
-        }
-    }
-    if let Some(thrown) = data.dice_thrown {
-        if let Some(last) = timeline.last_mut() {
-            if last.state.setup_count >= 4 {
-                last.state.pre_roll = !thrown;
-                if !thrown {
-                    last.state.phase = Phase::PreRoll;
-                } else if matches!(last.state.phase, Phase::PreRoll) {
-                    last.state.phase = Phase::Main;
-                }
-            }
-        }
+    // Apply live state (turn, dice phase, dev cards) to the final timeline
+    // entry. Reuses the same function the polling loop uses, so phase guards
+    // (e.g. skipping overrides during setup) are in one place.
+    if let Some(last) = timeline.last_mut() {
+        let initial_poll = PollData {
+            events: vec![], // played_dev_card_this_turn already set by build_timeline
+            dev_cards: std::mem::take(&mut data.dev_cards),
+            dev_cards_bought_this_turn: std::mem::take(&mut data.dev_cards_bought_this_turn),
+            current_turn_color: data.current_turn_color,
+            dice_thrown: data.dice_thrown,
+            turn_state: None,
+            robber_hex: None, // already set by build_timeline
+            buildings: board::BuildingData::default(),
+        };
+        apply_live_state(
+            &mut last.state,
+            &initial_poll,
+            &color_map,
+            data.local_color,
+            &mapper,
+        );
     }
 
     // Save the last state for incremental processing.

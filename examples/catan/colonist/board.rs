@@ -873,6 +873,7 @@ pub fn build_edge_map(topology: &Topology) -> HashMap<(i32, i32, u8), EdgeId> {
 }
 
 /// Extracted building and road positions from tileCornerStates / tileEdgeStates.
+#[derive(Default)]
 pub struct BuildingData {
     /// (player_color, x, y, z) for each settlement
     pub settlements: Vec<(u8, i32, i32, u8)>,
