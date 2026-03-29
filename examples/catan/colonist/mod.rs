@@ -23,13 +23,6 @@ type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 static MSG_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Discover the colonist.io tab and return its `webSocketDebuggerUrl`.
-async fn discover_tab(port: u16) -> String {
-    try_discover_tab(port)
-        .await
-        .expect("failed to discover colonist.io tab")
-}
-
-/// Fallible version of `discover_tab`.
 async fn try_discover_tab(port: u16) -> Result<String, String> {
     let mut stream = TcpStream::connect(("127.0.0.1", port))
         .await
@@ -80,13 +73,6 @@ async fn try_discover_tab(port: u16) -> Result<String, String> {
 }
 
 /// Send a `Runtime.evaluate` CDP command and return the result value.
-async fn evaluate(ws: &mut WsStream, expression: &str) -> serde_json::Value {
-    try_evaluate(ws, expression)
-        .await
-        .expect("CDP evaluate failed")
-}
-
-/// Fallible version of `evaluate`.
 async fn try_evaluate(ws: &mut WsStream, expression: &str) -> Result<serde_json::Value, String> {
     let id = MSG_ID.fetch_add(1, Ordering::Relaxed);
     let msg = serde_json::json!({
@@ -195,8 +181,9 @@ const EXTRACT_LOG_JS: &str = r#"(() => {
 })()"#;
 
 /// Extracted game data from a colonist.io session.
-struct ColonistData {
+struct GameData {
     board: board::BoardData,
+    buildings: board::BuildingData,
     events: Vec<log::GameEvent>,
     /// Dev card identities extracted from the React state (may be empty).
     dev_cards: Vec<DevCardKind>,
@@ -205,36 +192,43 @@ struct ColonistData {
     /// Player names keyed by colonist color.
     player_names: Vec<(u8, String)>,
     /// Local player's colonist color (the browser session owner).
-    local_color: Option<u8>,
+    local_color: u8,
     /// Current turn player's colonist color.
-    current_turn_color: Option<u8>,
+    current_turn_color: u8,
     /// Whether the dice have been thrown this turn.
-    dice_thrown: Option<bool>,
+    dice_thrown: bool,
+    /// Robber hex coordinates from the live board.
+    robber_hex: (i32, i32),
 }
 
 /// Connect to Chrome via CDP and extract game data.
-async fn extract_game_data(port: u16) -> ColonistData {
-    let ws_url = discover_tab(port).await;
+async fn extract_game_data(port: u16) -> Result<GameData, String> {
+    let ws_url = try_discover_tab(port).await?;
     eprintln!("connected to: {ws_url}");
 
     let (mut ws, _) = connect_async(&ws_url)
         .await
-        .expect("WebSocket connect failed");
+        .map_err(|e| format!("CDP connect: {e}"))?;
 
     // Extract game log
-    let result = evaluate(&mut ws, EXTRACT_LOG_JS).await;
+    let result = try_evaluate(&mut ws, EXTRACT_LOG_JS).await?;
     let json_str = result.as_str().unwrap_or("[]");
     let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
     eprintln!("{} log entries", entries.len());
     let events = log::parse(&entries);
 
     // Extract board state
-    let board_json = evaluate(&mut ws, board::EXTRACT_JS).await;
+    let board_json = try_evaluate(&mut ws, board::EXTRACT_JS).await?;
     let board_str = board_json.as_str().unwrap_or("{}");
-    let board = board::parse(board_str).expect("failed to parse board data");
+    let board = board::parse(board_str).ok_or("failed to parse board data")?;
 
-    // Try extracting dev card hand (best-effort).
-    let cards_json = evaluate(&mut ws, board::EXTRACT_CARDS_JS).await;
+    // Extract buildings
+    let buildings_json = try_evaluate(&mut ws, board::EXTRACT_BUILDINGS_JS).await?;
+    let buildings_str = buildings_json.as_str().unwrap_or("{}");
+    let buildings = board::parse_buildings_poll(buildings_str);
+
+    // Dev cards
+    let cards_json = try_evaluate(&mut ws, board::EXTRACT_CARDS_JS).await?;
     let cards_str = cards_json.as_str().unwrap_or("{}");
     let dcs = parse_dev_card_state(cards_str);
     if !dcs.cards.is_empty() {
@@ -245,14 +239,30 @@ async fn extract_game_data(port: u16) -> ColonistData {
         );
     }
 
-    // Extract player names, local player identity, current turn, and robber.
-    let players_json = evaluate(&mut ws, board::EXTRACT_LIVE_JS).await;
-    let players_str = players_json.as_str().unwrap_or("{}");
-    let players_obj: serde_json::Value = serde_json::from_str(players_str).unwrap_or_default();
-    let local_color: Option<u8> = players_obj["localColor"].as_u64().map(|c| c as u8);
-    let current_turn_color: Option<u8> = players_obj["currentTurnColor"].as_u64().map(|c| c as u8);
-    let dice_thrown: Option<bool> = players_obj["diceThrown"].as_bool();
-    let player_names: Vec<(u8, String)> = players_obj["players"]
+    // Extract player names, local player identity, current turn, dice, robber.
+    let live_json = try_evaluate(&mut ws, board::EXTRACT_LIVE_JS).await?;
+    let live_str = live_json.as_str().unwrap_or("{}");
+    let live_obj: serde_json::Value = serde_json::from_str(live_str).unwrap_or_default();
+    let local_color = live_obj["localColor"]
+        .as_u64()
+        .map(|c| c as u8)
+        .ok_or("missing localColor")?;
+    let current_turn_color = live_obj["currentTurnColor"]
+        .as_u64()
+        .map(|c| c as u8)
+        .ok_or("missing currentTurnColor")?;
+    let dice_thrown = live_obj["diceThrown"]
+        .as_bool()
+        .ok_or("missing diceThrown")?;
+    let robber_hex = live_obj["robberHex"]
+        .as_object()
+        .and_then(|o| {
+            let x = o.get("x")?.as_i64()? as i32;
+            let y = o.get("y")?.as_i64()? as i32;
+            Some((x, y))
+        })
+        .ok_or("missing robberHex")?;
+    let player_names: Vec<(u8, String)> = live_obj["players"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -265,7 +275,7 @@ async fn extract_game_data(port: u16) -> ColonistData {
         })
         .unwrap_or_default();
     for (color, name) in &player_names {
-        let me = if local_color == Some(*color) {
+        let me = if *color == local_color {
             " (local)"
         } else {
             ""
@@ -275,8 +285,9 @@ async fn extract_game_data(port: u16) -> ColonistData {
 
     ws.close(None).await.ok();
 
-    ColonistData {
+    Ok(GameData {
         board,
+        buildings,
         events,
         dev_cards: dcs.cards,
         dev_cards_bought_this_turn: dcs.bought_this_turn,
@@ -284,7 +295,8 @@ async fn extract_game_data(port: u16) -> ColonistData {
         local_color,
         current_turn_color,
         dice_thrown,
-    }
+        robber_hex,
+    })
 }
 
 /// Parsed dev card state from the React extraction.
@@ -339,7 +351,9 @@ pub fn run(port: u16) {
         .build()
         .expect("tokio runtime");
 
-    let data = rt.block_on(extract_game_data(port));
+    let data = rt
+        .block_on(extract_game_data(port))
+        .expect("failed to extract game data");
     log::print(&data.events);
     board::print(&data.board);
 }
@@ -350,28 +364,25 @@ pub fn run(port: u16) {
 /// (via `sync_buildings`) because they have their own logging.
 fn apply_live_state(
     state: &mut crate::game::state::GameState,
-    poll: &PollData,
+    data: &GameData,
     color_map: &[(u8, canopy::player::Player)],
-    local_color: Option<u8>,
     mapper: &board::CoordMapper,
 ) -> bool {
     let mut changed = false;
 
-    if let Some((rx, ry)) = poll.robber_hex {
-        if let Some(idx) = mapper.tile_index(rx, ry) {
-            let new_robber = crate::game::board::TileId(idx as u8);
-            if state.robber != new_robber {
-                state.robber = new_robber;
-                changed = true;
-            }
+    let (rx, ry) = data.robber_hex;
+    if let Some(idx) = mapper.tile_index(rx, ry) {
+        let new_robber = crate::game::board::TileId(idx as u8);
+        if state.robber != new_robber {
+            state.robber = new_robber;
+            changed = true;
         }
     }
 
     // During setup, sync_setup_phase sets current_player from building counts.
     // Only override post-setup (phase has left PlaceSettlement/PlaceRoad).
     if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad)
-        && let Some(color) = poll.current_turn_color
-        && let Some(pid) = state::player_of_color(color_map, color)
+        && let Some(pid) = state::player_of_color(color_map, data.current_turn_color)
     {
         if state.current_player != pid {
             eprintln!("live: turn changed to {pid:?}");
@@ -380,37 +391,33 @@ fn apply_live_state(
         }
 
         // Use colonist's diceState.diceThrown to detect pre-roll vs post-roll.
-        if let Some(thrown) = poll.dice_thrown {
-            let want_pre_roll = !thrown;
-            if state.pre_roll != want_pre_roll {
-                eprintln!(
-                    "live: dice_thrown={thrown} → pre_roll={want_pre_roll} (was {})",
-                    state.pre_roll
-                );
-                state.pre_roll = want_pre_roll;
-                if want_pre_roll {
-                    state.phase = Phase::PreRoll;
-                } else if matches!(state.phase, Phase::PreRoll) {
-                    state.phase = Phase::Main;
-                }
-                changed = true;
+        let want_pre_roll = !data.dice_thrown;
+        if state.pre_roll != want_pre_roll {
+            eprintln!(
+                "live: dice_thrown={} → pre_roll={want_pre_roll} (was {})",
+                data.dice_thrown, state.pre_roll
+            );
+            state.pre_roll = want_pre_roll;
+            if want_pre_roll {
+                state.phase = Phase::PreRoll;
+            } else if matches!(state.phase, Phase::PreRoll) {
+                state.phase = Phase::Main;
             }
-        }
-    }
-
-    if let Some(lp) = local_color.and_then(|c| state::player_of_color(color_map, c)) {
-        state::apply_dev_cards(state, lp, &poll.dev_cards, &poll.dev_cards_bought_this_turn);
-        if state.players[lp].hidden_dev_cards == 0 && !poll.dev_cards.is_empty() {
             changed = true;
         }
     }
 
-    // Derive has_played_dev_card_this_turn from the event log: walk backwards
-    // from the end; if we see a dev card play before the current player's roll,
-    // they've played one this turn.
+    if let Some(lp) = state::player_of_color(color_map, data.local_color) {
+        state::apply_dev_cards(state, lp, &data.dev_cards, &data.dev_cards_bought_this_turn);
+        if state.players[lp].hidden_dev_cards == 0 && !data.dev_cards.is_empty() {
+            changed = true;
+        }
+    }
+
+    // Derive has_played_dev_card_this_turn from the event log.
     if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad) {
         let played =
-            state::played_dev_card_this_turn(&poll.events, color_map, state.current_player);
+            state::played_dev_card_this_turn(&data.events, color_map, state.current_player);
         if state.players[state.current_player].has_played_dev_card_this_turn != played {
             state.players[state.current_player].has_played_dev_card_this_turn = played;
             changed = true;
@@ -432,68 +439,6 @@ fn apply_live_state(
     }
 
     changed
-}
-
-/// Lightweight CDP extraction for polling.
-struct PollData {
-    events: Vec<log::GameEvent>,
-    dev_cards: Vec<DevCardKind>,
-    dev_cards_bought_this_turn: Vec<DevCardKind>,
-    current_turn_color: Option<u8>,
-    dice_thrown: Option<bool>,
-    turn_state: Option<u8>,
-    robber_hex: Option<(i32, i32)>,
-    buildings: board::BuildingData,
-}
-
-/// Connect to Chrome and extract only what's needed for incremental updates.
-async fn poll_game_data(port: u16) -> Result<PollData, String> {
-    let ws_url = try_discover_tab(port).await?;
-    let (mut ws, _) = connect_async(&ws_url)
-        .await
-        .map_err(|e| format!("CDP connect: {e}"))?;
-
-    // Log entries
-    let result = try_evaluate(&mut ws, EXTRACT_LOG_JS).await?;
-    let json_str = result.as_str().unwrap_or("[]");
-    let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
-    let events = log::parse(&entries);
-
-    // Dev cards
-    let cards_json = try_evaluate(&mut ws, board::EXTRACT_CARDS_JS).await?;
-    let cards_str = cards_json.as_str().unwrap_or("{}");
-    let dcs = parse_dev_card_state(cards_str);
-
-    // Players, current turn, and robber (single CDP call)
-    let live_json = try_evaluate(&mut ws, board::EXTRACT_LIVE_JS).await?;
-    let live_str = live_json.as_str().unwrap_or("{}");
-    let live_obj: serde_json::Value = serde_json::from_str(live_str).unwrap_or_default();
-    let current_turn_color: Option<u8> = live_obj["currentTurnColor"].as_u64().map(|c| c as u8);
-    let dice_thrown: Option<bool> = live_obj["diceThrown"].as_bool();
-    let turn_state: Option<u8> = live_obj["turnState"].as_u64().map(|v| v as u8);
-    let robber_hex: Option<(i32, i32)> = live_obj["robberHex"].as_object().and_then(|o| {
-        let x = o.get("x")?.as_i64()? as i32;
-        let y = o.get("y")?.as_i64()? as i32;
-        Some((x, y))
-    });
-
-    // Buildings from board snapshot
-    let buildings_json = try_evaluate(&mut ws, board::EXTRACT_BUILDINGS_JS).await?;
-    let buildings_str = buildings_json.as_str().unwrap_or("{}");
-    let buildings = board::parse_buildings_poll(buildings_str);
-
-    ws.close(None).await.ok();
-
-    Ok(PollData {
-        events,
-        dev_cards: dcs.cards,
-        dev_cards_bought_this_turn: dcs.bought_this_turn,
-        current_turn_color,
-        dice_thrown,
-        turn_state,
-        robber_hex,
-        buildings,
-    })
 }
 
 /// Check if a canopy action index matches a colonist `GameEvent`.
@@ -634,7 +579,9 @@ pub fn run_serve(
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
-    let mut data = rt.block_on(extract_game_data(cdp_port));
+    let data = rt
+        .block_on(extract_game_data(cdp_port))
+        .expect("failed to extract game data");
     log::print(&data.events);
     board::print(&data.board);
 
@@ -665,23 +612,7 @@ pub fn run_serve(
     // entry. Reuses the same function the polling loop uses, so phase guards
     // (e.g. skipping overrides during setup) are in one place.
     if let Some(last) = timeline.last_mut() {
-        let initial_poll = PollData {
-            events: vec![], // played_dev_card_this_turn already set by build_timeline
-            dev_cards: std::mem::take(&mut data.dev_cards),
-            dev_cards_bought_this_turn: std::mem::take(&mut data.dev_cards_bought_this_turn),
-            current_turn_color: data.current_turn_color,
-            dice_thrown: data.dice_thrown,
-            turn_state: None,
-            robber_hex: None, // already set by build_timeline
-            buildings: board::BuildingData::default(),
-        };
-        apply_live_state(
-            &mut last.state,
-            &initial_poll,
-            &color_map,
-            data.local_color,
-            &mapper,
-        );
+        apply_live_state(&mut last.state, &data, &color_map, &mapper);
     }
 
     // Save the last state for incremental processing.
@@ -733,7 +664,6 @@ pub fn run_serve(
 
     // Spawn polling task.
     let poll_session = session.clone();
-    let poll_local_color = data.local_color;
     let poll_mapper = mapper;
     rt.spawn(async move {
         let mut committed_event_count = initial_event_count;
@@ -753,7 +683,7 @@ pub fn run_serve(
                 pending_actions.push(action);
             }
 
-            let poll = match poll_game_data(cdp_port).await {
+            let poll = match extract_game_data(cdp_port).await {
                 Ok(p) => p,
                 Err(e) => {
                     eprintln!("poll error: {e}");
@@ -766,7 +696,7 @@ pub fn run_serve(
 
             // --- Mutate committed_state (single copy, single place) ---
 
-            let (ns, nc, nr, last_settle) = state::sync_buildings(
+            let (ns, nc, nr, _) = state::sync_buildings(
                 &mut committed_state,
                 &poll.buildings,
                 &color_map,
@@ -776,7 +706,7 @@ pub fn run_serve(
             );
             if ns + nc + nr > 0 {
                 eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
-                state::sync_setup_phase(&mut committed_state, last_settle);
+                state::sync_setup_phase(&mut committed_state);
             }
 
             let mut entries_to_extend = Vec::new();
@@ -791,9 +721,9 @@ pub fn run_serve(
                     total_events
                 );
 
-                let live_robber = poll
-                    .robber_hex
-                    .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
+                let (rx, ry) = poll.robber_hex;
+                let live_robber = poll_mapper
+                    .tile_index(rx, ry)
                     .map(|i| crate::game::board::TileId(i as u8));
                 let (new_entries, new_actions) = state::process_new_events(
                     &mut committed_state,
@@ -874,13 +804,7 @@ pub fn run_serve(
                 };
             }
 
-            apply_live_state(
-                &mut committed_state,
-                &poll,
-                &color_map,
-                poll_local_color,
-                &poll_mapper,
-            );
+            apply_live_state(&mut committed_state, &poll, &color_map, &poll_mapper);
 
             // --- Sync to session (one path) ---
 

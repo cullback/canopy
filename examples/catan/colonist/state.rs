@@ -94,7 +94,7 @@ pub fn build_game_state(
 
     // Place buildings from board snapshot (dedup checks are no-ops on fresh state)
     let buildings = board::extract_buildings(board, mapper);
-    let (ns, nc, nr, last_settle) = sync_buildings(
+    let (ns, nc, nr, _) = sync_buildings(
         &mut state,
         &buildings,
         &color_map,
@@ -115,7 +115,7 @@ pub fn build_game_state(
     }
 
     // Derive phase from building counts.
-    sync_setup_phase(&mut state, last_settle);
+    sync_setup_phase(&mut state);
 
     // Override phase based on last log event — sync_setup_phase only looks at
     // building counts, so it can't distinguish pre-roll from post-roll.
@@ -494,7 +494,7 @@ pub fn sync_buildings(
 /// `last_settlement` is the NodeId of the last settlement placed by
 /// `sync_buildings`. When the phase is `PlaceRoad`, this is stored in
 /// `state.last_setup_node` so `populate_place_road` picks the right node.
-pub fn sync_setup_phase(state: &mut GameState, last_settlement: Option<NodeId>) {
+pub fn sync_setup_phase(state: &mut GameState) {
     let total_settlements = state.boards[Player::One].settlements.count_ones()
         + state.boards[Player::Two].settlements.count_ones();
     let total_cities = state.boards[Player::One].cities.count_ones()
@@ -522,9 +522,6 @@ pub fn sync_setup_phase(state: &mut GameState, last_settlement: Option<NodeId>) 
 
     if total_corners > total_roads {
         state.phase = Phase::PlaceRoad;
-        if let Some(nid) = last_settlement {
-            state.last_setup_node = Some(nid);
-        }
     } else {
         state.phase = Phase::PlaceSettlement;
     }
@@ -547,6 +544,24 @@ pub fn sync_setup_phase(state: &mut GameState, last_settlement: Option<NodeId>) 
         1 | 2 => Player::Two,
         _ => Player::One,
     };
+
+    // Find the current player's settlement that still needs a road.
+    // sync_buildings returns the last settlement in iteration order, which
+    // may belong to the opponent.
+    if state.phase == Phase::PlaceRoad {
+        let pid = state.current_player;
+        let my_roads = state.boards[pid].road_network.roads;
+        let adj = &state.topology.adj;
+        let mut settlements = state.boards[pid].settlements;
+        while settlements != 0 {
+            let bit = settlements.trailing_zeros() as u8;
+            settlements &= settlements - 1;
+            if adj.node_adj_edges[bit as usize] & my_roads == 0 {
+                state.last_setup_node = Some(NodeId(bit));
+                break;
+            }
+        }
+    }
 }
 
 /// Check whether the current player played a dev card this turn by scanning
