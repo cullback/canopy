@@ -140,7 +140,7 @@ session.on('BotAction', (msg) => {
 });
 
 session.on('Error', (msg) => {
-  controls.setSearching(false);
+  controls.onSearchError();
   console.error('Server error:', msg.message);
 });
 

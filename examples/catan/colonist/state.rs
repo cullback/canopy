@@ -1119,6 +1119,11 @@ fn process_post_setup(
                                 let aid = action::robber_id(tile).0 as usize;
                                 crate::game::apply_with_chance(state, aid, None);
                                 actions.push(aid);
+                                // Engine sets Phase::Roll when pre_roll (auto-dice).
+                                // Colonist resolves dice via events — use PreRoll.
+                                if matches!(state.phase, Phase::Roll) {
+                                    state.phase = Phase::PreRoll;
+                                }
                             } else {
                                 // Same tile — can't use engine. Manual transition.
                                 state.phase = if state.pre_roll {
@@ -1148,6 +1153,11 @@ fn process_post_setup(
                     if let Some(idx) = ALL_RESOURCES.iter().position(|&r| resources[r] > 0) {
                         state.apply_action(idx);
                         actions.push(idx);
+                    }
+                    // Engine sets Phase::Roll when pre_roll (auto-dice).
+                    // Colonist resolves dice via events — use PreRoll.
+                    if matches!(state.phase, Phase::Roll) {
+                        state.phase = Phase::PreRoll;
                     }
                 } else {
                     // Fallback: manual resource transfer.

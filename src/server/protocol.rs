@@ -32,6 +32,8 @@ pub enum ClientMsg {
         enabled: bool,
         delay_ms: Option<u64>,
     },
+    /// Poll external state (e.g. colonist.io CDP). Default: returns current state.
+    PollState,
     /// Request current game state.
     GetState,
     /// Undo last action.

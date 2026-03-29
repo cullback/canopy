@@ -8,9 +8,10 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use axum::extract::ws::{Message, WebSocket};
 use futures_util::{SinkExt, StreamExt};
 use tokio::net::TcpStream;
-use tokio_tungstenite::tungstenite::Message;
+use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
 
 use crate::game::dev_card::DevCardKind;
@@ -80,7 +81,7 @@ async fn try_evaluate(ws: &mut WsStream, expression: &str) -> Result<serde_json:
         "method": "Runtime.evaluate",
         "params": { "expression": expression, "returnByValue": true }
     });
-    ws.send(Message::Text(msg.to_string().into()))
+    ws.send(tungstenite::Message::Text(msg.to_string().into()))
         .await
         .map_err(|e| format!("ws send failed: {e}"))?;
 
@@ -90,7 +91,7 @@ async fn try_evaluate(ws: &mut WsStream, expression: &str) -> Result<serde_json:
             .await
             .ok_or("ws closed")?
             .map_err(|e| format!("ws error: {e}"))?;
-        if let Message::Text(text) = frame {
+        if let tungstenite::Message::Text(text) = frame {
             let resp: serde_json::Value =
                 serde_json::from_str(&text).map_err(|e| format!("invalid JSON from CDP: {e}"))?;
             if resp["id"].as_u64() == Some(id) {
@@ -424,6 +425,17 @@ fn apply_live_state(
         }
     }
 
+    // Phase::Roll is an internal chance node for auto-resolving dice.
+    // In colonist mode dice come from events, so map back to PreRoll/Main.
+    if matches!(state.phase, Phase::Roll) {
+        state.phase = if state.pre_roll {
+            Phase::PreRoll
+        } else {
+            Phase::Main
+        };
+        changed = true;
+    }
+
     // Diagnostic: dev card legality
     if state.setup_count >= 4 {
         let cp = state.current_player;
@@ -570,7 +582,271 @@ fn match_pending_actions(
     Ok(matched)
 }
 
-/// Entry point: extract game data and serve via web analysis board with live polling.
+/// Persistent state for polling colonist.io via CDP.
+struct ColonistPollState {
+    cdp_port: u16,
+    committed_event_count: usize,
+    committed_state: crate::game::state::GameState,
+    color_map: Vec<(u8, canopy::player::Player)>,
+    corner_map: std::collections::HashMap<(i32, i32, u8), crate::game::board::NodeId>,
+    edge_map: std::collections::HashMap<(i32, i32, u8), crate::game::board::EdgeId>,
+    mapper: board::CoordMapper,
+    pending_actions: Vec<usize>,
+    pre_pending_cursor: Option<usize>,
+}
+
+impl ColonistPollState {
+    /// Poll CDP, sync state, and update the session. Returns response messages.
+    async fn poll(
+        &mut self,
+        session: &mut canopy::server::GameSession<crate::game::state::GameState>,
+    ) -> Vec<canopy::server::ServerMsg> {
+        let poll = match extract_game_data(self.cdp_port).await {
+            Ok(p) => p,
+            Err(e) => {
+                eprintln!("poll error: {e}");
+                return vec![session.state_msg()];
+            }
+        };
+
+        let total_events = poll.events.len();
+        eprintln!(
+            "poll ok: {total_events} events (committed {})",
+            self.committed_event_count
+        );
+
+        // --- Mutate committed_state (single copy, single place) ---
+
+        let (ns, nc, nr, _) = state::sync_buildings(
+            &mut self.committed_state,
+            &poll.buildings,
+            &self.color_map,
+            &self.corner_map,
+            &self.edge_map,
+            &self.mapper,
+        );
+        if ns + nc + nr > 0 {
+            eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
+            state::sync_setup_phase(&mut self.committed_state);
+        }
+
+        let mut entries_to_extend = Vec::new();
+        let mut actions_to_walk: Vec<usize> = Vec::new();
+        let mut needs_rollback = false;
+
+        if total_events > self.committed_event_count {
+            let new_events = &poll.events[self.committed_event_count..];
+            eprintln!(
+                "poll: {} new events (total {})",
+                new_events.len(),
+                total_events
+            );
+
+            let (rx, ry) = poll.robber_hex;
+            let live_robber = self
+                .mapper
+                .tile_index(rx, ry)
+                .map(|i| crate::game::board::TileId(i as u8));
+            let (new_entries, new_actions) = state::process_new_events(
+                &mut self.committed_state,
+                new_events,
+                &self.color_map,
+                &self.corner_map,
+                &self.edge_map,
+                &self.mapper,
+                live_robber,
+            );
+            self.committed_event_count = total_events;
+
+            if !self.pending_actions.is_empty() {
+                match match_pending_actions(
+                    &self.pending_actions,
+                    new_events,
+                    &self.corner_map,
+                    &self.edge_map,
+                    &self.mapper,
+                ) {
+                    Ok(matched) if matched > 0 => {
+                        eprintln!("poll: {matched} pending actions confirmed by colonist");
+                        self.pending_actions.drain(..matched);
+                        if self.pending_actions.is_empty() {
+                            self.pre_pending_cursor = None;
+                        }
+                        entries_to_extend = new_entries.into_iter().skip(matched).collect();
+                    }
+                    Ok(_) => {
+                        // No events matched yet — keep waiting.
+                    }
+                    Err(()) => {
+                        eprintln!("poll: pending action mismatch — rolling back");
+                        needs_rollback = true;
+                        self.pending_actions.clear();
+                        entries_to_extend = new_entries;
+                        actions_to_walk = new_actions;
+                    }
+                }
+            } else {
+                entries_to_extend = new_entries;
+                actions_to_walk = new_actions;
+            }
+        }
+
+        // Recompute derived state from board bits.
+        {
+            use canopy::player::Player;
+            for &pid in &[Player::One, Player::Two] {
+                let s = self.committed_state.boards[pid].settlements.count_ones() as u8;
+                let c = self.committed_state.boards[pid].cities.count_ones() as u8;
+                self.committed_state.players[pid].building_vps = s + c * 2;
+            }
+            let len1 = self.committed_state.boards[Player::One]
+                .road_network
+                .longest_road();
+            let len2 = self.committed_state.boards[Player::Two]
+                .road_network
+                .longest_road();
+            self.committed_state.longest_road = match (len1 >= 5, len2 >= 5) {
+                (false, false) => None,
+                (true, false) => Some((Player::One, len1)),
+                (false, true) => Some((Player::Two, len2)),
+                (true, true) => {
+                    if len1 > len2 {
+                        Some((Player::One, len1))
+                    } else if len2 > len1 {
+                        Some((Player::Two, len2))
+                    } else {
+                        self.committed_state
+                            .longest_road
+                            .map(|(pid, _)| (pid, len1))
+                    }
+                }
+            };
+        }
+
+        apply_live_state(
+            &mut self.committed_state,
+            &poll,
+            &self.color_map,
+            &self.mapper,
+        );
+
+        // --- Sync to session ---
+
+        let has_updates =
+            needs_rollback || !entries_to_extend.is_empty() || self.pending_actions.is_empty();
+        if !has_updates {
+            return vec![session.state_msg()];
+        }
+
+        if needs_rollback && let Some(cursor) = self.pre_pending_cursor.take() {
+            session.rollback_to_cursor(cursor);
+        }
+
+        if !actions_to_walk.is_empty() {
+            session.walk_tree(&actions_to_walk);
+        }
+
+        if !entries_to_extend.is_empty() {
+            let pairs: Vec<(String, crate::game::state::GameState)> = entries_to_extend
+                .into_iter()
+                .map(|e| (e.label, e.state))
+                .collect();
+            session.extend_timeline(pairs);
+        }
+
+        if self.pending_actions.is_empty() {
+            session.set_final_state(self.committed_state.clone());
+        }
+
+        vec![session.state_msg()]
+    }
+}
+
+/// Handle a colonist WebSocket connection (sequential, single-threaded).
+async fn handle_colonist_socket(
+    mut socket: WebSocket,
+    session: &mut canopy::server::GameSession<crate::game::state::GameState>,
+    poll: &mut ColonistPollState,
+) {
+    // Send initial state.
+    let msg = session.state_msg();
+    if canopy::server::send_msg(&mut socket, &msg).await.is_err() {
+        return;
+    }
+
+    loop {
+        let ws_msg = match socket.recv().await {
+            Some(Ok(msg)) => msg,
+            _ => break,
+        };
+        let text = match ws_msg {
+            Message::Text(t) => t,
+            Message::Close(_) => break,
+            _ => continue,
+        };
+        let client_msg: canopy::server::ClientMsg = match serde_json::from_str(&text) {
+            Ok(m) => m,
+            Err(e) => {
+                let _ = canopy::server::send_msg(
+                    &mut socket,
+                    &canopy::server::ServerMsg::Error {
+                        message: format!("Invalid message: {e}"),
+                    },
+                )
+                .await;
+                continue;
+            }
+        };
+
+        let responses = match &client_msg {
+            canopy::server::ClientMsg::PollState => {
+                eprintln!("ws: PollState");
+                poll.poll(session).await
+            }
+            canopy::server::ClientMsg::BotMove { .. }
+            | canopy::server::ClientMsg::RunSims { .. } => {
+                eprintln!("ws: {:?}", client_msg);
+                match canopy::server::run_search(&mut socket, session, &client_msg).await {
+                    Ok(msgs) => {
+                        for m in &msgs {
+                            match m {
+                                canopy::server::ServerMsg::Snapshot { snapshot, .. } => {
+                                    eprintln!(
+                                        "ws: → Snapshot ({} sims, {} edges)",
+                                        snapshot.total_simulations,
+                                        snapshot.edges.len()
+                                    );
+                                }
+                                canopy::server::ServerMsg::Error { message } => {
+                                    eprintln!("ws: → Error: {message}");
+                                }
+                                _ => {}
+                            }
+                        }
+                        msgs
+                    }
+                    Err(()) => return,
+                }
+            }
+            canopy::server::ClientMsg::PlayAction { action } => {
+                if poll.pending_actions.is_empty() {
+                    poll.pre_pending_cursor = Some(session.cursor());
+                }
+                poll.pending_actions.push(*action);
+                session.handle(client_msg)
+            }
+            _ => session.handle(client_msg),
+        };
+
+        for msg in responses {
+            if canopy::server::send_msg(&mut socket, &msg).await.is_err() {
+                return;
+            }
+        }
+    }
+}
+
+/// Entry point: extract game data and serve via web analysis board with client-driven polling.
 pub fn run_serve(
     cdp_port: u16,
     serve_port: u16,
@@ -588,9 +864,6 @@ pub fn run_serve(
     let mapper = board::CoordMapper::detect(&data.board.tiles);
     let mut timeline = state::build_timeline(&data.board, &data.events, &mapper);
     // Derive color → Player mapping from the event log (first to act = P1).
-    // Must match the mapping used inside build_timeline/build_game_state.
-    // If the log is short (e.g. late join before local player has acted),
-    // fill in any missing players from the live player list.
     let mut color_map = state::discover_colors(&data.events);
     for &(color, _) in &data.player_names {
         if color_map.iter().any(|&(c, _)| c == color) {
@@ -608,14 +881,11 @@ pub fn run_serve(
     }
     let initial_event_count = data.events.len();
 
-    // Apply live state (turn, dice phase, dev cards) to the final timeline
-    // entry. Reuses the same function the polling loop uses, so phase guards
-    // (e.g. skipping overrides during setup) are in one place.
+    // Apply live state to the final timeline entry.
     if let Some(last) = timeline.last_mut() {
         apply_live_state(&mut last.state, &data, &color_map, &mapper);
     }
 
-    // Save the last state for incremental processing.
     let last_state = timeline
         .last()
         .map(|e| e.state.clone())
@@ -632,25 +902,22 @@ pub fn run_serve(
 
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/catan/web");
     let dice = Dice::Balanced(BalancedDice::new());
-    let presenter = Arc::new(CatanPresenter::new(static_dir, dice).with_player_names(names));
-    // Create session manually with the initial timeline.
+    let presenter =
+        Arc::new(CatanPresenter::new(static_dir.clone(), dice).with_player_names(names));
     let mcts_config = canopy::mcts::Config {
         filter_legal: true,
         ..canopy::mcts::Config::default()
     };
-    let mut initial_session = canopy::server::GameSession::with_state(
+    let mut session = canopy::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,
         eval_name,
-        presenter.clone(),
+        presenter,
         [true, true],
         mcts_config,
     );
-    initial_session.load_timeline(timeline_pairs);
-    let session = Arc::new(tokio::sync::Mutex::new(initial_session));
-
-    let (notify_tx, notify_rx) = tokio::sync::watch::channel(0u64);
-    let (action_tx, mut action_rx) = tokio::sync::mpsc::unbounded_channel::<(usize, usize)>();
+    session.load_timeline(timeline_pairs);
+    session.seek_to_end();
 
     // Build coordinate maps for incremental processing.
     let (terrains, numbers, port_resources) = board::to_layout(&data.board, &mapper);
@@ -662,191 +929,48 @@ pub fn run_serve(
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);
 
-    // Spawn polling task.
-    let poll_session = session.clone();
-    let poll_mapper = mapper;
-    rt.spawn(async move {
-        let mut committed_event_count = initial_event_count;
-        let mut committed_state = last_state;
-        let mut generation = 0u64;
-        let mut pending_actions: Vec<usize> = Vec::new();
-        let mut pre_pending_cursor: Option<usize> = None;
+    let poll_state = ColonistPollState {
+        cdp_port,
+        committed_event_count: initial_event_count,
+        committed_state: last_state,
+        color_map,
+        corner_map,
+        edge_map,
+        mapper,
+        pending_actions: Vec::new(),
+        pre_pending_cursor: None,
+    };
 
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
+    // Wrap in Mutex for the axum handler (single client, no real contention).
+    let session = Arc::new(tokio::sync::Mutex::new(session));
+    let poll_state = Arc::new(tokio::sync::Mutex::new(poll_state));
 
-            // Drain any actions the user played on the serve board.
-            while let Ok((cursor, action)) = action_rx.try_recv() {
-                if pending_actions.is_empty() {
-                    pre_pending_cursor = Some(cursor);
-                }
-                pending_actions.push(action);
-            }
-
-            let poll = match extract_game_data(cdp_port).await {
-                Ok(p) => p,
-                Err(e) => {
-                    eprintln!("poll error: {e}");
-                    continue;
-                }
-            };
-
-            let total_events = poll.events.len();
-            eprintln!("poll ok: {total_events} events (committed {committed_event_count})");
-
-            // --- Mutate committed_state (single copy, single place) ---
-
-            let (ns, nc, nr, _) = state::sync_buildings(
-                &mut committed_state,
-                &poll.buildings,
-                &color_map,
-                &corner_map,
-                &edge_map,
-                &poll_mapper,
-            );
-            if ns + nc + nr > 0 {
-                eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
-                state::sync_setup_phase(&mut committed_state);
-            }
-
-            let mut entries_to_extend = Vec::new();
-            let mut actions_to_walk: Vec<usize> = Vec::new();
-            let mut needs_rollback = false;
-
-            if total_events > committed_event_count {
-                let new_events = &poll.events[committed_event_count..];
-                eprintln!(
-                    "poll: {} new events (total {})",
-                    new_events.len(),
-                    total_events
-                );
-
-                let (rx, ry) = poll.robber_hex;
-                let live_robber = poll_mapper
-                    .tile_index(rx, ry)
-                    .map(|i| crate::game::board::TileId(i as u8));
-                let (new_entries, new_actions) = state::process_new_events(
-                    &mut committed_state,
-                    new_events,
-                    &color_map,
-                    &corner_map,
-                    &edge_map,
-                    &poll_mapper,
-                    live_robber,
-                );
-                committed_event_count = total_events;
-
-                if !pending_actions.is_empty() {
-                    match match_pending_actions(
-                        &pending_actions,
-                        new_events,
-                        &corner_map,
-                        &edge_map,
-                        &poll_mapper,
-                    ) {
-                        Ok(matched) if matched > 0 => {
-                            eprintln!("poll: {matched} pending actions confirmed by colonist");
-                            pending_actions.drain(..matched);
-                            if pending_actions.is_empty() {
-                                pre_pending_cursor = None;
-                            }
-                            entries_to_extend = new_entries.into_iter().skip(matched).collect();
-                            // Tree already walked by user's pending actions;
-                            // don't double-walk.
-                        }
-                        Ok(_) => {
-                            // No events matched yet — keep waiting.
-                        }
-                        Err(()) => {
-                            eprintln!("poll: pending action mismatch — rolling back");
-                            needs_rollback = true;
-                            pending_actions.clear();
-                            entries_to_extend = new_entries;
-                            actions_to_walk = new_actions;
-                        }
+    let app = axum::Router::new()
+        .route(
+            "/ws",
+            axum::routing::get({
+                let session = session.clone();
+                let poll_state = poll_state.clone();
+                move |ws: axum::extract::ws::WebSocketUpgrade| {
+                    let session = session.clone();
+                    let poll_state = poll_state.clone();
+                    async move {
+                        ws.on_upgrade(move |socket| async move {
+                            let mut session = session.lock().await;
+                            let mut poll = poll_state.lock().await;
+                            handle_colonist_socket(socket, &mut session, &mut poll).await;
+                        })
                     }
-                } else {
-                    entries_to_extend = new_entries;
-                    actions_to_walk = new_actions;
                 }
-            }
+            }),
+        )
+        .fallback_service(tower_http::services::ServeDir::new(&static_dir));
 
-            // Recompute derived state from board bits — sync_buildings and
-            // process_new_events can both place the same piece, double-
-            // incrementing counters.
-            {
-                use canopy::player::Player;
-                for &pid in &[Player::One, Player::Two] {
-                    let s = committed_state.boards[pid].settlements.count_ones() as u8;
-                    let c = committed_state.boards[pid].cities.count_ones() as u8;
-                    committed_state.players[pid].building_vps = s + c * 2;
-                }
-                // Recompute longest road award.
-                let len1 = committed_state.boards[Player::One]
-                    .road_network
-                    .longest_road();
-                let len2 = committed_state.boards[Player::Two]
-                    .road_network
-                    .longest_road();
-                committed_state.longest_road = match (len1 >= 5, len2 >= 5) {
-                    (false, false) => None,
-                    (true, false) => Some((Player::One, len1)),
-                    (false, true) => Some((Player::Two, len2)),
-                    (true, true) => {
-                        if len1 > len2 {
-                            Some((Player::One, len1))
-                        } else if len2 > len1 {
-                            Some((Player::Two, len2))
-                        } else {
-                            committed_state.longest_road.map(|(pid, _)| (pid, len1))
-                        }
-                    }
-                };
-            }
-
-            apply_live_state(&mut committed_state, &poll, &color_map, &poll_mapper);
-
-            // --- Sync to session (one path) ---
-
-            let has_updates =
-                needs_rollback || !entries_to_extend.is_empty() || pending_actions.is_empty();
-            if !has_updates {
-                continue;
-            }
-
-            let mut session = poll_session.lock().await;
-
-            if needs_rollback && let Some(cursor) = pre_pending_cursor.take() {
-                session.rollback_to_cursor(cursor);
-            }
-
-            if !actions_to_walk.is_empty() {
-                session.walk_tree(&actions_to_walk);
-            }
-
-            if !entries_to_extend.is_empty() {
-                let pairs: Vec<(String, crate::game::state::GameState)> = entries_to_extend
-                    .into_iter()
-                    .map(|e| (e.label, e.state))
-                    .collect();
-                session.extend_timeline(pairs);
-            }
-
-            if pending_actions.is_empty() {
-                session.set_final_state(committed_state.clone());
-            }
-
-            generation += 1;
-            let _ = notify_tx.send(generation);
-        }
+    eprintln!("serving colonist board on port {serve_port} (client-driven polling)");
+    let addr = format!("0.0.0.0:{serve_port}");
+    rt.block_on(async {
+        let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
+        println!("Analysis board: http://localhost:{serve_port}");
+        axum::serve(listener, app).await.unwrap();
     });
-
-    eprintln!("serving colonist board on port {serve_port} (live polling every 5s)");
-    rt.block_on(canopy::server::serve_live(
-        serve_port,
-        session,
-        presenter,
-        notify_rx,
-        Some(action_tx),
-    ));
 }

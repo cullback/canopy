@@ -271,6 +271,18 @@ impl<G: Game + 'static> GameSession<G> {
         self.cursor
     }
 
+    /// Advance cursor to the end of the timeline, setting the search state
+    /// to the last entry's `next_state`. No-op if history is empty.
+    pub fn seek_to_end(&mut self) {
+        if self.history.is_empty() || self.cursor == self.history.len() {
+            return;
+        }
+        if let Some(ref next) = self.history.last().unwrap().next_state {
+            self.search.reset(next.clone());
+        }
+        self.cursor = self.history.len();
+    }
+
     /// Roll back to a previous cursor position, resetting the search state.
     ///
     /// Truncates history beyond `target` and sets the search state to the
@@ -360,7 +372,7 @@ impl<G: Game + 'static> GameSession<G> {
                 self.auto_resolve_chance();
                 vec![self.state_msg()]
             }
-            ClientMsg::GetState => {
+            ClientMsg::PollState | ClientMsg::GetState => {
                 vec![self.state_msg()]
             }
             ClientMsg::PlayAction { action } => {

@@ -12,7 +12,7 @@ use axum::{
     Router,
     extract::ws::{Message, WebSocket, WebSocketUpgrade},
 };
-use tokio::sync::{Mutex, mpsc, watch};
+use tokio::sync::Mutex;
 use tower_http::services::ServeDir;
 
 use crate::eval::Evaluator;
@@ -140,160 +140,43 @@ pub async fn serve_with_timeline<G: Game + 'static>(
     axum::serve(listener, app).await.unwrap();
 }
 
-/// Launch the web analysis board with a shared session and live-update notifications.
+/// Run a streaming MCTS search, sending progress updates over the socket.
 ///
-/// The caller owns the `Arc<Mutex<GameSession>>` and a `watch::Sender<u64>`.
-/// A polling task can extend the session's timeline, then send a generation
-/// bump through the watch channel. Connected clients receive a state push.
-///
-/// If `action_tx` is `Some`, every `PlayAction` from the client will send
-/// `(pre_cursor, action)` through the channel before the action is applied.
-/// `pre_cursor` is the session cursor *before* the play-ahead, so a polling
-/// task can roll back to that point on mismatch.
-pub async fn serve_live<G: Game + 'static>(
-    port: u16,
-    session: Arc<Mutex<GameSession<G>>>,
-    presenter: Arc<dyn GamePresenter<G> + Send + Sync>,
-    notify: watch::Receiver<u64>,
-    action_tx: Option<mpsc::UnboundedSender<(usize, usize)>>,
-) {
-    let static_dir = presenter.static_dir().to_path_buf();
-    let action_tx: Option<Arc<mpsc::UnboundedSender<(usize, usize)>>> = action_tx.map(Arc::new);
-
-    let app = Router::new()
-        .route(
-            "/ws",
-            axum::routing::get({
-                let session = session.clone();
-                let notify = notify.clone();
-                let action_tx = action_tx.clone();
-                move |ws: WebSocketUpgrade| {
-                    let session = session.clone();
-                    let notify = notify.clone();
-                    let action_tx = action_tx.clone();
-                    async move {
-                        ws.on_upgrade(move |socket| {
-                            handle_live_socket(socket, session, notify, action_tx)
-                        })
-                    }
+/// Handles `BotMove` and `RunSims` messages. Returns the final response
+/// messages, or `Err(())` if the socket disconnected during search.
+pub async fn run_search<G: Game + 'static>(
+    socket: &mut WebSocket,
+    session: &mut GameSession<G>,
+    msg: &ClientMsg,
+) -> Result<Vec<ServerMsg>, ()> {
+    match session.begin_search(msg) {
+        Err(msgs) => Ok(msgs),
+        Ok(sims_total) => {
+            let mut evals = vec![];
+            let mut last_progress = 0;
+            let result = loop {
+                if let Some(result) = session.search_tick(&mut evals) {
+                    break result;
                 }
-            }),
-        )
-        .fallback_service(ServeDir::new(&static_dir));
-
-    let addr = format!("0.0.0.0:{port}");
-    println!("Analysis board: http://localhost:{port}");
-    let listener = tokio::net::TcpListener::bind(&addr).await.unwrap();
-    axum::serve(listener, app).await.unwrap();
-}
-
-async fn handle_live_socket<G: Game + 'static>(
-    mut socket: WebSocket,
-    session: Arc<Mutex<GameSession<G>>>,
-    mut notify: watch::Receiver<u64>,
-    action_tx: Option<Arc<mpsc::UnboundedSender<(usize, usize)>>>,
-) {
-    // Send initial state.
-    {
-        let session = session.lock().await;
-        let msg = session.state_msg();
-        if send_msg(&mut socket, &msg).await.is_err() {
-            return;
-        }
-    }
-
-    loop {
-        tokio::select! {
-            ws_result = socket.recv() => {
-                let ws_msg = match ws_result {
-                    Some(Ok(msg)) => msg,
-                    _ => break,
-                };
-                let text = match ws_msg {
-                    Message::Text(t) => t,
-                    Message::Close(_) => break,
-                    _ => continue,
-                };
-                let client_msg: ClientMsg = match serde_json::from_str(&text) {
-                    Ok(m) => m,
-                    Err(e) => {
-                        let _ = send_msg(
-                            &mut socket,
-                            &ServerMsg::Error {
-                                message: format!("Invalid message: {e}"),
+                if let Some((snap, labels)) = session.snapshot_with_labels() {
+                    if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
+                        last_progress = snap.total_simulations;
+                        send_msg(
+                            socket,
+                            &ServerMsg::SearchProgress {
+                                snapshot: snap,
+                                action_labels: labels,
+                                sims_total,
                             },
                         )
-                        .await;
-                        continue;
-                    }
-                };
-                let mut session = session.lock().await;
-                // Intercept PlayAction: record pre-cursor, then notify polling task.
-                if let ClientMsg::PlayAction { action } = &client_msg
-                    && let Some(ref tx) = action_tx
-                {
-                    let _ = tx.send((session.cursor(), *action));
-                }
-                let responses = match &client_msg {
-                    ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {
-                        match session.begin_search(&client_msg) {
-                            Err(msgs) => msgs,
-                            Ok(sims_total) => {
-                                let mut evals = vec![];
-                                let mut last_progress = 0;
-                                let result = loop {
-                                    if let Some(result) = session.search_tick(&mut evals) {
-                                        break result;
-                                    }
-                                    drain_queries(&mut socket, &mut *session).await;
-                                    if let Some((snap, labels)) = session.snapshot_with_labels() {
-                                        if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
-                                            last_progress = snap.total_simulations;
-                                            if send_msg(
-                                                &mut socket,
-                                                &ServerMsg::SearchProgress {
-                                                    snapshot: snap,
-                                                    action_labels: labels,
-                                                    sims_total,
-                                                },
-                                            )
-                                            .await
-                                            .is_err()
-                                            {
-                                                return;
-                                            }
-                                            if let Some(subtree_msg) =
-                                                session.explore_subtree_msg()
-                                            {
-                                                let _ =
-                                                    send_msg(&mut socket, &subtree_msg).await;
-                                            }
-                                        }
-                                    }
-                                };
-                                session.finish_search(&client_msg, result)
-                            }
+                        .await?;
+                        if let Some(subtree_msg) = session.explore_subtree_msg() {
+                            let _ = send_msg(socket, &subtree_msg).await;
                         }
                     }
-                    _ => session.handle(client_msg),
-                };
-                for msg in responses {
-                    if send_msg(&mut socket, &msg).await.is_err() {
-                        return;
-                    }
                 }
-            }
-            result = notify.changed() => {
-                if result.is_err() {
-                    // Sender dropped (polling task died) — stop watching.
-                    break;
-                }
-                let session = session.lock().await;
-                let msg = session.state_msg();
-                if send_msg(&mut socket, &msg).await.is_err() {
-                    return;
-                }
-            }
+            };
+            Ok(session.finish_search(msg, result))
         }
     }
 }
@@ -337,36 +220,9 @@ async fn handle_socket<G: Game + 'static>(
         let mut session = session.lock().await;
         let responses = match &client_msg {
             ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {
-                match session.begin_search(&client_msg) {
-                    Err(msgs) => msgs,
-                    Ok(sims_total) => {
-                        let mut evals = vec![];
-                        let mut last_progress = 0;
-                        let result = loop {
-                            if let Some(result) = session.search_tick(&mut evals) {
-                                break result;
-                            }
-                            if let Some((snap, labels)) = session.snapshot_with_labels() {
-                                if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
-                                    last_progress = snap.total_simulations;
-                                    if send_msg(
-                                        &mut socket,
-                                        &ServerMsg::SearchProgress {
-                                            snapshot: snap,
-                                            action_labels: labels,
-                                            sims_total,
-                                        },
-                                    )
-                                    .await
-                                    .is_err()
-                                    {
-                                        return;
-                                    }
-                                }
-                            }
-                        };
-                        session.finish_search(&client_msg, result)
-                    }
+                match run_search(&mut socket, &mut session, &client_msg).await {
+                    Ok(msgs) => msgs,
+                    Err(()) => return,
                 }
             }
             _ => session.handle(client_msg),
@@ -380,36 +236,7 @@ async fn handle_socket<G: Game + 'static>(
     }
 }
 
-/// Drain read-only messages from the socket during a search.
-///
-/// Between search ticks the session lock is held and the socket recv loop is
-/// blocked, so ExploreSubtree / GetSnapshot requests would queue up until the
-/// search finishes. This helper does a non-blocking poll of the socket and
-/// handles those queries immediately.
-async fn drain_queries<G: Game + 'static>(socket: &mut WebSocket, session: &mut GameSession<G>) {
-    loop {
-        match tokio::time::timeout(std::time::Duration::ZERO, socket.recv()).await {
-            Ok(Some(Ok(Message::Text(text)))) => {
-                let msg = match serde_json::from_str::<ClientMsg>(&text) {
-                    Ok(m) => m,
-                    Err(_) => continue,
-                };
-                let responses = match &msg {
-                    ClientMsg::ExploreSubtree { .. } | ClientMsg::GetSnapshot => {
-                        session.handle(msg)
-                    }
-                    _ => continue,
-                };
-                for resp in responses {
-                    let _ = send_msg(socket, &resp).await;
-                }
-            }
-            _ => break,
-        }
-    }
-}
-
-async fn send_msg(socket: &mut WebSocket, msg: &ServerMsg) -> Result<(), ()> {
+pub async fn send_msg(socket: &mut WebSocket, msg: &ServerMsg) -> Result<(), ()> {
     let json = serde_json::to_string(msg).map_err(|_| ())?;
     socket
         .send(Message::Text(json.into()))

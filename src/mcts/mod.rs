@@ -509,6 +509,15 @@ impl<G: Game> Search<G> {
                 None
             };
 
+            // Single legal action — Gumbel can't halve, use vanilla sims
+            // for WDL estimation.
+            let num_legal = legal
+                .as_ref()
+                .map_or(self.tree.edges(new_root).len(), |l| l.len());
+            if num_legal <= 1 {
+                return self.run_vanilla_sims(rng);
+            }
+
             self.gumbel = Some(init_gumbel(
                 &self.tree,
                 new_root,
@@ -556,16 +565,19 @@ impl<G: Game> Search<G> {
                     self.root = Some(root);
                     self.root_network_value = eval.wdl[0] - eval.wdl[2];
 
-                    // Initialize Gumbel state for root (fresh expansion: all edges legal)
-                    self.gumbel = Some(init_gumbel(
-                        &self.tree,
-                        root,
-                        self.root_network_value,
-                        sign,
-                        &self.config,
-                        rng,
-                        None,
-                    ));
+                    // Initialize Gumbel state for root (fresh expansion: all edges legal).
+                    // Skip Gumbel for single-action roots — vanilla sims suffice for WDL.
+                    if actions.len() > 1 {
+                        self.gumbel = Some(init_gumbel(
+                            &self.tree,
+                            root,
+                            self.root_network_value,
+                            sign,
+                            &self.config,
+                            rng,
+                            None,
+                        ));
+                    }
                     self.bufs.reclaim_actions(actions);
                 }
                 Phase::Simulating {
