@@ -740,7 +740,7 @@ impl<G: Game + 'static> GameSession<G> {
     /// Label all nodes in a subtree by simulating actions from the root state.
     fn label_subtree(&self, tree: &mut crate::mcts::TreeNodeSnapshot) {
         let state = self.search.state().clone();
-        label_subtree_walk(tree, state, &*self.presenter);
+        label_subtree_walk(tree, state, &*self.presenter, false);
     }
 }
 
@@ -748,11 +748,17 @@ fn label_subtree_walk<G: Game + Clone>(
     node: &mut crate::mcts::TreeNodeSnapshot,
     state: G, // state from which node.action was taken
     presenter: &dyn GamePresenter<G>,
+    parent_is_chance: bool,
 ) {
     // Label this node using the state before its action.
     if let Some(action) = node.action {
-        node.label = Some(presenter.action_description(&state, action));
+        node.label = Some(if parent_is_chance {
+            presenter.chance_label(&state, action)
+        } else {
+            presenter.action_description(&state, action)
+        });
     }
+    let is_chance = node.kind == "chance";
     // Advance state through this node's action for children.
     let next = if let Some(action) = node.action {
         let mut s = state;
@@ -762,6 +768,6 @@ fn label_subtree_walk<G: Game + Clone>(
         state
     };
     for child in &mut node.children {
-        label_subtree_walk(child, next.clone(), presenter);
+        label_subtree_walk(child, next.clone(), presenter, is_chance);
     }
 }
