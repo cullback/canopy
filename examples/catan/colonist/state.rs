@@ -853,6 +853,7 @@ fn process_post_setup(
         let is_entry = matches!(
             event,
             GameEvent::Roll { .. }
+                | GameEvent::PlaceRoad { .. }
                 | GameEvent::BuildRoad { .. }
                 | GameEvent::BuildSettlement { .. }
                 | GameEvent::BuildCity { .. }
@@ -931,6 +932,21 @@ fn process_post_setup(
                     state.bank.add(ROAD_COST);
                 }
                 pending_label = Some(format!("{} builds road", player_label(*player, color_map)));
+            }
+
+            // Road Building dev card uses "place" events (type 4), not "build"
+            // (type 5).  Apply as a road action — apply_build_road handles the
+            // free cost and phase transition.
+            GameEvent::PlaceRoad { player, edge } if state.setup_count >= 4 => {
+                if let Some(&eid) = edge
+                    .map(|(x, y, z)| mapper.map_edge(x, y, z))
+                    .and_then(|e| edge_map.get(&e))
+                {
+                    let aid = action::road_id(eid).0 as usize;
+                    crate::game::apply_with_chance(state, aid, None);
+                    actions.push(aid);
+                }
+                pending_label = Some(format!("{} places road", player_label(*player, color_map)));
             }
 
             GameEvent::BuildSettlement { player, corner, .. } => {
