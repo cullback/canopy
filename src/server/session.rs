@@ -170,6 +170,20 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    /// Walk the MCTS tree forward through a sequence of actions.
+    ///
+    /// Each action is applied to the search's internal state and the tree
+    /// pointer follows the matching child (preserving accumulated visits).
+    /// Only walks when viewing the live position (cursor at end).
+    pub fn walk_tree(&mut self, actions: &[usize]) {
+        if self.cursor != self.history.len() {
+            return;
+        }
+        for &action in actions {
+            self.search.apply_action(action);
+        }
+    }
+
     /// Append new timeline entries from live polling.
     ///
     /// Each entry is `(label, state)` where the first state is the successor
@@ -211,10 +225,10 @@ impl<G: Game + 'static> GameSession<G> {
             });
         }
 
-        // Auto-advance if user was watching live
+        // Auto-advance cursor if user was watching live.
+        // The search state is managed by walk_tree + set_final_state,
+        // so we only update the cursor here.
         if was_at_end {
-            let new_state = new_entries.last().unwrap().1.clone();
-            self.search.reset(new_state);
             self.cursor = self.history.len();
         }
 

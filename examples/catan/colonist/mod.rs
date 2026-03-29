@@ -791,6 +791,7 @@ pub fn run_serve(
             }
 
             let mut entries_to_extend = Vec::new();
+            let mut actions_to_walk: Vec<usize> = Vec::new();
             let mut needs_rollback = false;
 
             if total_events > committed_event_count {
@@ -805,7 +806,7 @@ pub fn run_serve(
                     .robber_hex
                     .and_then(|(rx, ry)| poll_mapper.tile_index(rx, ry))
                     .map(|i| crate::game::board::TileId(i as u8));
-                let new_entries = state::process_new_events(
+                let (new_entries, new_actions) = state::process_new_events(
                     &mut committed_state,
                     new_events,
                     &color_map,
@@ -831,6 +832,8 @@ pub fn run_serve(
                                 pre_pending_cursor = None;
                             }
                             entries_to_extend = new_entries.into_iter().skip(matched).collect();
+                            // Tree already walked by user's pending actions;
+                            // don't double-walk.
                         }
                         Ok(_) => {
                             // No events matched yet — keep waiting.
@@ -840,10 +843,12 @@ pub fn run_serve(
                             needs_rollback = true;
                             pending_actions.clear();
                             entries_to_extend = new_entries;
+                            actions_to_walk = new_actions;
                         }
                     }
                 } else {
                     entries_to_extend = new_entries;
+                    actions_to_walk = new_actions;
                 }
             }
 
@@ -900,6 +905,10 @@ pub fn run_serve(
 
             if needs_rollback && let Some(cursor) = pre_pending_cursor.take() {
                 session.rollback_to_cursor(cursor);
+            }
+
+            if !actions_to_walk.is_empty() {
+                session.walk_tree(&actions_to_walk);
             }
 
             if !entries_to_extend.is_empty() {

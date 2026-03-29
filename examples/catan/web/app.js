@@ -153,7 +153,7 @@ board.onActionClick = (action) => {
 // ── MCTS explore ─────────────────────────────────────────────────────
 
 mctsPanel.onExplore = (actionPath) => {
-  session.send({ type: 'ExploreSubtree', action_path: actionPath, depth: 3 });
+  session.send({ type: 'ExploreSubtree', action_path: actionPath, depth: 20 });
 };
 
 // ── Player panel helpers ─────────────────────────────────────────────
