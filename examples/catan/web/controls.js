@@ -20,15 +20,20 @@ class Controls {
   }
 
   /// Schedule the next PollState, enforcing a minimum 2s interval.
+  /// Polling always runs to detect colonist.io state changes, regardless
+  /// of whether auto-search is enabled.
   schedulePoll() {
     if (this.pollTimer) return;
     const elapsed = Date.now() - this.lastPollTime;
     const delay = Math.max(0, POLL_INTERVAL_MS - elapsed);
     this.pollTimer = setTimeout(() => {
       this.pollTimer = null;
-      if (this.autoSearch && !this.searching) {
+      if (!this.searching) {
         this.lastPollTime = Date.now();
         this.session.send({ type: 'PollState' });
+      } else {
+        // Search in progress — retry after it finishes.
+        this.schedulePoll();
       }
     }, delay);
   }
@@ -85,34 +90,34 @@ class Controls {
       return;
     }
 
-    // Auto-search: after a state update, kick off search or re-poll.
-    if (this.autoSearch && !this.searching) {
-      const logLen = msg.action_log ? msg.action_log.length : 0;
-      const stateChanged = logLen !== this.lastStateLogLen;
-      this.lastStateLogLen = logLen;
-      if (stateChanged) {
-        this.autoSearchCapReached = false;
-      }
+    // Detect state changes (always, regardless of auto-search).
+    const logLen = msg.action_log ? msg.action_log.length : 0;
+    const stateChanged = logLen !== this.lastStateLogLen;
+    this.lastStateLogLen = logLen;
+    if (stateChanged) {
+      this.autoSearchCapReached = false;
+    }
 
+    // Auto-search: kick off search if enabled and under the cap.
+    if (this.autoSearch && !this.searching) {
       const canSearch = !msg.is_terminal && !msg.is_chance;
       if (canSearch && !this.autoSearchCapReached) {
         this.autoSearchTriggered = true;
         this.setSearching(true);
         this.session.send({ type: 'RunSims', count: AUTO_SEARCH_BATCH });
-      } else {
-        // Already at cap, or nothing to analyze — re-poll to watch for changes.
-        this.schedulePoll();
+        return;
       }
     }
+
+    // Always keep polling to detect colonist.io state changes.
+    this.schedulePoll();
   }
 
-  /// Called on server Error — keep auto-search alive by re-polling after a delay.
+  /// Called on server Error — keep polling alive after a delay.
   onSearchError() {
     this.setSearching(false);
-    if (this.autoSearch) {
-      this.autoSearchTriggered = false;
-      this.schedulePoll();
-    }
+    this.autoSearchTriggered = false;
+    this.schedulePoll();
   }
 
   _bind() {
@@ -189,7 +194,6 @@ class Controls {
 
   stopAutoplay() {
     this.autoplay = false;
-    this.stopAutoSearch();
     document.getElementById('autoplay-toggle').checked = false;
   }
 
@@ -201,7 +205,6 @@ class Controls {
   stopAutoSearch() {
     this.autoSearch = false;
     this.autoSearchTriggered = false;
-    if (this.pollTimer) { clearTimeout(this.pollTimer); this.pollTimer = null; }
     document.getElementById('autosearch-toggle').checked = false;
   }
 

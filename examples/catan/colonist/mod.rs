@@ -335,16 +335,6 @@ fn parse_dev_card_state(json_str: &str) -> DevCardState {
     }
 }
 
-/// Resolve the local player's colonist color to an internal `Player`.
-fn local_player(
-    local_color: Option<u8>,
-    color_map: &[(u8, canopy::player::Player)],
-) -> canopy::player::Player {
-    let color = local_color.expect("failed to detect local player from localStorage");
-    state::player_of_color(color_map, color)
-        .unwrap_or_else(|| panic!("local color {color} not found in game log"))
-}
-
 /// Entry point: print game log and board state to console.
 pub fn run(port: u16) {
     let rt = tokio::runtime::Builder::new_current_thread()

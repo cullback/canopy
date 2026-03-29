@@ -364,19 +364,19 @@ fn populate_preroll(state: &GameState, actions: &mut Vec<ActionId>) {
     let player = state.current();
     if !player.has_played_dev_card_this_turn {
         let playable_knights = player.dev_cards[DevCardKind::Knight]
-            - player.dev_cards_bought_this_turn[DevCardKind::Knight];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Knight]);
         if playable_knights > 0 {
             actions.push(ActionId(PLAY_KNIGHT));
         }
 
         let playable_rb = player.dev_cards[DevCardKind::RoadBuilding]
-            - player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding]);
         if playable_rb > 0 && player.roads_left > 0 {
             actions.push(ActionId(PLAY_ROAD_BUILDING));
         }
 
         let playable_yop = player.dev_cards[DevCardKind::YearOfPlenty]
-            - player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty]);
         if playable_yop > 0 {
             for (i, &r1) in ALL_RESOURCES.iter().enumerate() {
                 if state.bank[r1] == 0 {
@@ -395,7 +395,7 @@ fn populate_preroll(state: &GameState, actions: &mut Vec<ActionId>) {
         }
 
         let playable_mono = player.dev_cards[DevCardKind::Monopoly]
-            - player.dev_cards_bought_this_turn[DevCardKind::Monopoly];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Monopoly]);
         if playable_mono > 0 {
             for &r in &ALL_RESOURCES {
                 actions.push(monopoly_id(r));
@@ -463,22 +463,24 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
         actions.push(ActionId(BUY_DEV_CARD));
     }
 
-    // Play dev cards (one per turn, can't play cards bought this turn)
+    // Play dev cards (one per turn, can't play cards bought this turn).
+    // Saturating: during MCTS sims, counts may be inconsistent due to
+    // SO-ISMCTS replaying actions from a different determinization.
     if !player.has_played_dev_card_this_turn {
         let playable_knights = player.dev_cards[DevCardKind::Knight]
-            - player.dev_cards_bought_this_turn[DevCardKind::Knight];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Knight]);
         if playable_knights > 0 {
             actions.push(ActionId(PLAY_KNIGHT));
         }
 
         let playable_rb = player.dev_cards[DevCardKind::RoadBuilding]
-            - player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding]);
         if playable_rb > 0 && player.roads_left > 0 {
             actions.push(ActionId(PLAY_ROAD_BUILDING));
         }
 
         let playable_yop = player.dev_cards[DevCardKind::YearOfPlenty]
-            - player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty]);
         if playable_yop > 0 {
             for (i, &r1) in ALL_RESOURCES.iter().enumerate() {
                 if state.bank[r1] == 0 {
@@ -497,7 +499,7 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
         }
 
         let playable_mono = player.dev_cards[DevCardKind::Monopoly]
-            - player.dev_cards_bought_this_turn[DevCardKind::Monopoly];
+            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Monopoly]);
         if playable_mono > 0 {
             for &r in &ALL_RESOURCES {
                 actions.push(monopoly_id(r));

@@ -185,16 +185,6 @@ impl Topology {
         Self::from_layout_with_ports(terrains, numbers, port_resources, port_specs)
     }
 
-    /// Build a topology from an explicit board layout using the default
-    /// `PORT_SPECS` water hex positions.
-    pub fn from_layout(
-        terrains: [Terrain; 19],
-        numbers: [Option<u8>; 19],
-        port_resources: [Option<Resource>; 9],
-    ) -> Self {
-        Self::from_layout_with_ports(terrains, numbers, port_resources, &PORT_SPECS)
-    }
-
     /// Build a topology from an explicit board layout.
     ///
     /// - `terrains[i]`: terrain at `LAND_HEXES[i]`

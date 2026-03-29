@@ -585,7 +585,9 @@ pub fn apply_hidden_dev_card_buy(state: &mut GameState) {
 
 fn apply_play_knight(state: &mut GameState) {
     let p = state.current_mut();
-    p.dev_cards[DevCardKind::Knight] -= 1;
+    // Saturating: SO-ISMCTS interior nodes may replay actions from a
+    // different determinization where the player had the card.
+    p.dev_cards[DevCardKind::Knight] = p.dev_cards[DevCardKind::Knight].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::Knight] += 1;
     p.knights_played += 1;
@@ -596,14 +598,8 @@ fn apply_play_knight(state: &mut GameState) {
 
 fn apply_play_road_building(state: &mut GameState) {
     let p = state.current_mut();
-    assert!(
-        p.dev_cards[DevCardKind::RoadBuilding] > 0,
-        "play_road_building with 0 RB cards: dev_cards={:?} bought={:?} played={:?}",
-        p.dev_cards.0,
-        p.dev_cards_bought_this_turn.0,
-        p.dev_cards_played.0,
-    );
-    p.dev_cards[DevCardKind::RoadBuilding] -= 1;
+    p.dev_cards[DevCardKind::RoadBuilding] =
+        p.dev_cards[DevCardKind::RoadBuilding].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::RoadBuilding] += 1;
     state.phase = Phase::RoadBuilding { roads_left: 2 };
@@ -611,7 +607,8 @@ fn apply_play_road_building(state: &mut GameState) {
 
 fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
     let p = state.current_mut();
-    p.dev_cards[DevCardKind::YearOfPlenty] -= 1;
+    p.dev_cards[DevCardKind::YearOfPlenty] =
+        p.dev_cards[DevCardKind::YearOfPlenty].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::YearOfPlenty] += 1;
 
@@ -631,7 +628,7 @@ fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
 
 fn apply_monopoly(state: &mut GameState, resource: Resource) {
     let p = state.current_mut();
-    p.dev_cards[DevCardKind::Monopoly] -= 1;
+    p.dev_cards[DevCardKind::Monopoly] = p.dev_cards[DevCardKind::Monopoly].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::Monopoly] += 1;
 

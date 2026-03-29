@@ -626,7 +626,6 @@ fn sync_phase_from_log(state: &mut GameState, events: &[GameEvent], color_map: &
     // Track whether we passed through robber-flow events (MoveRobber, Stole,
     // Discard) before hitting the Roll, which tells us the 7-flow completed.
     let mut saw_move_robber = false;
-    let mut saw_discard = false;
     for event in events.iter().rev() {
         match event {
             GameEvent::Roll { player, d1, d2 } => {
@@ -647,10 +646,7 @@ fn sync_phase_from_log(state: &mut GameState, events: &[GameEvent], color_map: &
                 continue;
             }
             GameEvent::Stole { .. } => continue,
-            GameEvent::Discard { .. } | GameEvent::RolledSeven => {
-                saw_discard = true;
-                continue;
-            }
+            GameEvent::Discard { .. } | GameEvent::RolledSeven => continue,
             GameEvent::PlayedKnight { player } => {
                 if !saw_move_robber {
                     // Knight played but no MoveRobber yet → MoveRobber phase.
