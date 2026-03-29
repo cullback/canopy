@@ -17,7 +17,6 @@ use crate::game::dev_card::DevCardKind;
 use crate::game::dice::{BalancedDice, Dice};
 use crate::game::state::Phase;
 use crate::presenter::CatanPresenter;
-use canopy::eval::RolloutEvaluator;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -627,7 +626,12 @@ fn match_pending_actions(
 }
 
 /// Entry point: extract game data and serve via web analysis board with live polling.
-pub fn run_serve(cdp_port: u16, serve_port: u16) {
+pub fn run_serve(
+    cdp_port: u16,
+    serve_port: u16,
+    evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync>,
+    eval_name: &str,
+) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
     let data = rt.block_on(extract_game_data(cdp_port));
@@ -636,21 +640,25 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
 
     let mapper = board::CoordMapper::detect(&data.board.tiles);
     let mut timeline = state::build_timeline(&data.board, &data.events, &mapper);
-    // Derive color map from player list (first player → P1, second → P2).
-    let color_map: Vec<(u8, canopy::player::Player)> = data
-        .player_names
-        .iter()
-        .take(2)
-        .enumerate()
-        .map(|(i, &(color, _))| {
-            let pid = if i == 0 {
-                canopy::player::Player::One
-            } else {
-                canopy::player::Player::Two
-            };
-            (color, pid)
-        })
-        .collect();
+    // Derive color → Player mapping from the event log (first to act = P1).
+    // Must match the mapping used inside build_timeline/build_game_state.
+    // If the log is short (e.g. late join before local player has acted),
+    // fill in any missing players from the live player list.
+    let mut color_map = state::discover_colors(&data.events);
+    for &(color, _) in &data.player_names {
+        if color_map.iter().any(|&(c, _)| c == color) {
+            continue;
+        }
+        let pid = if color_map.is_empty() {
+            canopy::player::Player::One
+        } else {
+            canopy::player::Player::Two
+        };
+        color_map.push((color, pid));
+        if color_map.len() >= 2 {
+            break;
+        }
+    }
     let initial_event_count = data.events.len();
 
     // Apply dev card identities to the final timeline state if available.
@@ -705,9 +713,6 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let static_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/catan/web");
     let dice = Dice::Balanced(BalancedDice::new());
     let presenter = Arc::new(CatanPresenter::new(static_dir, dice).with_player_names(names));
-    let evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync> =
-        Arc::new(RolloutEvaluator::default());
-
     // Create session manually with the initial timeline.
     let mcts_config = canopy::mcts::Config {
         filter_legal: true,
@@ -716,7 +721,7 @@ pub fn run_serve(cdp_port: u16, serve_port: u16) {
     let mut initial_session = canopy::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,
-        "rollout",
+        eval_name,
         presenter.clone(),
         [true, true],
         mcts_config,

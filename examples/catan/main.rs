@@ -123,7 +123,14 @@ fn main() {
             .expect("invalid port");
         if let Some(serve_port) = sub.get_one::<String>("serve") {
             let serve_port: u16 = serve_port.parse().expect("invalid serve port");
-            colonist::run_serve(cdp_port, serve_port);
+            setup.load_nn_evaluator(&matches);
+            let has_nn = matches.get_one::<String>("nn-model").is_some();
+            let (eval_name, evaluator) = if has_nn {
+                ("nn", setup.evaluators().get_arc("nn"))
+            } else {
+                ("rollout", setup.evaluators().get_arc("rollout"))
+            };
+            colonist::run_serve(cdp_port, serve_port, evaluator, eval_name);
         } else {
             colonist::run(cdp_port);
         }

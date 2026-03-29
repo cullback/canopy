@@ -127,10 +127,17 @@ impl GamePresenter<GameState> for CatanPresenter {
 
         let (expected_dev, expected_bank_dev) = expected_hidden_dev_cards(state);
 
-        // Balanced dice info: normalized probabilities and deck state.
+        // Balanced dice info: normalized probabilities for the next roll.
+        // If the current player already rolled (main phase), the next roller
+        // is the opponent; otherwise it's the current player.
         let dice_info = match &state.dice {
             Dice::Balanced(b) => {
-                let ws = b.weights(state.current_player);
+                let next_roller = if state.pre_roll || state.setup_count < 4 {
+                    state.current_player
+                } else {
+                    state.current_player.opponent()
+                };
+                let ws = b.weights(next_roller);
                 let total: f64 = ws.iter().map(|(_, w)| *w as f64).sum();
                 let probs: Vec<f64> = ws
                     .iter()

@@ -783,16 +783,22 @@ pub fn to_layout(
     let mut port_resources = [None; 9];
 
     for port in &board.ports {
-        let (mx, my) = mapper.map_hex(port.x, port.y);
+        // Colonist port coordinates are already in the canonical frame (they
+        // don't need the tile rotation transform).  Try raw coords first, then
+        // fall back to the tile-transformed coords for robustness.
+        let raw = (port.x, port.y);
+        let transformed = mapper.map_hex(port.x, port.y);
         let idx = water_to_port
-            .get(&(mx, my))
-            .or_else(|| land_to_port.get(&(mx, my)));
+            .get(&raw)
+            .or_else(|| land_to_port.get(&raw))
+            .or_else(|| water_to_port.get(&transformed))
+            .or_else(|| land_to_port.get(&transformed));
         if let Some(&idx) = idx {
             port_resources[idx] = port.port_type.to_resource();
         } else {
             eprintln!(
-                "warning: colonist port ({},{},{}) mapped to ({},{}) not matched to PORT_SPECS",
-                port.x, port.y, port.z, mx, my
+                "warning: colonist port ({},{},{}) at ({},{}) not matched to PORT_SPECS",
+                port.x, port.y, port.z, raw.0, raw.1
             );
         }
     }
