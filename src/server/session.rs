@@ -39,6 +39,8 @@ pub struct GameSession<G: Game> {
     history: Vec<HistoryEntry<G>>,
     cursor: usize, // 0..=history.len(), points past the last applied entry
     seed: u64,
+    /// Last ExploreSubtree path, used to proactively send tree updates during search.
+    last_explore: Option<(Vec<usize>, usize)>,
 }
 
 impl<G: Game + 'static> GameSession<G> {
@@ -87,6 +89,7 @@ impl<G: Game + 'static> GameSession<G> {
             history: Vec::new(),
             cursor: 0,
             seed,
+            last_explore: None,
         }
     }
 
@@ -120,6 +123,7 @@ impl<G: Game + 'static> GameSession<G> {
             history: Vec::new(),
             cursor: 0,
             seed: 0,
+            last_explore: None,
         }
     }
 
@@ -445,6 +449,7 @@ impl<G: Game + 'static> GameSession<G> {
                 }],
             },
             ClientMsg::ExploreSubtree { action_path, depth } => {
+                self.last_explore = Some((action_path.clone(), depth));
                 match self.search.snapshot_at_path(&action_path, depth) {
                     Some(mut tree) => {
                         self.label_subtree(&mut tree);
@@ -718,6 +723,14 @@ impl<G: Game + 'static> GameSession<G> {
             },
             _ => vec![],
         }
+    }
+
+    /// Generate a Subtree message for the last explored path, if any.
+    pub fn explore_subtree_msg(&self) -> Option<ServerMsg> {
+        let (path, depth) = self.last_explore.as_ref()?;
+        let mut tree = self.search.snapshot_at_path(path, *depth)?;
+        self.label_subtree(&mut tree);
+        Some(ServerMsg::Subtree { tree })
     }
 
     /// Get current snapshot with action labels.

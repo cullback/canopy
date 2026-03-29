@@ -262,6 +262,12 @@ async fn handle_live_socket<G: Game + 'static>(
                                             {
                                                 return;
                                             }
+                                            if let Some(subtree_msg) =
+                                                session.explore_subtree_msg()
+                                            {
+                                                let _ =
+                                                    send_msg(&mut socket, &subtree_msg).await;
+                                            }
                                         }
                                     }
                                 };

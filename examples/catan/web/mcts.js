@@ -8,6 +8,7 @@ class MCTSPanel {
     this.netValEl = document.getElementById('net-value');
     this.treeViewEl = document.getElementById('tree-view');
     this.onExplore = null;
+    this.expandedPaths = new Set();
   }
 
   // Update the analysis panel with a search snapshot.
@@ -65,7 +66,7 @@ class MCTSPanel {
   // Display a subtree in the tree explorer.
   showSubtree(tree) {
     this.treeViewEl.innerHTML = '';
-    this.treeViewEl.appendChild(this._renderNode(tree, 0));
+    this.treeViewEl.appendChild(this._renderNode(tree, 0, '', true, []));
   }
 
   showProgress(done, total) {
@@ -80,8 +81,9 @@ class MCTSPanel {
     this.treeViewEl.innerHTML = '';
   }
 
-  _renderNode(node, depth, prefix = '', isLast = true) {
+  _renderNode(node, depth, prefix = '', isLast = true, path = []) {
     const div = document.createElement('div');
+    const pathKey = path.join(',');
 
     const header = document.createElement('div');
     header.className = 'cursor-pointer py-0.5 whitespace-nowrap hover:text-accent';
@@ -99,15 +101,24 @@ class MCTSPanel {
     if (node.children && node.children.length > 0) {
       const childrenDiv = document.createElement('div');
       childrenDiv.className = 'tree-children';
+      if (this.expandedPaths.has(pathKey)) {
+        childrenDiv.classList.add('open');
+      }
 
       header.addEventListener('click', () => {
         childrenDiv.classList.toggle('open');
+        if (childrenDiv.classList.contains('open')) {
+          this.expandedPaths.add(pathKey);
+        } else {
+          this.expandedPaths.delete(pathKey);
+        }
       });
 
       const childPrefix = depth === 0 ? '' : (prefix + (isLast ? '  ' : '│ '));
       const sorted = [...node.children].sort((a, b) => b.visits - a.visits);
       for (let i = 0; i < sorted.length; i++) {
-        childrenDiv.appendChild(this._renderNode(sorted[i], depth + 1, childPrefix, i === sorted.length - 1));
+        const childPath = [...path, sorted[i].action];
+        childrenDiv.appendChild(this._renderNode(sorted[i], depth + 1, childPrefix, i === sorted.length - 1, childPath));
       }
       div.appendChild(childrenDiv);
     }
