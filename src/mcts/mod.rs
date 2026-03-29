@@ -307,7 +307,17 @@ impl<G: Game> Search<G> {
     pub fn snapshot(&self) -> Option<SearchSnapshot> {
         let root = self.root?;
         let edges = self.tree.edges(root);
-        let total_simulations: u32 = edges.iter().map(|e| e.visits).sum();
+
+        // When filter_legal is on, the tree may have stale edges from
+        // determinized simulations or a previous state. Filter to only
+        // edges that are currently legal so the UI never shows ghost actions.
+        let legal: Option<Vec<usize>> = if self.config.filter_legal {
+            let mut buf = Vec::new();
+            self.root_state.legal_actions(&mut buf);
+            Some(buf)
+        } else {
+            None
+        };
 
         // Compute improved policy if gumbel state is available.
         let improved = self.gumbel.as_ref().map(|gs| {
@@ -328,9 +338,10 @@ impl<G: Game> Search<G> {
             logits
         });
 
-        let edge_snapshots = edges
+        let edge_snapshots: Vec<EdgeSnapshot> = edges
             .iter()
             .enumerate()
+            .filter(|(_, edge)| legal.as_ref().is_none_or(|l| l.contains(&edge.action)))
             .map(|(i, edge)| EdgeSnapshot {
                 action: edge.action,
                 visits: edge.visits,
@@ -340,6 +351,8 @@ impl<G: Game> Search<G> {
                 improved_policy: improved.as_ref().map(|ip| ip[i]),
             })
             .collect();
+
+        let total_simulations: u32 = edge_snapshots.iter().map(|e| e.visits).sum();
 
         Some(SearchSnapshot {
             root_wdl: self.tree.wdl(root),
@@ -391,6 +404,22 @@ impl<G: Game> Search<G> {
         self.root_state.apply_action(action);
         if let Some(root) = self.root {
             self.root = self.tree.child_for_action(root, action);
+        }
+        self.search_active = false;
+    }
+
+    /// Walk the tree pointer through a sequence of actions without touching
+    /// `root_state`.
+    ///
+    /// Use when the caller will set `root_state` separately (e.g. via
+    /// `update_state`). Stops early once the pointer becomes `None`.
+    pub fn walk_tree(&mut self, actions: &[usize]) {
+        for &action in actions {
+            if let Some(root) = self.root {
+                self.root = self.tree.child_for_action(root, action);
+            } else {
+                break;
+            }
         }
         self.search_active = false;
     }
