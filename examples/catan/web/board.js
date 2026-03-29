@@ -145,6 +145,24 @@ class Board {
     if (overlayG) overlayG.innerHTML = '';
   }
 
+  // Attach instant tooltip (replaces slow browser-native <title>).
+  _attachTooltip(el, label) {
+    const tip = document.getElementById('svg-tooltip');
+    el.addEventListener('mouseenter', (e) => {
+      tip.textContent = label;
+      tip.style.display = 'block';
+      tip.style.left = e.clientX + 10 + 'px';
+      tip.style.top = e.clientY + 10 + 'px';
+    });
+    el.addEventListener('mousemove', (e) => {
+      tip.style.left = e.clientX + 10 + 'px';
+      tip.style.top = e.clientY + 10 + 'px';
+    });
+    el.addEventListener('mouseleave', () => {
+      tip.style.display = 'none';
+    });
+  }
+
   // Create a clickable overlay element for an action.
   _actionOverlay(action, label, board) {
     const nodes = board.nodes;
@@ -158,8 +176,7 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
-      const title = this._el('title', {}); title.textContent = label;
-      el.appendChild(title);
+      this._attachTooltip(el, label);
       return el;
     }
     // Road: 54..126 -> edge
@@ -177,8 +194,7 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
-      const title = this._el('title', {}); title.textContent = label;
-      el.appendChild(title);
+      this._attachTooltip(el, label);
       return el;
     }
     // City: 126..180 -> node
@@ -192,8 +208,7 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
-      const title = this._el('title', {}); title.textContent = label;
-      el.appendChild(title);
+      this._attachTooltip(el, label);
       return el;
     }
     // Robber: 205..224 -> tile
@@ -208,8 +223,7 @@ class Board {
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));
-      const title = this._el('title', {}); title.textContent = label;
-      el.appendChild(title);
+      this._attachTooltip(el, label);
       return el;
     }
     return null;

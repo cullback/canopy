@@ -493,6 +493,16 @@ impl Tree {
             .and_then(|e| e.child)
     }
 
+    /// Return the child of the most-visited edge (used to walk through chance
+    /// nodes when the actual outcome wasn't explored).
+    pub fn best_chance_child(&self, node: NodeId) -> Option<NodeId> {
+        self.edges(node)
+            .iter()
+            .filter_map(|e| e.child.map(|c| (c, e.visits)))
+            .max_by_key(|&(_, v)| v)
+            .map(|(c, _)| c)
+    }
+
     /// Sample a chance edge proportional to weights (stored as f32 in `prior`).
     pub fn sample_chance_edge(&self, node: NodeId, rng: &mut fastrand::Rng) -> usize {
         let edges = self.edges(node);

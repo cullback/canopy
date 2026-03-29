@@ -61,6 +61,20 @@
   font-size: 0.65rem;
 }
 
+/* Instant SVG tooltip (replaces browser-native <title> delay) */
+#svg-tooltip {
+  position: fixed;
+  pointer-events: none;
+  padding: 2px 6px;
+  border-radius: 3px;
+  background: #222;
+  color: #ddd;
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 1000;
+  display: none;
+}
+
 /* Tree explorer toggle */
 .tree-children { display: none; }
 .tree-children.open { display: block; }

@@ -412,14 +412,26 @@ impl<G: Game> Search<G> {
     /// `root_state`.
     ///
     /// Use when the caller will set `root_state` separately (e.g. via
-    /// `update_state`). Stops early once the pointer becomes `None`.
+    /// `update_state`). At chance nodes, falls back to the most-visited
+    /// child if the exact outcome wasn't explored or no action was
+    /// recorded for it. Stops early once the pointer becomes `None`.
     pub fn walk_tree(&mut self, actions: &[usize]) {
         for &action in actions {
-            if let Some(root) = self.root {
-                self.root = self.tree.child_for_action(root, action);
-            } else {
-                break;
-            }
+            let Some(root) = self.root else { break };
+            self.root = self.tree.child_for_action(root, action).or_else(|| {
+                if matches!(*self.tree.kind(root), NodeKind::Chance) {
+                    self.tree.best_chance_child(root)
+                } else {
+                    None
+                }
+            });
+        }
+        // Skip past any trailing chance node (e.g. BUY_DEV_CARD lands on
+        // DevCardDraw but no outcome action was recorded).
+        if let Some(root) = self.root
+            && matches!(*self.tree.kind(root), NodeKind::Chance)
+        {
+            self.root = self.tree.best_chance_child(root);
         }
         self.search_active = false;
     }
