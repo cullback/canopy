@@ -245,6 +245,7 @@ async fn handle_live_socket<G: Game + 'static>(
                                     if let Some(result) = session.search_tick(&mut evals) {
                                         break result;
                                     }
+                                    drain_queries(&mut socket, &mut *session).await;
                                     if let Some((snap, labels)) = session.snapshot_with_labels() {
                                         if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
                                             last_progress = snap.total_simulations;
@@ -369,6 +370,35 @@ async fn handle_socket<G: Game + 'static>(
             if send_msg(&mut socket, &msg).await.is_err() {
                 return;
             }
+        }
+    }
+}
+
+/// Drain read-only messages from the socket during a search.
+///
+/// Between search ticks the session lock is held and the socket recv loop is
+/// blocked, so ExploreSubtree / GetSnapshot requests would queue up until the
+/// search finishes. This helper does a non-blocking poll of the socket and
+/// handles those queries immediately.
+async fn drain_queries<G: Game + 'static>(socket: &mut WebSocket, session: &mut GameSession<G>) {
+    loop {
+        match tokio::time::timeout(std::time::Duration::ZERO, socket.recv()).await {
+            Ok(Some(Ok(Message::Text(text)))) => {
+                let msg = match serde_json::from_str::<ClientMsg>(&text) {
+                    Ok(m) => m,
+                    Err(_) => continue,
+                };
+                let responses = match &msg {
+                    ClientMsg::ExploreSubtree { .. } | ClientMsg::GetSnapshot => {
+                        session.handle(msg)
+                    }
+                    _ => continue,
+                };
+                for resp in responses {
+                    let _ = send_msg(socket, &resp).await;
+                }
+            }
+            _ => break,
         }
     }
 }
