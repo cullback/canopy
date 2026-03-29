@@ -11,6 +11,8 @@ class Controls {
     // Initialize from checkbox state (checked by default in HTML).
     this.autoSearch = document.getElementById('autosearch-toggle').checked;
     this.autoSearchTriggered = false;
+    this.autoSearchCapReached = false;
+    this.lastStateLogLen = -1;
     this.lastPollTime = 0;
     this.pollTimer = null;
 
@@ -52,6 +54,7 @@ class Controls {
       } else {
         // Hit cap or no progress — stop searching this state.
         this.autoSearchTriggered = false;
+        this.autoSearchCapReached = true;
         this.schedulePoll();
       }
       return;
@@ -84,13 +87,20 @@ class Controls {
 
     // Auto-search: after a state update, kick off search or re-poll.
     if (this.autoSearch && !this.searching) {
+      const logLen = msg.action_log ? msg.action_log.length : 0;
+      const stateChanged = logLen !== this.lastStateLogLen;
+      this.lastStateLogLen = logLen;
+      if (stateChanged) {
+        this.autoSearchCapReached = false;
+      }
+
       const canSearch = !msg.is_terminal && !msg.is_chance;
-      if (canSearch) {
+      if (canSearch && !this.autoSearchCapReached) {
         this.autoSearchTriggered = true;
         this.setSearching(true);
         this.session.send({ type: 'RunSims', count: AUTO_SEARCH_BATCH });
       } else {
-        // Nothing to analyze (0-1 actions, chance, or terminal) — re-poll.
+        // Already at cap, or nothing to analyze — re-poll to watch for changes.
         this.schedulePoll();
       }
     }

@@ -920,11 +920,12 @@ pub fn run_serve(
     session.seek_to_end();
 
     // Build coordinate maps for incremental processing.
-    let (terrains, numbers, port_resources) = board::to_layout(&data.board, &mapper);
-    let topology = Arc::new(crate::game::topology::Topology::from_layout(
+    let (terrains, numbers, port_resources, port_specs) = board::to_layout(&data.board, &mapper);
+    let topology = Arc::new(crate::game::topology::Topology::from_layout_with_ports(
         terrains,
         numbers,
         port_resources,
+        port_specs,
     ));
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);

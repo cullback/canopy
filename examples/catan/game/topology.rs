@@ -102,6 +102,9 @@ pub const TOKEN_SEQUENCE: [u8; 18] = [5, 2, 6, 3, 8, 10, 9, 12, 11, 4, 8, 10, 9,
 
 /// Port positions: (water hex, direction from water toward adjacent land hex).
 /// Derived from catanatron reference cube coords converted to axial (q=x, r=z).
+///
+/// The 18 water hexes around the land ring alternate between two sets of 9.
+/// `PORT_SPECS` covers the "primary" set; `PORT_SPECS_ALT` covers the other.
 pub const PORT_SPECS: [(Hex, Direction); 9] = [
     (Hex::new(3, 0), Direction::West),       // land: (2,0)
     (Hex::new(1, 2), Direction::Northwest),  // land: (1,1)
@@ -112,6 +115,19 @@ pub const PORT_SPECS: [(Hex, Direction); 9] = [
     (Hex::new(0, -3), Direction::Southeast), // land: (0,-2)
     (Hex::new(2, -3), Direction::Southwest), // land: (1,-2)
     (Hex::new(3, -2), Direction::Southwest), // land: (2,-1)
+];
+
+/// Alternate port positions — the other 9 water hexes around the land ring.
+pub const PORT_SPECS_ALT: [(Hex, Direction); 9] = [
+    (Hex::new(1, -3), Direction::Southeast),  // land: (1,-2)
+    (Hex::new(3, -3), Direction::Southwest),  // land: (2,-2)
+    (Hex::new(3, -1), Direction::West),       // land: (2,-1)
+    (Hex::new(2, 1), Direction::West),        // land: (1,1)
+    (Hex::new(0, 3), Direction::Northwest),   // land: (0,2)
+    (Hex::new(-2, 3), Direction::Northeast),  // land: (-1,2)
+    (Hex::new(-3, 2), Direction::Northeast),  // land: (-2,1)
+    (Hex::new(-3, 0), Direction::East),       // land: (-2,0)
+    (Hex::new(-1, -2), Direction::Southeast), // land: (-1,-1)
 ];
 
 /// Port resource pool: 5 specific + 4 generic.
@@ -161,18 +177,35 @@ impl Topology {
         let mut port_resources = PORT_POOL;
         rng.shuffle(&mut port_resources);
 
-        Self::from_layout(terrains, numbers, port_resources)
+        let port_specs = if rng.bool() {
+            &PORT_SPECS
+        } else {
+            &PORT_SPECS_ALT
+        };
+        Self::from_layout_with_ports(terrains, numbers, port_resources, port_specs)
+    }
+
+    /// Build a topology from an explicit board layout using the default
+    /// `PORT_SPECS` water hex positions.
+    pub fn from_layout(
+        terrains: [Terrain; 19],
+        numbers: [Option<u8>; 19],
+        port_resources: [Option<Resource>; 9],
+    ) -> Self {
+        Self::from_layout_with_ports(terrains, numbers, port_resources, &PORT_SPECS)
     }
 
     /// Build a topology from an explicit board layout.
     ///
     /// - `terrains[i]`: terrain at `LAND_HEXES[i]`
     /// - `numbers[i]`: dice number at `LAND_HEXES[i]`, `None` for desert
-    /// - `port_resources[i]`: resource for port at `PORT_SPECS[i]`, `None` = generic 3:1
-    pub fn from_layout(
+    /// - `port_resources[i]`: resource for port at `port_specs[i]`, `None` = generic 3:1
+    /// - `port_specs`: which 9 water hex positions to use (e.g. `PORT_SPECS` or `PORT_SPECS_ALT`)
+    pub fn from_layout_with_ports(
         terrains: [Terrain; 19],
         numbers: [Option<u8>; 19],
         port_resources: [Option<Resource>; 9],
+        port_specs: &[(Hex, Direction); 9],
     ) -> Self {
         let mut tile_data = [(Hex::new(0, 0), Terrain::Desert, None); 19];
         for i in 0..19 {
@@ -376,7 +409,7 @@ impl Topology {
         }
 
         // --- Assign ports ---
-        for (spec_idx, &(water_hex, dir)) in PORT_SPECS.iter().enumerate() {
+        for (spec_idx, &(water_hex, dir)) in port_specs.iter().enumerate() {
             let land_hex = water_hex.neighbor(dir);
             if let Some(&land_idx) = hex_set.get(&land_hex) {
                 let (c0, c1) = port_direction_to_corners(dir.opposite());
@@ -641,7 +674,13 @@ mod tests {
             let mut port_resources = PORT_POOL;
             rng.shuffle(&mut port_resources);
 
-            let t_layout = Topology::from_layout(terrains, numbers, port_resources);
+            let port_specs = if rng.bool() {
+                &PORT_SPECS
+            } else {
+                &PORT_SPECS_ALT
+            };
+            let t_layout =
+                Topology::from_layout_with_ports(terrains, numbers, port_resources, port_specs);
 
             // Compare terrains
             for (a, b) in t_build.tiles.iter().zip(t_layout.tiles.iter()) {

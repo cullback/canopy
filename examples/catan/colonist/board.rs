@@ -7,10 +7,11 @@
 use std::collections::HashMap;
 
 use crate::game::board::{EdgeId, NodeId, Terrain as CanopyTerrain};
-use crate::game::hex::Hex;
+use crate::game::hex::{Direction, Hex};
 use crate::game::resource::Resource;
 use crate::game::topology::{
-    EDGE_NEIGHBOR_DIR, LAND_HEXES, PORT_SPECS, SHARED_CORNERS, TOKEN_SEQUENCE, Topology,
+    EDGE_NEIGHBOR_DIR, LAND_HEXES, PORT_SPECS, PORT_SPECS_ALT, SHARED_CORNERS, TOKEN_SEQUENCE,
+    Topology,
 };
 
 // -- Coordinate orientation mapper --------------------------------------------
@@ -730,14 +731,19 @@ impl PortType {
     }
 }
 
-/// Convert colonist board data to `Topology::from_layout()` arguments.
+/// Convert colonist board data to `Topology::from_layout_with_ports()` arguments.
 ///
-/// Returns `(terrains, numbers, port_resources)` indexed by LAND_HEXES and
-/// PORT_SPECS position respectively.
+/// Returns `(terrains, numbers, port_resources, port_specs)` where port_specs
+/// is whichever of `PORT_SPECS` / `PORT_SPECS_ALT` best matches the board.
 pub fn to_layout(
     board: &BoardData,
     mapper: &CoordMapper,
-) -> ([CanopyTerrain; 19], [Option<u8>; 19], [Option<Resource>; 9]) {
+) -> (
+    [CanopyTerrain; 19],
+    [Option<u8>; 19],
+    [Option<Resource>; 9],
+    &'static [(Hex, Direction); 9],
+) {
     // Map colonist tile (x,y) → LAND_HEXES index
     let hex_to_land: HashMap<(i32, i32), usize> = LAND_HEXES
         .iter()
@@ -763,15 +769,26 @@ pub fn to_layout(
         }
     }
 
-    // Map colonist ports to PORT_SPECS positions.
-    // Try matching (x,y) as water hex first, then as land hex.
-    let water_to_port: HashMap<(i32, i32), usize> = PORT_SPECS
+    // Detect which port configuration this board uses by trying both sets.
+    let (port_resources, port_specs) = match_ports(&board.ports, mapper);
+
+    (terrains, numbers, port_resources, port_specs)
+}
+
+/// Try matching colonist ports against a port spec set using transformed coords.
+/// Returns (port_resources, match_count).
+fn try_match_port_specs(
+    ports: &[Port],
+    mapper: &CoordMapper,
+    specs: &[(Hex, Direction); 9],
+) -> ([Option<Resource>; 9], usize) {
+    let water_to_port: HashMap<(i32, i32), usize> = specs
         .iter()
         .enumerate()
         .map(|(i, &(hex, _))| ((hex.q as i32, hex.r as i32), i))
         .collect();
 
-    let land_to_port: HashMap<(i32, i32), usize> = PORT_SPECS
+    let land_to_port: HashMap<(i32, i32), usize> = specs
         .iter()
         .enumerate()
         .map(|(i, &(hex, dir))| {
@@ -781,29 +798,46 @@ pub fn to_layout(
         .collect();
 
     let mut port_resources = [None; 9];
+    let mut matched = 0;
 
-    for port in &board.ports {
-        // Colonist port coordinates are already in the canonical frame (they
-        // don't need the tile rotation transform).  Try raw coords first, then
-        // fall back to the tile-transformed coords for robustness.
-        let raw = (port.x, port.y);
+    for port in ports {
         let transformed = mapper.map_hex(port.x, port.y);
         let idx = water_to_port
-            .get(&raw)
-            .or_else(|| land_to_port.get(&raw))
-            .or_else(|| water_to_port.get(&transformed))
+            .get(&transformed)
             .or_else(|| land_to_port.get(&transformed));
         if let Some(&idx) = idx {
             port_resources[idx] = port.port_type.to_resource();
-        } else {
-            eprintln!(
-                "warning: colonist port ({},{},{}) at ({},{}) not matched to PORT_SPECS",
-                port.x, port.y, port.z, raw.0, raw.1
-            );
+            matched += 1;
         }
     }
 
-    (terrains, numbers, port_resources)
+    (port_resources, matched)
+}
+
+/// Match colonist ports against both PORT_SPECS and PORT_SPECS_ALT.
+/// Returns port resources indexed by the winning spec set and a reference to it.
+fn match_ports(
+    ports: &[Port],
+    mapper: &CoordMapper,
+) -> ([Option<Resource>; 9], &'static [(Hex, Direction); 9]) {
+    let (res_primary, n_primary) = try_match_port_specs(ports, mapper, &PORT_SPECS);
+    let (res_alt, n_alt) = try_match_port_specs(ports, mapper, &PORT_SPECS_ALT);
+
+    if n_alt > n_primary {
+        eprintln!(
+            "detected alternate port configuration ({n_alt}/{} matched)",
+            ports.len()
+        );
+        (res_alt, &PORT_SPECS_ALT)
+    } else {
+        if n_primary < ports.len() && !ports.is_empty() {
+            eprintln!(
+                "warning: only {n_primary}/{} ports matched PORT_SPECS (alt matched {n_alt})",
+                ports.len()
+            );
+        }
+        (res_primary, &PORT_SPECS)
+    }
 }
 
 // -- Coordinate mapping -------------------------------------------------------

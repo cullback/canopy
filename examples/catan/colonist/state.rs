@@ -43,8 +43,13 @@ pub fn build_timeline(
     events: &[GameEvent],
     mapper: &CoordMapper,
 ) -> Vec<TimelineEntry> {
-    let (terrains, numbers, port_resources) = board::to_layout(board, mapper);
-    let topology = Arc::new(Topology::from_layout(terrains, numbers, port_resources));
+    let (terrains, numbers, port_resources, port_specs) = board::to_layout(board, mapper);
+    let topology = Arc::new(Topology::from_layout_with_ports(
+        terrains,
+        numbers,
+        port_resources,
+        port_specs,
+    ));
     let color_map = discover_colors(events);
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);
@@ -78,8 +83,13 @@ pub fn build_game_state(
     events: &[GameEvent],
     mapper: &CoordMapper,
 ) -> GameState {
-    let (terrains, numbers, port_resources) = board::to_layout(board, mapper);
-    let topology = Arc::new(Topology::from_layout(terrains, numbers, port_resources));
+    let (terrains, numbers, port_resources, port_specs) = board::to_layout(board, mapper);
+    let topology = Arc::new(Topology::from_layout_with_ports(
+        terrains,
+        numbers,
+        port_resources,
+        port_specs,
+    ));
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
 
