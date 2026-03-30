@@ -9,7 +9,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use axum::extract::ws::{Message, WebSocket};
-use futures_util::{SinkExt, StreamExt};
+use futures_util::{FutureExt, SinkExt, StreamExt};
 use tokio::net::TcpStream;
 use tokio_tungstenite::tungstenite;
 use tokio_tungstenite::{MaybeTlsStream, WebSocketStream, connect_async};
@@ -842,6 +842,23 @@ async fn colonist_run_search(
                 .await?;
                 if let Some(subtree_msg) = session.explore_subtree_msg() {
                     let _ = canopy::server::send_msg(socket, &subtree_msg).await;
+                }
+            }
+        }
+
+        // Non-blocking: process interactive messages (tree exploration)
+        // that arrive while the search is running.
+        if let Some(Some(Ok(ws_msg))) = socket.recv().now_or_never() {
+            if let Message::Text(text) = ws_msg {
+                if let Ok(client_msg) = serde_json::from_str::<canopy::server::ClientMsg>(&text) {
+                    let responses = match client_msg {
+                        canopy::server::ClientMsg::ExploreSubtree { .. }
+                        | canopy::server::ClientMsg::GetSnapshot => session.handle(client_msg),
+                        _ => vec![],
+                    };
+                    for m in responses {
+                        canopy::server::send_msg(socket, &m).await?;
+                    }
                 }
             }
         }
