@@ -992,6 +992,21 @@ fn process_post_setup(
                     let aid = action::road_id(eid).0 as usize;
                     crate::game::apply_with_chance(state, aid, None);
                     actions.push(aid);
+                } else if let Phase::RoadBuilding { roads_left } = state.phase {
+                    // No edge coordinates — road already placed by sync_buildings.
+                    // Manually advance the Road Building phase counter.
+                    let remaining = roads_left - 1;
+                    if remaining == 0 || state.current().roads_left == 0 {
+                        state.phase = if state.pre_roll {
+                            Phase::PreRoll
+                        } else {
+                            Phase::Main
+                        };
+                    } else {
+                        state.phase = Phase::RoadBuilding {
+                            roads_left: remaining,
+                        };
+                    }
                 }
                 pending_label = Some(format!("{} places road", player_label(*player, color_map)));
             }
