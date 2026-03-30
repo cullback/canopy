@@ -136,13 +136,16 @@ pub fn build_game_state(
 
 /// Discover the first two unique player colors from the log, mapping them to
 /// Player::One and Player::Two.
+///
+/// Uses only placement events (PlaceSettlement/PlaceRoad) — colonist logs
+/// "roll for first player" before setup, and those don't reflect turn order.
 pub fn discover_colors(events: &[GameEvent]) -> Vec<(u8, Player)> {
     let mut map: Vec<(u8, Player)> = Vec::new();
     for event in events {
         let color = match event {
-            GameEvent::PlaceSettlement { player, .. }
-            | GameEvent::PlaceRoad { player, .. }
-            | GameEvent::Roll { player, .. } => *player,
+            GameEvent::PlaceSettlement { player, .. } | GameEvent::PlaceRoad { player, .. } => {
+                *player
+            }
             _ => continue,
         };
         if map.iter().any(|&(c, _)| c == color) {
