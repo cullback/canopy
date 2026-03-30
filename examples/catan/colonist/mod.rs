@@ -607,7 +607,11 @@ impl ColonistPollState {
 
         // --- Mutate committed_state (single copy, single place) ---
 
-        let (ns, nc, nr, _) = state::sync_buildings(
+        let was_setup = matches!(
+            self.committed_state.phase,
+            Phase::PlaceSettlement | Phase::PlaceRoad
+        );
+        let sync = state::sync_buildings(
             &mut self.committed_state,
             &poll.buildings,
             &self.color_map,
@@ -615,14 +619,25 @@ impl ColonistPollState {
             &self.edge_map,
             &self.mapper,
         );
-        if ns + nc + nr > 0 {
-            eprintln!("poll: synced {ns} settlements, {nc} cities, {nr} roads from board");
+        let building_count = sync.settlements + sync.cities + sync.roads;
+        if building_count > 0 {
+            eprintln!(
+                "poll: synced {} settlements, {} cities, {} roads from board",
+                sync.settlements, sync.cities, sync.roads
+            );
             state::sync_setup_phase(&mut self.committed_state);
         }
 
         let mut entries_to_extend = Vec::new();
         let mut actions_to_walk: Vec<usize> = Vec::new();
         let mut needs_rollback = false;
+
+        // During setup, sync_buildings places buildings directly and returns
+        // the corresponding action IDs. Prepend them so the tree pointer
+        // advances to match the new committed_state.
+        if building_count > 0 && was_setup {
+            actions_to_walk.extend(sync.walk_actions);
+        }
 
         if total_events > self.committed_event_count {
             let new_events = &poll.events[self.committed_event_count..];
@@ -752,6 +767,89 @@ impl ColonistPollState {
     }
 }
 
+/// Poll interval during search — how often to check colonist for state changes.
+const SEARCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Progress update interval (matches server::PROGRESS_INTERVAL).
+const PROGRESS_INTERVAL: u32 = 10;
+
+/// Run MCTS search with interleaved colonist polling.
+///
+/// Every `SEARCH_POLL_INTERVAL`, cancels the active search, polls colonist for
+/// state changes (which may reroot the tree), resets the sim budget, and
+/// resumes searching. This ensures state changes on colonist are detected
+/// during long searches.
+async fn colonist_run_search(
+    socket: &mut WebSocket,
+    session: &mut canopy::server::GameSession<crate::game::state::GameState>,
+    msg: &canopy::server::ClientMsg,
+    poll: &mut ColonistPollState,
+) -> Result<Vec<canopy::server::ServerMsg>, ()> {
+    let sims_total = match session.begin_search(msg) {
+        Err(msgs) => return Ok(msgs),
+        Ok(n) => n,
+    };
+
+    // Track sims across poll-interrupted segments. Each segment measures
+    // root_visits() before/after to count sims done, since poll() may
+    // reroot or reset the tree (changing root_visits discontinuously).
+    let mut total_sims_done = 0u32;
+    let mut segment_baseline = session.root_visits();
+
+    let mut evals = vec![];
+    let mut last_progress = 0u32;
+    let mut last_poll = std::time::Instant::now();
+
+    let result = loop {
+        // Check if it's time to poll colonist.
+        if last_poll.elapsed() >= SEARCH_POLL_INTERVAL {
+            // Count sims completed in the segment that just ended.
+            total_sims_done += session.root_visits().saturating_sub(segment_baseline);
+
+            session.cancel_search();
+            let poll_msgs = poll.poll(session).await;
+            for m in &poll_msgs {
+                canopy::server::send_msg(socket, m).await?;
+            }
+
+            // Start a new segment: capture baseline after any tree changes
+            // from poll (walk_tree, rollback, reset).
+            segment_baseline = session.root_visits();
+            let remaining = sims_total.saturating_sub(total_sims_done);
+            session.set_num_simulations(remaining);
+            last_poll = std::time::Instant::now();
+            // Reset so progress messages fire from the new baseline.
+            last_progress = 0;
+            evals.clear();
+        }
+
+        if let Some(result) = session.search_tick(&mut evals) {
+            break result;
+        }
+
+        // Send progress updates.
+        if let Some((snap, labels)) = session.snapshot_with_labels() {
+            if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
+                last_progress = snap.total_simulations;
+                canopy::server::send_msg(
+                    socket,
+                    &canopy::server::ServerMsg::SearchProgress {
+                        snapshot: snap,
+                        action_labels: labels,
+                        sims_total,
+                    },
+                )
+                .await?;
+                if let Some(subtree_msg) = session.explore_subtree_msg() {
+                    let _ = canopy::server::send_msg(socket, &subtree_msg).await;
+                }
+            }
+        }
+    };
+
+    Ok(session.finish_search(msg, result))
+}
+
 /// Handle a colonist WebSocket connection (sequential, single-threaded).
 async fn handle_colonist_socket(
     mut socket: WebSocket,
@@ -796,7 +894,7 @@ async fn handle_colonist_socket(
             canopy::server::ClientMsg::BotMove { .. }
             | canopy::server::ClientMsg::RunSims { .. } => {
                 eprintln!("ws: {:?}", client_msg);
-                match canopy::server::run_search(&mut socket, session, &client_msg).await {
+                match colonist_run_search(&mut socket, session, &client_msg, poll).await {
                     Ok(msgs) => {
                         for m in &msgs {
                             match m {

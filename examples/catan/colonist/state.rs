@@ -104,7 +104,7 @@ pub fn build_game_state(
 
     // Place buildings from board snapshot (dedup checks are no-ops on fresh state)
     let buildings = board::extract_buildings(board, mapper);
-    let (ns, nc, nr, _) = sync_buildings(
+    let sync = sync_buildings(
         &mut state,
         &buildings,
         &color_map,
@@ -112,8 +112,11 @@ pub fn build_game_state(
         &edge_map,
         mapper,
     );
-    if ns + nc + nr > 0 {
-        eprintln!("placed {ns} settlements, {nc} cities, {nr} roads from board snapshot");
+    if sync.settlements + sync.cities + sync.roads > 0 {
+        eprintln!(
+            "placed {} settlements, {} cities, {} roads from board snapshot",
+            sync.settlements, sync.cities, sync.roads
+        );
     }
 
     // Replay log for resource hands + dice
@@ -436,11 +439,22 @@ fn place_road(state: &mut GameState, pid: Player, eid: crate::game::board::EdgeI
     state.boards[opp].road_network.remove_edge(eid);
 }
 
+/// Result of syncing buildings from a board snapshot.
+pub struct SyncBuildingsResult {
+    pub settlements: u32,
+    pub cities: u32,
+    pub roads: u32,
+    pub last_settlement: Option<NodeId>,
+    /// Action IDs corresponding to each newly placed building, in placement order.
+    /// Useful for walking the MCTS tree during setup.
+    pub walk_actions: Vec<usize>,
+}
+
 /// Sync buildings from a board snapshot onto the game state.
 ///
 /// Only places buildings that are not already present (checked via bitfields).
-/// Returns `(settlements, cities, roads, last_settlement_node)` — the last
-/// settlement NodeId placed (if any), used to set `last_setup_node`.
+/// Returns a `SyncBuildingsResult` with counts, the last settlement node, and
+/// action IDs for tree walking.
 pub fn sync_buildings(
     state: &mut GameState,
     buildings: &board::BuildingData,
@@ -448,9 +462,16 @@ pub fn sync_buildings(
     corner_map: &std::collections::HashMap<(i32, i32, u8), NodeId>,
     edge_map: &std::collections::HashMap<(i32, i32, u8), EdgeId>,
     mapper: &CoordMapper,
-) -> (u32, u32, u32, Option<NodeId>) {
-    let mut placed = (0u32, 0u32, 0u32);
-    let mut last_settlement: Option<NodeId> = None;
+) -> SyncBuildingsResult {
+    use crate::game::action;
+
+    let mut result = SyncBuildingsResult {
+        settlements: 0,
+        cities: 0,
+        roads: 0,
+        last_settlement: None,
+        walk_actions: Vec::new(),
+    };
 
     for &(color, x, y, z) in &buildings.settlements {
         let Some(pid) = player_of_color(color_map, color) else {
@@ -462,8 +483,11 @@ pub fn sync_buildings(
         };
         if state.boards[pid].settlements & (1u64 << nid.0) == 0 {
             place_settlement(state, pid, nid);
-            last_settlement = Some(nid);
-            placed.0 += 1;
+            result.last_settlement = Some(nid);
+            result.settlements += 1;
+            result
+                .walk_actions
+                .push(action::settlement_id(nid).0 as usize);
         }
     }
 
@@ -477,7 +501,8 @@ pub fn sync_buildings(
         };
         if state.boards[pid].cities & (1u64 << nid.0) == 0 {
             place_city(state, pid, nid);
-            placed.1 += 1;
+            result.cities += 1;
+            result.walk_actions.push(action::city_id(nid).0 as usize);
         }
     }
 
@@ -491,11 +516,12 @@ pub fn sync_buildings(
         };
         if state.boards[pid].road_network.roads & (1u128 << eid.0) == 0 {
             place_road(state, pid, eid);
-            placed.2 += 1;
+            result.roads += 1;
+            result.walk_actions.push(action::road_id(eid).0 as usize);
         }
     }
 
-    (placed.0, placed.1, placed.2, last_settlement)
+    result
 }
 
 /// Derive the correct setup phase from building counts on the board.
@@ -941,6 +967,18 @@ fn process_post_setup(
                     state.bank.add(ROAD_COST);
                 }
                 pending_label = Some(format!("{} builds road", player_label(*player, color_map)));
+            }
+
+            // Setup placement events — buildings already placed by sync_buildings,
+            // just produce timeline labels.
+            GameEvent::PlaceSettlement { player, .. } if state.setup_count < 4 => {
+                pending_label = Some(format!(
+                    "{} places settlement",
+                    player_label(*player, color_map)
+                ));
+            }
+            GameEvent::PlaceRoad { player, .. } if state.setup_count < 4 => {
+                pending_label = Some(format!("{} places road", player_label(*player, color_map)));
             }
 
             // Road Building dev card uses "place" events (type 4), not "build"

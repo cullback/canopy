@@ -765,6 +765,21 @@ impl<G: Game + 'static> GameSession<G> {
             .collect()
     }
 
+    /// Cancel any in-progress search (clears pending evaluation contexts).
+    pub fn cancel_search(&mut self) {
+        self.search.cancel_search();
+    }
+
+    /// Update the MCTS simulation budget.
+    pub fn set_num_simulations(&mut self, n: u32) {
+        self.search.set_num_simulations(n);
+    }
+
+    /// Total visits on the current root node.
+    pub fn root_visits(&self) -> u32 {
+        self.search.root_visits()
+    }
+
     /// Label all nodes in a subtree by simulating actions from the root state.
     fn label_subtree(&self, tree: &mut crate::mcts::TreeNodeSnapshot) {
         let state = self.search.state().clone();
