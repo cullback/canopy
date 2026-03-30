@@ -654,6 +654,9 @@ impl<G: Game + 'static> GameSession<G> {
     /// Validate state and prepare search for streaming.
     /// Returns `Ok(sims_total)` or `Err(error_msgs)`.
     pub fn begin_search(&mut self, msg: &ClientMsg) -> Result<u32, Vec<ServerMsg>> {
+        // Cancel stale search state left by a previous interrupted search
+        // (e.g. a panicked evaluator or dropped WebSocket connection).
+        self.search.cancel_search();
         match msg {
             ClientMsg::BotMove { simulations } => {
                 if self.is_terminal() {

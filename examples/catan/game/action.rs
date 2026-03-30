@@ -458,9 +458,13 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
         }
     }
 
-    // Buy dev card
+    // Buy dev card — also check the pool has drawable cards, since SO-ISMCTS
+    // dev_cards_played inflation can make the pool empty while dev_deck.total > 0.
     if player.hand.contains(DEV_CARD_COST) && !state.dev_deck.is_empty() {
-        actions.push(ActionId(BUY_DEV_CARD));
+        let pool_total: u8 = state.unknown_dev_pool().iter().sum();
+        if pool_total > 0 {
+            actions.push(ActionId(BUY_DEV_CARD));
+        }
     }
 
     // Play dev cards (one per turn, can't play cards bought this turn).

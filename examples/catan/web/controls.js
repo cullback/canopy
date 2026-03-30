@@ -12,7 +12,7 @@ class Controls {
     this.autoSearch = document.getElementById('autosearch-toggle').checked;
     this.autoSearchTriggered = false;
     this.autoSearchCapReached = false;
-    this.lastStateLogLen = -1;
+    this.lastStateKey = '';
     this.lastPollTime = 0;
     this.pollTimer = null;
 
@@ -91,9 +91,12 @@ class Controls {
     }
 
     // Detect state changes (always, regardless of auto-search).
+    // Use phase + player + log length so setup transitions (which don't
+    // generate timeline entries) are still detected.
     const logLen = msg.action_log ? msg.action_log.length : 0;
-    const stateChanged = logLen !== this.lastStateLogLen;
-    this.lastStateLogLen = logLen;
+    const stateKey = `${logLen}:${msg.phase}:${msg.current_player}`;
+    const stateChanged = stateKey !== this.lastStateKey;
+    this.lastStateKey = stateKey;
     if (stateChanged) {
       this.autoSearchCapReached = false;
     }

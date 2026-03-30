@@ -278,6 +278,22 @@ impl<G: Game> Search<G> {
         f(&mut self.root_state);
     }
 
+    /// Cancel any in-progress search, cleaning up virtual losses.
+    ///
+    /// Safe to call even when no search is active (no-op). Use when a
+    /// previous search may have been interrupted (e.g. by a panic in the
+    /// evaluator or a dropped connection) and the caller wants to start
+    /// fresh without stale `pending_contexts` triggering assertion failures.
+    pub fn cancel_search(&mut self) {
+        for context in self.pending_contexts.drain(..) {
+            if let Phase::Simulating { ref path, .. } = context {
+                self.tree.remove_virtual_loss(path);
+            }
+        }
+        self.pending_states.clear();
+        self.search_active = false;
+    }
+
     /// Update the simulation budget (takes effect on the next search).
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
