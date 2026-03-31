@@ -40,30 +40,40 @@ class Controls {
 
   setSearching(active) {
     this.searching = active;
+    this.updateButtons();
+  }
+
+  updateButtons() {
+    const busy = this.searching || this.autoSearchTriggered;
     const runBtn = document.getElementById('btn-run-sims');
     const botBtn = document.getElementById('btn-bot-move');
-    runBtn.disabled = active;
-    botBtn.disabled = active;
-    runBtn.textContent = active ? 'Searching...' : 'Run Sims';
+    runBtn.disabled = busy;
+    botBtn.disabled = busy;
+    runBtn.textContent = this.searching ? 'Searching...' : 'Run Sims';
   }
 
   /// Called when RunSims completes (Snapshot received).
   onSimsDone(snapshot) {
-    this.setSearching(false);
+    this.searching = false;
 
     if (this.autoSearchTriggered) {
       const cap = parseInt(document.getElementById('sims-input').value);
       if (snapshot && snapshot.total_simulations > 0 && snapshot.total_simulations < cap) {
         // Under cap — poll to check for state changes, then continue.
+        // Buttons stay disabled (autoSearchTriggered is still true).
+        this.updateButtons();
         this.schedulePoll();
       } else {
         // Hit cap or no progress — stop searching this state.
         this.autoSearchTriggered = false;
         this.autoSearchCapReached = true;
+        this.updateButtons();
         this.schedulePoll();
       }
       return;
     }
+
+    this.updateButtons();
 
     if (document.getElementById('apply-toggle').checked || this.autoplay) {
       // Play the most-visited action from the completed search.
@@ -118,8 +128,9 @@ class Controls {
 
   /// Called on server Error — keep polling alive after a delay.
   onSearchError() {
-    this.setSearching(false);
+    this.searching = false;
     this.autoSearchTriggered = false;
+    this.updateButtons();
     this.schedulePoll();
   }
 
@@ -209,6 +220,7 @@ class Controls {
     this.autoSearch = false;
     this.autoSearchTriggered = false;
     document.getElementById('autosearch-toggle').checked = false;
+    this.updateButtons();
   }
 
   onGameOver() {

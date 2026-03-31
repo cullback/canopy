@@ -673,11 +673,29 @@ impl ColonistPollState {
                 ) {
                     Ok(matched) if matched > 0 => {
                         eprintln!("poll: {matched} pending actions confirmed by colonist");
+                        // The session already walked the tree for these pending
+                        // actions (via PlayAction). But the colonist events may
+                        // produce additional walk actions beyond the matched ones
+                        // (e.g. a Roll event generates [END_TURN, ROLL, dice]
+                        // but only END_TURN was the pending action). Strip the
+                        // matched action IDs from the front of new_actions and
+                        // walk the remainder so the tree pointer reaches the
+                        // correct depth.
+                        let matched_ids: Vec<usize> = self.pending_actions[..matched].to_vec();
                         self.pending_actions.drain(..matched);
                         if self.pending_actions.is_empty() {
                             self.pre_pending_cursor = None;
                         }
                         entries_to_extend = new_entries.into_iter().skip(matched).collect();
+                        let mut skip = 0;
+                        for &pa in &matched_ids {
+                            if skip < new_actions.len() && new_actions[skip] == pa {
+                                skip += 1;
+                            }
+                        }
+                        if skip < new_actions.len() {
+                            actions_to_walk = new_actions[skip..].to_vec();
+                        }
                     }
                     Ok(_) => {
                         // No events matched yet — keep waiting.
@@ -748,7 +766,13 @@ impl ColonistPollState {
         }
 
         if !actions_to_walk.is_empty() {
+            let pre_visits = session.root_visits();
             session.walk_tree(&actions_to_walk);
+            let post_visits = session.root_visits();
+            eprintln!(
+                "poll: walk_tree {:?} — visits {} → {}",
+                actions_to_walk, pre_visits, post_visits
+            );
         }
 
         if !entries_to_extend.is_empty() {
@@ -763,7 +787,16 @@ impl ColonistPollState {
             session.set_final_state(self.committed_state.clone());
         }
 
-        vec![session.state_msg()]
+        let mut msgs = vec![session.state_msg()];
+        // Include a snapshot so the tree view refreshes after state changes
+        // (otherwise the client keeps displaying the stale search snapshot).
+        if let Some((snap, labels)) = session.snapshot_with_labels() {
+            msgs.push(canopy::server::ServerMsg::Snapshot {
+                snapshot: snap,
+                action_labels: labels,
+            });
+        }
+        msgs
     }
 }
 
