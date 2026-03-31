@@ -426,7 +426,7 @@ pub const EXTRACT_CARDS_JS: &str = r#"(() => {
 
 /// JS snippet to extract live game metadata from the React component tree.
 ///
-/// Returns JSON: `{players: [{username, color}], localColor, currentTurnColor, robberHex, diceThrown, turnState}`.
+/// Returns JSON: `{players, localColor, currentTurnColor, robberHex, turnState, actionState}`.
 /// Player info comes from memoizedProps (gameValidator.userStates).
 /// Live game state (dice, turn) comes from React hooks (memoizedState) on a
 /// separate fiber node, since the props snapshot is stale.
@@ -484,9 +484,10 @@ pub const EXTRACT_LIVE_JS: &str = r#"(() => {
         if (players && liveGs) break;
     }
 
-    let currentTurnColor = liveGs?.currentState?.currentTurnPlayerColor ?? null;
-    let diceThrown = liveGs?.diceState?.diceThrown ?? null;
-    let turnState = liveGs?.currentState?.turnState ?? null;
+    let cs = liveGs?.currentState;
+    let currentTurnColor = cs?.currentTurnPlayerColor ?? null;
+    let turnState = cs?.turnState ?? null;
+    let actionState = cs?.actionState ?? null;
 
     // Update robber from live state if available.
     if (liveGs && tileState) {
@@ -501,8 +502,8 @@ pub const EXTRACT_LIVE_JS: &str = r#"(() => {
         localColor,
         currentTurnColor,
         robberHex,
-        diceThrown,
         turnState,
+        actionState,
     });
 })()"#;
 

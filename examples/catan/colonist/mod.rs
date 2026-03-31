@@ -196,8 +196,10 @@ struct GameData {
     local_color: u8,
     /// Current turn player's colonist color.
     current_turn_color: u8,
-    /// Whether the dice have been thrown this turn.
-    dice_thrown: bool,
+    /// Colonist turnState: 1 = pre-roll, 2 = post-roll/main.
+    turn_state: u8,
+    /// Colonist actionState: 0 = default, 6 = build settlement, 24 = place robber, etc.
+    action_state: u8,
     /// Robber hex coordinates from the live board.
     robber_hex: (i32, i32),
 }
@@ -259,9 +261,8 @@ async fn extract_game_data(ws: &mut WsStream) -> Result<GameData, String> {
         .as_u64()
         .map(|c| c as u8)
         .ok_or("missing currentTurnColor")?;
-    let dice_thrown = live_obj["diceThrown"]
-        .as_bool()
-        .ok_or("missing diceThrown")?;
+    let turn_state = live_obj["turnState"].as_u64().unwrap_or(0) as u8;
+    let action_state = live_obj["actionState"].as_u64().unwrap_or(0) as u8;
     let robber_hex = live_obj["robberHex"]
         .as_object()
         .and_then(|o| {
@@ -292,7 +293,8 @@ async fn extract_game_data(ws: &mut WsStream) -> Result<GameData, String> {
         player_names,
         local_color,
         current_turn_color,
-        dice_thrown,
+        turn_state,
+        action_state,
         robber_hex,
     })
 }
@@ -379,21 +381,16 @@ fn apply_live_state(
         }
     }
 
-    // Log turn/phase changes from live DOM state, but don't mutate
-    // committed_state — these must be driven by event processing through
-    // the game engine so that walk actions (END_TURN, ROLL) are correctly
-    // generated for tree rerooting.
+    // Turn/phase changes are driven by event processing (not mutated here)
+    // so that walk actions (END_TURN, ROLL) are correctly generated.
+    // Log colonist's live state for diagnostics.
     if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad)
         && let Some(pid) = state::player_of_color(color_map, data.current_turn_color)
     {
         if state.current_player != pid {
-            eprintln!("live: turn changed to {pid:?} (deferred to events)");
-        }
-        let want_pre_roll = !data.dice_thrown;
-        if state.pre_roll != want_pre_roll {
             eprintln!(
-                "live: dice_thrown={} → pre_roll={want_pre_roll} (was {}), deferred to events",
-                data.dice_thrown, state.pre_roll
+                "live: turn changed to {pid:?} (turnState={} actionState={})",
+                data.turn_state, data.action_state
             );
         }
     }
@@ -426,18 +423,23 @@ fn apply_live_state(
         changed = true;
     }
 
-    // Diagnostic: dev card legality
+    // Diagnostic log.
     if state.setup_count >= 4 {
         let cp = state.current_player;
         let p = &state.players[cp];
-        let kn = p.dev_cards[crate::game::dev_card::DevCardKind::Knight];
-        let kn_bought = p.dev_cards_bought_this_turn[crate::game::dev_card::DevCardKind::Knight];
-        let played = p.has_played_dev_card_this_turn;
-        let hidden = p.hidden_dev_cards;
         eprintln!(
-            "live dev: cp={cp:?} phase={:?} knights={kn} bought_this_turn={kn_bought} played={played} hidden={hidden}",
-            state.phase
+            "live: cp={cp:?} phase={:?} colonist:turnState={} actionState={}",
+            state.phase, data.turn_state, data.action_state,
         );
+        if p.hidden_dev_cards > 0 || p.has_played_dev_card_this_turn {
+            eprintln!(
+                "  dev: knights={} bought={} played={} hidden={}",
+                p.dev_cards[crate::game::dev_card::DevCardKind::Knight],
+                p.dev_cards_bought_this_turn[crate::game::dev_card::DevCardKind::Knight],
+                p.has_played_dev_card_this_turn,
+                p.hidden_dev_cards,
+            );
+        }
     }
 
     changed
@@ -769,8 +771,36 @@ impl ColonistPollState {
             &self.mapper,
         );
 
+        // When colonist shows a turn change (turnState=1 = someone's pre-roll)
+        // but events haven't caught up, proactively apply END_TURN so the
+        // search starts exploring the next player's roll immediately.
+        // Covers both: local ends turn → explore opponent's roll, and
+        // opponent ends turn → explore our Roll/BuyDevCard options.
+        if !has_event_updates
+            && self.pending_actions.is_empty()
+            && poll.turn_state == 1
+            && matches!(self.committed_state.phase, Phase::Main | Phase::PreRoll)
+        {
+            if let Some(live_pid) = state::player_of_color(&self.color_map, poll.current_turn_color)
+            {
+                if live_pid != self.committed_state.current_player {
+                    use crate::game::action::END_TURN;
+                    use canopy::game::Game as _;
+                    eprintln!("poll: proactive END_TURN → {live_pid:?} (colonist turnState=1)");
+                    self.committed_state.apply_action(END_TURN as usize);
+                    actions_to_walk.push(END_TURN as usize);
+                    // Engine sets Phase::Roll for auto-dice; colonist resolves
+                    // dice via events, so map back to PreRoll.
+                    if matches!(self.committed_state.phase, Phase::Roll) {
+                        self.committed_state.phase = Phase::PreRoll;
+                    }
+                }
+            }
+        }
+
         // --- Sync to session ---
 
+        let has_event_updates = has_event_updates || !actions_to_walk.is_empty();
         let has_updates = has_event_updates || self.pending_actions.is_empty();
         if !has_updates {
             return (vec![session.state_msg()], false);
