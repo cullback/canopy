@@ -93,6 +93,12 @@ fn main() {
                     Arg::new("serve")
                         .long("serve")
                         .help("Serve board via web UI on this port"),
+                )
+                .arg(
+                    Arg::new("leaf-batch")
+                        .long("leaf-batch")
+                        .default_value("1")
+                        .help("Leaves per GPU batch (higher = better GPU utilization)"),
                 ),
         )
         .get_matches();
@@ -130,7 +136,12 @@ fn main() {
             } else {
                 ("rollout", setup.evaluators().get_arc("rollout"))
             };
-            colonist::run_serve(cdp_port, serve_port, evaluator, eval_name);
+            let leaf_batch: u32 = sub
+                .get_one::<String>("leaf-batch")
+                .unwrap()
+                .parse()
+                .expect("invalid leaf-batch");
+            colonist::run_serve(cdp_port, serve_port, evaluator, eval_name, leaf_batch);
         } else {
             colonist::run(cdp_port);
         }

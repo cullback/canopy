@@ -1043,6 +1043,7 @@ pub fn run_serve(
     serve_port: u16,
     evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync>,
     eval_name: &str,
+    leaf_batch_size: u32,
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
@@ -1109,6 +1110,7 @@ pub fn run_serve(
         Arc::new(CatanPresenter::new(static_dir.clone(), dice).with_player_names(names));
     let mcts_config = canopy::mcts::Config {
         filter_legal: true,
+        leaf_batch_size,
         ..canopy::mcts::Config::default()
     };
     let mut session = canopy::server::GameSession::with_state(
