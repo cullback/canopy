@@ -694,7 +694,7 @@ impl ColonistPollState {
                             }
                         }
                         if skip < new_actions.len() {
-                            actions_to_walk = new_actions[skip..].to_vec();
+                            actions_to_walk.extend_from_slice(&new_actions[skip..]);
                         }
                     }
                     Ok(_) => {
@@ -705,12 +705,12 @@ impl ColonistPollState {
                         needs_rollback = true;
                         self.pending_actions.clear();
                         entries_to_extend = new_entries;
-                        actions_to_walk = new_actions;
+                        actions_to_walk.extend(new_actions);
                     }
                 }
             } else {
                 entries_to_extend = new_entries;
-                actions_to_walk = new_actions;
+                actions_to_walk.extend(new_actions);
             }
         }
 
@@ -800,185 +800,180 @@ impl ColonistPollState {
     }
 }
 
-/// Poll interval during search — how often to check colonist for state changes.
-const SEARCH_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+/// Poll interval for checking colonist.io state changes.
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Progress update interval (matches server::PROGRESS_INTERVAL).
-const PROGRESS_INTERVAL: u32 = 10;
+/// Sims per search batch — small enough that the loop stays responsive.
+const BATCH_SIZE: u32 = 10;
 
-/// Run MCTS search with interleaved colonist polling.
-///
-/// Every `SEARCH_POLL_INTERVAL`, cancels the active search, polls colonist for
-/// state changes (which may reroot the tree), resets the sim budget, and
-/// resumes searching. This ensures state changes on colonist are detected
-/// during long searches.
-async fn colonist_run_search(
-    socket: &mut WebSocket,
-    session: &mut canopy::server::GameSession<crate::game::state::GameState>,
-    msg: &canopy::server::ClientMsg,
-    poll: &mut ColonistPollState,
-) -> Result<Vec<canopy::server::ServerMsg>, ()> {
-    let sims_total = match session.begin_search(msg) {
-        Err(msgs) => return Ok(msgs),
-        Ok(n) => n,
-    };
-
-    // Track sims across poll-interrupted segments. Each segment measures
-    // root_visits() before/after to count sims done, since poll() may
-    // reroot or reset the tree (changing root_visits discontinuously).
-    let mut total_sims_done = 0u32;
-    let mut segment_baseline = session.root_visits();
-
-    let mut evals = vec![];
-    let mut last_progress = 0u32;
-    let mut last_poll = std::time::Instant::now();
-
-    let result = loop {
-        // Check if it's time to poll colonist.
-        if last_poll.elapsed() >= SEARCH_POLL_INTERVAL {
-            // Count sims completed in the segment that just ended.
-            total_sims_done += session.root_visits().saturating_sub(segment_baseline);
-
-            session.cancel_search();
-            let poll_msgs = poll.poll(session).await;
-            for m in &poll_msgs {
-                canopy::server::send_msg(socket, m).await?;
-            }
-
-            // Start a new segment: capture baseline after any tree changes
-            // from poll (walk_tree, rollback, reset).
-            segment_baseline = session.root_visits();
-            let remaining = sims_total.saturating_sub(total_sims_done);
-            session.set_num_simulations(remaining);
-            last_poll = std::time::Instant::now();
-            // Reset so progress messages fire from the new baseline.
-            last_progress = 0;
-            evals.clear();
-        }
-
-        if let Some(result) = session.search_tick(&mut evals) {
-            break result;
-        }
-
-        // Send progress updates.
-        if let Some((snap, labels)) = session.snapshot_with_labels() {
-            if snap.total_simulations >= last_progress + PROGRESS_INTERVAL {
-                last_progress = snap.total_simulations;
-                canopy::server::send_msg(
-                    socket,
-                    &canopy::server::ServerMsg::SearchProgress {
-                        snapshot: snap,
-                        action_labels: labels,
-                        sims_total,
-                    },
-                )
-                .await?;
-                if let Some(subtree_msg) = session.explore_subtree_msg() {
-                    let _ = canopy::server::send_msg(socket, &subtree_msg).await;
-                }
-            }
-        }
-
-        // Non-blocking: process interactive messages (tree exploration)
-        // that arrive while the search is running.
-        if let Some(Some(Ok(ws_msg))) = socket.recv().now_or_never() {
-            if let Message::Text(text) = ws_msg {
-                if let Ok(client_msg) = serde_json::from_str::<canopy::server::ClientMsg>(&text) {
-                    let responses = match client_msg {
-                        canopy::server::ClientMsg::ExploreSubtree { .. }
-                        | canopy::server::ClientMsg::GetSnapshot => session.handle(client_msg),
-                        _ => vec![],
-                    };
-                    for m in responses {
-                        canopy::server::send_msg(socket, &m).await?;
-                    }
-                }
-            }
-        }
-    };
-
-    Ok(session.finish_search(msg, result))
+/// Send all messages, returning Err on disconnect.
+async fn send_all(socket: &mut WebSocket, msgs: &[canopy::server::ServerMsg]) -> Result<(), ()> {
+    for m in msgs {
+        canopy::server::send_msg(socket, m).await?;
+    }
+    Ok(())
 }
 
-/// Handle a colonist WebSocket connection (sequential, single-threaded).
+/// Handle a colonist WebSocket connection.
+///
+/// Server-driven loop: polls colonist on a timer, runs search in 10-sim
+/// batches while budget remains, and handles client messages between
+/// batches.
+///
+/// Budget model:
+/// - `sims_budget`: remaining sims to run at this position (decremented
+///   after each batch).
+/// - `auto_refill`: when a state change is detected via poll, reset
+///   budget to this value (0 = auto-search disabled).
+/// - `RunSims { count }` adds `count` to the budget.
+/// - `SetAutoSearch { enabled, target }` sets `auto_refill` and adjusts
+///   the budget so that `target` total sims will be reached.
 async fn handle_colonist_socket(
     mut socket: WebSocket,
     session: &mut canopy::server::GameSession<crate::game::state::GameState>,
-    poll: &mut ColonistPollState,
+    poll_state: &mut ColonistPollState,
 ) {
-    // Send initial state.
-    let msg = session.state_msg();
-    if canopy::server::send_msg(&mut socket, &msg).await.is_err() {
+    let mut sims_budget = 0u32;
+    let mut auto_refill = 0u32;
+    let mut last_poll = std::time::Instant::now();
+
+    if canopy::server::send_msg(&mut socket, &session.state_msg())
+        .await
+        .is_err()
+    {
         return;
     }
 
     loop {
-        let ws_msg = match socket.recv().await {
-            Some(Ok(msg)) => msg,
-            _ => break,
+        let want_search = sims_budget > 0 && session.can_search();
+        let poll_due = last_poll.elapsed() >= POLL_INTERVAL;
+
+        // --- Receive client message (non-blocking if busy, blocking if idle) ---
+        let text = if want_search || poll_due {
+            match socket.recv().now_or_never() {
+                Some(Some(Ok(Message::Text(t)))) => Some(t),
+                Some(Some(Ok(Message::Close(_)))) | Some(Some(Err(_))) | Some(None) => break,
+                _ => None,
+            }
+        } else {
+            let remaining = POLL_INTERVAL.saturating_sub(last_poll.elapsed());
+            tokio::select! {
+                result = socket.recv() => match result {
+                    Some(Ok(Message::Text(t))) => Some(t),
+                    Some(Ok(Message::Close(_))) | Some(Err(_)) | None => break,
+                    _ => None,
+                },
+                _ = tokio::time::sleep(remaining) => None,
+            }
         };
-        let text = match ws_msg {
-            Message::Text(t) => t,
-            Message::Close(_) => break,
-            _ => continue,
-        };
-        let client_msg: canopy::server::ClientMsg = match serde_json::from_str(&text) {
-            Ok(m) => m,
-            Err(e) => {
+
+        // --- Handle client message ---
+        if let Some(text) = text {
+            match serde_json::from_str::<canopy::server::ClientMsg>(&text) {
+                Ok(canopy::server::ClientMsg::SetAutoSearch { enabled, target }) => {
+                    if enabled {
+                        auto_refill = target;
+                        // Ensure we reach `target` total sims at this position.
+                        let done = session.root_visits();
+                        sims_budget = target.saturating_sub(done);
+                    } else {
+                        auto_refill = 0;
+                    }
+                    eprintln!(
+                        "ws: SetAutoSearch enabled={enabled} target={target} budget={sims_budget}"
+                    );
+                }
+                Ok(canopy::server::ClientMsg::RunSims { count }) => {
+                    sims_budget += count;
+                    eprintln!("ws: RunSims +{count} budget={sims_budget}");
+                }
+                Ok(canopy::server::ClientMsg::PlayAction { action }) => {
+                    if poll_state.pending_actions.is_empty() {
+                        poll_state.pre_pending_cursor = Some(session.cursor());
+                    }
+                    poll_state.pending_actions.push(action);
+                    session.cancel_search();
+                    let msgs = session.handle(canopy::server::ClientMsg::PlayAction { action });
+                    if send_all(&mut socket, &msgs).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(msg @ canopy::server::ClientMsg::BotMove { .. }) => {
+                    eprintln!("ws: {msg:?}");
+                    session.cancel_search();
+                    match canopy::server::run_search(&mut socket, session, &msg).await {
+                        Ok(msgs) => {
+                            if send_all(&mut socket, &msgs).await.is_err() {
+                                return;
+                            }
+                        }
+                        Err(()) => return,
+                    }
+                }
+                Ok(canopy::server::ClientMsg::PollState) => {
+                    session.cancel_search();
+                    let msgs = poll_state.poll(session).await;
+                    last_poll = std::time::Instant::now();
+                    if send_all(&mut socket, &msgs).await.is_err() {
+                        return;
+                    }
+                }
+                Ok(msg) => {
+                    let msgs = session.handle(msg);
+                    if send_all(&mut socket, &msgs).await.is_err() {
+                        return;
+                    }
+                }
+                Err(e) => {
+                    let _ = canopy::server::send_msg(
+                        &mut socket,
+                        &canopy::server::ServerMsg::Error {
+                            message: format!("Invalid message: {e}"),
+                        },
+                    )
+                    .await;
+                }
+            }
+        }
+
+        // --- Poll colonist if due ---
+        if last_poll.elapsed() >= POLL_INTERVAL {
+            let pre_visits = session.root_visits();
+            session.cancel_search();
+            let msgs = poll_state.poll(session).await;
+            last_poll = std::time::Instant::now();
+            if send_all(&mut socket, &msgs).await.is_err() {
+                return;
+            }
+            // State changed — refill budget for the new position.
+            let post_visits = session.root_visits();
+            if post_visits != pre_visits && auto_refill > 0 {
+                sims_budget = auto_refill;
+                eprintln!("poll: state changed, budget refilled to {auto_refill}");
+            }
+        }
+
+        // --- Run search batch ---
+        if sims_budget > 0 && session.can_search() {
+            let before = session.root_visits();
+            session.set_num_simulations(BATCH_SIZE);
+            let mut evals = vec![];
+            while session.search_tick(&mut evals).is_none() {}
+            let after = session.root_visits();
+            sims_budget = sims_budget.saturating_sub(after - before);
+            if let Some((snap, labels)) = session.snapshot_with_labels() {
                 let _ = canopy::server::send_msg(
                     &mut socket,
-                    &canopy::server::ServerMsg::Error {
-                        message: format!("Invalid message: {e}"),
+                    &canopy::server::ServerMsg::SearchProgress {
+                        snapshot: snap,
+                        action_labels: labels,
+                        sims_total: after + sims_budget,
                     },
                 )
                 .await;
-                continue;
-            }
-        };
-
-        let responses = match &client_msg {
-            canopy::server::ClientMsg::PollState => {
-                eprintln!("ws: PollState");
-                poll.poll(session).await
-            }
-            canopy::server::ClientMsg::BotMove { .. }
-            | canopy::server::ClientMsg::RunSims { .. } => {
-                eprintln!("ws: {:?}", client_msg);
-                match colonist_run_search(&mut socket, session, &client_msg, poll).await {
-                    Ok(msgs) => {
-                        for m in &msgs {
-                            match m {
-                                canopy::server::ServerMsg::Snapshot { snapshot, .. } => {
-                                    eprintln!(
-                                        "ws: → Snapshot ({} sims, {} edges)",
-                                        snapshot.total_simulations,
-                                        snapshot.edges.len()
-                                    );
-                                }
-                                canopy::server::ServerMsg::Error { message } => {
-                                    eprintln!("ws: → Error: {message}");
-                                }
-                                _ => {}
-                            }
-                        }
-                        msgs
-                    }
-                    Err(()) => return,
+                if let Some(subtree_msg) = session.explore_subtree_msg() {
+                    let _ = canopy::server::send_msg(&mut socket, &subtree_msg).await;
                 }
-            }
-            canopy::server::ClientMsg::PlayAction { action } => {
-                if poll.pending_actions.is_empty() {
-                    poll.pre_pending_cursor = Some(session.cursor());
-                }
-                poll.pending_actions.push(*action);
-                session.handle(client_msg)
-            }
-            _ => session.handle(client_msg),
-        };
-
-        for msg in responses {
-            if canopy::server::send_msg(&mut socket, &msg).await.is_err() {
-                return;
             }
         }
     }

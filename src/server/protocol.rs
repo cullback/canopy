@@ -42,6 +42,8 @@ pub enum ClientMsg {
     Redo,
     /// Configure per-player settings.
     SetConfig { player: u8, simulations: u32 },
+    /// Enable/disable continuous background search with a sim target.
+    SetAutoSearch { enabled: bool, target: u32 },
 }
 
 // ── Server → Client ──────────────────────────────────────────────────

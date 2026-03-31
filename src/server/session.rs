@@ -550,6 +550,10 @@ impl<G: Game + 'static> GameSession<G> {
                     }]
                 }
             }
+            ClientMsg::SetAutoSearch { .. } => {
+                // Handled by connection-level loop; respond with current state.
+                vec![self.state_msg()]
+            }
         }
     }
 
@@ -567,6 +571,11 @@ impl<G: Game + 'static> GameSession<G> {
         let mut buf = Vec::new();
         self.search.state().chance_outcomes(&mut buf);
         !buf.is_empty()
+    }
+
+    /// Returns true if the current state can be searched (not terminal, not chance).
+    pub fn can_search(&self) -> bool {
+        !self.is_terminal() && !self.is_chance()
     }
 
     fn current_player_idx(&self) -> usize {
