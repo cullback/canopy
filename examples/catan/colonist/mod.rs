@@ -202,34 +202,41 @@ struct GameData {
     robber_hex: (i32, i32),
 }
 
-/// Connect to Chrome via CDP and extract game data.
-async fn extract_game_data(port: u16) -> Result<GameData, String> {
+/// Connect to Chrome via CDP (or reuse an existing connection).
+async fn cdp_connect(port: u16, existing: &mut Option<WsStream>) -> Result<(), String> {
+    if existing.is_some() {
+        return Ok(());
+    }
     let ws_url = try_discover_tab(port).await?;
-    eprintln!("connected to: {ws_url}");
-
-    let (mut ws, _) = connect_async(&ws_url)
+    eprintln!("CDP connected: {ws_url}");
+    let (ws, _) = connect_async(&ws_url)
         .await
         .map_err(|e| format!("CDP connect: {e}"))?;
+    *existing = Some(ws);
+    Ok(())
+}
 
+/// Extract game data over an existing CDP connection.
+async fn extract_game_data(ws: &mut WsStream) -> Result<GameData, String> {
     // Extract game log
-    let result = try_evaluate(&mut ws, EXTRACT_LOG_JS).await?;
+    let result = try_evaluate(ws, EXTRACT_LOG_JS).await?;
     let json_str = result.as_str().unwrap_or("[]");
     let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
     eprintln!("{} log entries", entries.len());
     let events = log::parse(&entries);
 
     // Extract board state
-    let board_json = try_evaluate(&mut ws, board::EXTRACT_JS).await?;
+    let board_json = try_evaluate(ws, board::EXTRACT_JS).await?;
     let board_str = board_json.as_str().unwrap_or("{}");
     let board = board::parse(board_str).ok_or("failed to parse board data")?;
 
     // Extract buildings
-    let buildings_json = try_evaluate(&mut ws, board::EXTRACT_BUILDINGS_JS).await?;
+    let buildings_json = try_evaluate(ws, board::EXTRACT_BUILDINGS_JS).await?;
     let buildings_str = buildings_json.as_str().unwrap_or("{}");
     let buildings = board::parse_buildings_poll(buildings_str);
 
     // Dev cards
-    let cards_json = try_evaluate(&mut ws, board::EXTRACT_CARDS_JS).await?;
+    let cards_json = try_evaluate(ws, board::EXTRACT_CARDS_JS).await?;
     let cards_str = cards_json.as_str().unwrap_or("{}");
     let dcs = parse_dev_card_state(cards_str);
     if !dcs.cards.is_empty() {
@@ -241,7 +248,7 @@ async fn extract_game_data(port: u16) -> Result<GameData, String> {
     }
 
     // Extract player names, local player identity, current turn, dice, robber.
-    let live_json = try_evaluate(&mut ws, board::EXTRACT_LIVE_JS).await?;
+    let live_json = try_evaluate(ws, board::EXTRACT_LIVE_JS).await?;
     let live_str = live_json.as_str().unwrap_or("{}");
     let live_obj: serde_json::Value = serde_json::from_str(live_str).unwrap_or_default();
     let local_color = live_obj["localColor"]
@@ -275,16 +282,6 @@ async fn extract_game_data(port: u16) -> Result<GameData, String> {
                 .collect()
         })
         .unwrap_or_default();
-    for (color, name) in &player_names {
-        let me = if *color == local_color {
-            " (local)"
-        } else {
-            ""
-        };
-        eprintln!("player: {name} (color {color}){me}");
-    }
-
-    ws.close(None).await.ok();
 
     Ok(GameData {
         board,
@@ -343,10 +340,22 @@ pub fn run(port: u16) {
         .expect("tokio runtime");
 
     let data = rt
-        .block_on(extract_game_data(port))
+        .block_on(async {
+            let mut ws = None;
+            cdp_connect(port, &mut ws).await?;
+            extract_game_data(ws.as_mut().unwrap()).await
+        })
         .expect("failed to extract game data");
     log::print(&data.events);
     board::print(&data.board);
+    for (color, name) in &data.player_names {
+        let tag = if *color == data.local_color {
+            " (local)"
+        } else {
+            ""
+        };
+        eprintln!("player: {name} (color {color}){tag}");
+    }
 }
 
 /// Apply live robber, current turn, and dev card state to a game state.
@@ -370,31 +379,22 @@ fn apply_live_state(
         }
     }
 
-    // During setup, sync_setup_phase sets current_player from building counts.
-    // Only override post-setup (phase has left PlaceSettlement/PlaceRoad).
+    // Log turn/phase changes from live DOM state, but don't mutate
+    // committed_state — these must be driven by event processing through
+    // the game engine so that walk actions (END_TURN, ROLL) are correctly
+    // generated for tree rerooting.
     if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad)
         && let Some(pid) = state::player_of_color(color_map, data.current_turn_color)
     {
         if state.current_player != pid {
-            eprintln!("live: turn changed to {pid:?}");
-            state.current_player = pid;
-            changed = true;
+            eprintln!("live: turn changed to {pid:?} (deferred to events)");
         }
-
-        // Use colonist's diceState.diceThrown to detect pre-roll vs post-roll.
         let want_pre_roll = !data.dice_thrown;
         if state.pre_roll != want_pre_roll {
             eprintln!(
-                "live: dice_thrown={} → pre_roll={want_pre_roll} (was {})",
+                "live: dice_thrown={} → pre_roll={want_pre_roll} (was {}), deferred to events",
                 data.dice_thrown, state.pre_roll
             );
-            state.pre_roll = want_pre_roll;
-            if want_pre_roll {
-                state.phase = Phase::PreRoll;
-            } else if matches!(state.phase, Phase::PreRoll) {
-                state.phase = Phase::Main;
-            }
-            changed = true;
         }
     }
 
@@ -575,6 +575,7 @@ fn match_pending_actions(
 /// Persistent state for polling colonist.io via CDP.
 struct ColonistPollState {
     cdp_port: u16,
+    cdp_ws: Option<WsStream>,
     committed_event_count: usize,
     committed_state: crate::game::state::GameState,
     color_map: Vec<(u8, canopy::player::Player)>,
@@ -586,16 +587,23 @@ struct ColonistPollState {
 }
 
 impl ColonistPollState {
-    /// Poll CDP, sync state, and update the session. Returns response messages.
+    /// Poll CDP, sync state, and update the session.
+    /// Returns (messages, state_changed).
     async fn poll(
         &mut self,
         session: &mut canopy::server::GameSession<crate::game::state::GameState>,
-    ) -> Vec<canopy::server::ServerMsg> {
-        let poll = match extract_game_data(self.cdp_port).await {
+    ) -> (Vec<canopy::server::ServerMsg>, bool) {
+        if let Err(e) = cdp_connect(self.cdp_port, &mut self.cdp_ws).await {
+            eprintln!("poll error: {e}");
+            return (vec![session.state_msg()], false);
+        }
+        let ws = self.cdp_ws.as_mut().unwrap();
+        let poll = match extract_game_data(ws).await {
             Ok(p) => p,
             Err(e) => {
-                eprintln!("poll error: {e}");
-                return vec![session.state_msg()];
+                eprintln!("poll error (reconnecting): {e}");
+                self.cdp_ws = None; // force reconnect next poll
+                return (vec![session.state_msg()], false);
             }
         };
 
@@ -662,6 +670,13 @@ impl ColonistPollState {
                 live_robber,
             );
             self.committed_event_count = total_events;
+
+            eprintln!(
+                "poll: process_new_events → {} entries, {} walk actions: {:?}",
+                new_entries.len(),
+                new_actions.len(),
+                new_actions,
+            );
 
             if !self.pending_actions.is_empty() {
                 match match_pending_actions(
@@ -746,6 +761,7 @@ impl ColonistPollState {
             };
         }
 
+        let has_event_updates = needs_rollback || !entries_to_extend.is_empty();
         apply_live_state(
             &mut self.committed_state,
             &poll,
@@ -755,10 +771,9 @@ impl ColonistPollState {
 
         // --- Sync to session ---
 
-        let has_updates =
-            needs_rollback || !entries_to_extend.is_empty() || self.pending_actions.is_empty();
+        let has_updates = has_event_updates || self.pending_actions.is_empty();
         if !has_updates {
-            return vec![session.state_msg()];
+            return (vec![session.state_msg()], false);
         }
 
         if needs_rollback && let Some(cursor) = self.pre_pending_cursor.take() {
@@ -767,12 +782,22 @@ impl ColonistPollState {
 
         if !actions_to_walk.is_empty() {
             let pre_visits = session.root_visits();
-            session.walk_tree(&actions_to_walk);
+            let walked = session.walk_tree(&actions_to_walk);
             let post_visits = session.root_visits();
-            eprintln!(
-                "poll: walk_tree {:?} — visits {} → {}",
-                actions_to_walk, pre_visits, post_visits
-            );
+            if walked < actions_to_walk.len() {
+                eprintln!(
+                    "poll: walk_tree partial — walked {walked}/{} actions, \
+                     visits {} → {} (tree will reset)",
+                    actions_to_walk.len(),
+                    pre_visits,
+                    post_visits
+                );
+            } else {
+                eprintln!(
+                    "poll: walk_tree {:?} — visits {} → {}",
+                    actions_to_walk, pre_visits, post_visits
+                );
+            }
         }
 
         if !entries_to_extend.is_empty() {
@@ -796,7 +821,7 @@ impl ColonistPollState {
                 action_labels: labels,
             });
         }
-        msgs
+        (msgs, has_event_updates)
     }
 }
 
@@ -912,10 +937,14 @@ async fn handle_colonist_socket(
                 }
                 Ok(canopy::server::ClientMsg::PollState) => {
                     session.cancel_search();
-                    let msgs = poll_state.poll(session).await;
+                    let (msgs, state_changed) = poll_state.poll(session).await;
                     last_poll = std::time::Instant::now();
                     if send_all(&mut socket, &msgs).await.is_err() {
                         return;
+                    }
+                    if state_changed && auto_refill > 0 {
+                        sims_budget = auto_refill;
+                        eprintln!("poll: state changed, budget refilled to {auto_refill}");
                     }
                 }
                 Ok(msg) => {
@@ -938,16 +967,15 @@ async fn handle_colonist_socket(
 
         // --- Poll colonist if due ---
         if last_poll.elapsed() >= POLL_INTERVAL {
-            let pre_visits = session.root_visits();
             session.cancel_search();
-            let msgs = poll_state.poll(session).await;
+            let (msgs, state_changed) = poll_state.poll(session).await;
             last_poll = std::time::Instant::now();
             if send_all(&mut socket, &msgs).await.is_err() {
                 return;
             }
-            // State changed — refill budget for the new position.
-            let post_visits = session.root_visits();
-            if post_visits != pre_visits && auto_refill > 0 {
+            // New events arrived — refill budget so search explores from
+            // the updated position (keeps existing tree work via reroot).
+            if state_changed && auto_refill > 0 {
                 sims_budget = auto_refill;
                 eprintln!("poll: state changed, budget refilled to {auto_refill}");
             }
@@ -960,7 +988,7 @@ async fn handle_colonist_socket(
             let mut evals = vec![];
             while session.search_tick(&mut evals).is_none() {}
             let after = session.root_visits();
-            sims_budget = sims_budget.saturating_sub(after - before);
+            sims_budget = sims_budget.saturating_sub(after.saturating_sub(before));
             if let Some((snap, labels)) = session.snapshot_with_labels() {
                 let _ = canopy::server::send_msg(
                     &mut socket,
@@ -988,11 +1016,23 @@ pub fn run_serve(
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
+    let mut cdp_ws = None;
     let data = rt
-        .block_on(extract_game_data(cdp_port))
+        .block_on(async {
+            cdp_connect(cdp_port, &mut cdp_ws).await?;
+            extract_game_data(cdp_ws.as_mut().unwrap()).await
+        })
         .expect("failed to extract game data");
     log::print(&data.events);
     board::print(&data.board);
+    for (color, name) in &data.player_names {
+        let tag = if *color == data.local_color {
+            " (local)"
+        } else {
+            ""
+        };
+        eprintln!("player: {name} (color {color}){tag}");
+    }
 
     let mapper = board::CoordMapper::detect(&data.board.tiles);
     let mut timeline = state::build_timeline(&data.board, &data.events, &mapper);
@@ -1065,6 +1105,7 @@ pub fn run_serve(
 
     let poll_state = ColonistPollState {
         cdp_port,
+        cdp_ws,
         committed_event_count: initial_event_count,
         committed_state: last_state,
         color_map,

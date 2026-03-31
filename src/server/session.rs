@@ -180,11 +180,11 @@ impl<G: Game + 'static> GameSession<G> {
     /// does NOT mutate `root_state`. The caller must follow up with
     /// `set_final_state` to set the authoritative game state.
     /// Only walks when viewing the live position (cursor at end).
-    pub fn walk_tree(&mut self, actions: &[usize]) {
+    pub fn walk_tree(&mut self, actions: &[usize]) -> usize {
         if self.cursor != self.history.len() {
-            return;
+            return 0;
         }
-        self.search.walk_tree(actions);
+        self.search.walk_tree(actions)
     }
 
     /// Append new timeline entries from live polling.

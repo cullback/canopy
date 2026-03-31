@@ -335,24 +335,30 @@ impl<G: Game> Search<G> {
             None
         };
 
-        // Compute improved policy if gumbel state is available.
-        let improved = self.gumbel.as_ref().map(|gs| {
-            let ctx = RootContext::new(&self.tree, root);
-            let mut logits = Vec::with_capacity(edges.len());
-            for (i, edge) in ctx.edges.iter().enumerate() {
-                let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
-                let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
-                let s = sigma(
-                    q_norm,
-                    ctx.max_visits,
-                    self.config.c_visit,
-                    self.config.c_scale,
-                );
-                logits.push(gs.root_logits[i] + s);
-            }
-            softmax(&mut logits);
-            logits
-        });
+        // Compute improved policy if gumbel state is available and still
+        // matches the current root edges (walk_tree / state changes can
+        // invalidate the stored logits).
+        let improved = self
+            .gumbel
+            .as_ref()
+            .filter(|gs| gs.root_logits.len() == edges.len())
+            .map(|gs| {
+                let ctx = RootContext::new(&self.tree, root);
+                let mut logits = Vec::with_capacity(edges.len());
+                for (i, edge) in ctx.edges.iter().enumerate() {
+                    let cq = completed_q(ctx.tree, edge, ctx.vmix_val);
+                    let q_norm = normalize_q(cq, gs.q_min, gs.q_max, gs.root_sign);
+                    let s = sigma(
+                        q_norm,
+                        ctx.max_visits,
+                        self.config.c_visit,
+                        self.config.c_scale,
+                    );
+                    logits.push(gs.root_logits[i] + s);
+                }
+                softmax(&mut logits);
+                logits
+            });
 
         let edge_snapshots: Vec<EdgeSnapshot> = edges
             .iter()
@@ -431,16 +437,32 @@ impl<G: Game> Search<G> {
     /// `update_state`). At chance nodes, falls back to the most-visited
     /// child if the exact outcome wasn't explored or no action was
     /// recorded for it. Stops early once the pointer becomes `None`.
-    pub fn walk_tree(&mut self, actions: &[usize]) {
+    pub fn walk_tree(&mut self, actions: &[usize]) -> usize {
+        let mut walked = 0;
         for &action in actions {
             let Some(root) = self.root else { break };
-            self.root = self.tree.child_for_action(root, action).or_else(|| {
-                if matches!(*self.tree.kind(root), NodeKind::Chance) {
-                    self.tree.best_chance_child(root)
-                } else {
-                    None
+            match self.tree.child_for_action(root, action) {
+                Some(child) => {
+                    self.root = Some(child);
+                    walked += 1;
                 }
-            });
+                None => {
+                    if matches!(*self.tree.kind(root), NodeKind::Chance) {
+                        self.root = self.tree.best_chance_child(root);
+                        walked += 1;
+                    } else {
+                        let edges = self.tree.edges(root);
+                        let edge_actions: Vec<usize> = edges.iter().map(|e| e.action).collect();
+                        eprintln!(
+                            "walk_tree: no child for action {action} at depth {walked} \
+                             (node has {} edges: {:?})",
+                            edges.len(),
+                            edge_actions,
+                        );
+                        break;
+                    }
+                }
+            }
         }
         // Skip past any trailing chance node (e.g. BUY_DEV_CARD lands on
         // DevCardDraw but no outcome action was recorded).
@@ -450,6 +472,7 @@ impl<G: Game> Search<G> {
             self.root = self.tree.best_chance_child(root);
         }
         self.search_active = false;
+        walked
     }
 
     /// Feed evaluations and advance the search.
