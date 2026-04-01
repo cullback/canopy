@@ -1102,6 +1102,32 @@ fn try_replay(
                     && matches!(state.phase, Phase::MoveRobber)
                 {
                     let mut candidates = all_robber_candidates(&state);
+                    let opp = state.current_player.opponent();
+
+                    // Peek for steal outcome: constrains whether the tile
+                    // has opponent buildings.
+                    let steal_outcome = events[i + 1..].iter().find_map(|e| match e {
+                        GameEvent::Stole { .. } => Some(true),
+                        GameEvent::StoleNothing { .. } => Some(false),
+                        GameEvent::Roll { .. }
+                        | GameEvent::PlayedKnight { .. }
+                        | GameEvent::MoveRobber { .. } => None,
+                        _ => None,
+                    });
+                    let opp_buildings = state.player_buildings(opp);
+                    let opp_has_cards = state.players[opp].hand.total() > 0;
+                    let friendly =
+                        state.players[opp].building_vps < crate::game::FRIENDLY_ROBBER_VP;
+                    candidates.retain(|&tile| {
+                        let tile_mask = state.topology.adj.tile_nodes[tile.0 as usize];
+                        let on_tile = (tile_mask & opp_buildings) != 0;
+                        let can_steal = on_tile && opp_has_cards && !friendly;
+                        match steal_outcome {
+                            Some(true) => can_steal,   // stole → must be stealable
+                            Some(false) => !can_steal, // stole nothing → not stealable
+                            None => true,
+                        }
+                    });
 
                     // Pre-filter: check all non-7 rolls until the next event
                     // that changes the board or robber position.
