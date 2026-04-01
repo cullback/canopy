@@ -24,6 +24,15 @@ use crate::game::topology::Topology;
 use super::board::{self, BoardData, CoordMapper};
 use super::log::GameEvent;
 
+/// Move one hidden dev card to the revealed hand so the engine can play it.
+fn reveal_hidden_card(state: &mut GameState, pid: Player, kind: DevCardKind) {
+    let ps = &mut state.players[pid];
+    if ps.dev_cards[kind] == 0 && ps.hidden_dev_cards > 0 {
+        ps.hidden_dev_cards -= 1;
+        ps.dev_cards[kind] += 1;
+    }
+}
+
 /// A snapshot in the game timeline for undo/redo navigation.
 #[derive(Clone)]
 pub struct TimelineEntry {
@@ -1400,21 +1409,24 @@ fn try_replay(
             }
             GameEvent::PlayedKnight { player } => {
                 ensure_player(&mut state, &mut actions, *player);
-                if player_of_color(ctx.color_map, *player).is_some() {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    reveal_hidden_card(&mut state, pid, DevCardKind::Knight);
                     actions.push(action::PLAY_KNIGHT as usize);
                     state.apply_action(action::PLAY_KNIGHT as usize);
                 }
             }
             GameEvent::PlayedRoadBuilding { player } => {
                 ensure_player(&mut state, &mut actions, *player);
-                if player_of_color(ctx.color_map, *player).is_some() {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    reveal_hidden_card(&mut state, pid, DevCardKind::RoadBuilding);
                     actions.push(action::PLAY_ROAD_BUILDING as usize);
                     state.apply_action(action::PLAY_ROAD_BUILDING as usize);
                 }
             }
             GameEvent::PlayedMonopoly { player } => {
                 ensure_player(&mut state, &mut actions, *player);
-                if player_of_color(ctx.color_map, *player).is_some() {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    reveal_hidden_card(&mut state, pid, DevCardKind::Monopoly);
                     let resource = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::MonopolyResult { resource, .. } => Some(*resource),
                         _ => None,
@@ -1428,7 +1440,8 @@ fn try_replay(
             GameEvent::MonopolyResult { .. } => {}
             GameEvent::PlayedYearOfPlenty { player } => {
                 ensure_player(&mut state, &mut actions, *player);
-                if player_of_color(ctx.color_map, *player).is_some() {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    reveal_hidden_card(&mut state, pid, DevCardKind::YearOfPlenty);
                     let gain = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::YearOfPlentyGain { resources, .. } => Some(*resources),
                         _ => None,
