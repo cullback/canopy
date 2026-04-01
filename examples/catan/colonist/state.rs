@@ -1147,12 +1147,24 @@ fn try_replay(
                         state.apply_action(idx);
                     }
                 }
+                // After steal, engine may set Phase::Roll for pre_roll knight.
+                // We want PreRoll so colonist events drive dice resolution.
                 if matches!(state.phase, Phase::Roll) {
                     state.phase = Phase::PreRoll;
                 }
             }
 
-            GameEvent::StoleNothing { .. } | GameEvent::StoleUnknown { .. } => {}
+            GameEvent::StoleNothing { .. } | GameEvent::StoleUnknown { .. } => {
+                // Engine may have entered StealResolve (it thought opponent
+                // had cards + buildings on the tile). Force out.
+                if matches!(state.phase, Phase::StealResolve) {
+                    state.phase = if state.pre_roll {
+                        Phase::PreRoll
+                    } else {
+                        Phase::Main
+                    };
+                }
+            }
 
             // -- Post-setup builds -----------------------------------------
             GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
@@ -1400,6 +1412,7 @@ fn try_replay(
                     // Decompose multi-resource trades into individual
                     // maritime actions. A combined event like "L L L L B B → G G"
                     // is two trades: 4L→1G + 2B→1G at different ratios.
+                    let hand_before = state.players[state.current_player].hand;
                     let mut remaining = *given;
                     for &recv in &ALL_RESOURCES {
                         for _ in 0..received[recv] {
@@ -1417,6 +1430,19 @@ fn try_replay(
                                 }
                             }
                         }
+                    }
+                    // Verify: hand should have decreased by given and
+                    // increased by received.
+                    let mut expected = hand_before;
+                    expected.sub(*given);
+                    expected.add(*received);
+                    if state.players[state.current_player].hand != expected {
+                        eprintln!(
+                            "  bank trade mismatch[{i}]: player={player} \
+                             ratios={:?} expected={expected:?} actual={:?}",
+                            state.players[state.current_player].trade_ratios,
+                            state.players[state.current_player].hand,
+                        );
                     }
                     let label = format!("{} bank trade", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
@@ -1439,6 +1465,11 @@ fn try_replay(
         i += 1;
     }
 
+    eprintln!(
+        "  final hands: P1={:?} P2={:?}",
+        state.players[Player::One].hand,
+        state.players[Player::Two].hand,
+    );
     Some(timeline)
 }
 
