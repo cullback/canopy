@@ -894,6 +894,17 @@ fn try_replay(
     use crate::game::action::{self, END_TURN, ROLL};
     use crate::game::resource::ALL_RESOURCES;
 
+    // Ensure current_player matches the event's player. Pre-roll actions
+    // (Knight, etc.) from the next player arrive before their Roll event,
+    // so we need to inject END_TURN when we see a different player acting.
+    let ensure_player = |state: &mut GameState, player: u8| {
+        if let Some(pid) = player_of_color(ctx.color_map, player) {
+            if state.current_player != pid && matches!(state.phase, Phase::Main) {
+                state.apply_action(END_TURN as usize);
+            }
+        }
+    };
+
     let mut i = idx;
     while i < events.len() {
         match &events[i] {
@@ -1012,9 +1023,7 @@ fn try_replay(
             // -- Rolls with validation -------------------------------------
             GameEvent::Roll { player, d1, d2 } => {
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    if matches!(state.phase, Phase::Main) {
-                        state.apply_action(END_TURN as usize);
-                    }
+                    ensure_player(&mut state, *player);
                     if matches!(state.phase, Phase::PreRoll) {
                         state.apply_action(ROLL as usize);
                     }
@@ -1397,21 +1406,25 @@ fn try_replay(
 
             // -- Dev cards -------------------------------------------------
             GameEvent::BuyDevCard { player } => {
+                ensure_player(&mut state, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     crate::game::apply_hidden_dev_card_buy(&mut state);
                 }
             }
             GameEvent::PlayedKnight { player } => {
+                ensure_player(&mut state, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     state.apply_action(action::PLAY_KNIGHT as usize);
                 }
             }
             GameEvent::PlayedRoadBuilding { player } => {
+                ensure_player(&mut state, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     state.apply_action(action::PLAY_ROAD_BUILDING as usize);
                 }
             }
             GameEvent::PlayedMonopoly { player } => {
+                ensure_player(&mut state, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     let resource = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::MonopolyResult { resource, .. } => Some(*resource),
@@ -1424,6 +1437,7 @@ fn try_replay(
             }
             GameEvent::MonopolyResult { .. } => {}
             GameEvent::PlayedYearOfPlenty { player } => {
+                ensure_player(&mut state, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     let gain = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::YearOfPlentyGain { resources, .. } => Some(*resources),
