@@ -1559,40 +1559,9 @@ fn try_replay(
             | GameEvent::Unknown { .. } => {}
         }
 
-        // Per-event hand log for debugging resource drift.
-        match &events[i] {
-            GameEvent::Roll { .. }
-            | GameEvent::Stole { .. }
-            | GameEvent::StoleNothing { .. }
-            | GameEvent::Discard { .. }
-            | GameEvent::BankTrade { .. }
-            | GameEvent::BuildRoad { .. }
-            | GameEvent::BuildSettlement { .. }
-            | GameEvent::BuildCity { .. }
-            | GameEvent::BuyDevCard { .. }
-            | GameEvent::PlayedKnight { .. }
-            | GameEvent::PlayedMonopoly { .. }
-            | GameEvent::PlayedYearOfPlenty { .. }
-            | GameEvent::MoveRobber { .. } => {
-                eprintln!(
-                    "  [{i}] {:?} cp={:?} → P1={:?} P2={:?}",
-                    std::mem::discriminant(&events[i]),
-                    state.current_player,
-                    state.players[Player::One].hand.0,
-                    state.players[Player::Two].hand.0,
-                );
-            }
-            _ => {}
-        }
-
         i += 1;
     }
 
-    eprintln!(
-        "  final hands: P1={:?} P2={:?}",
-        state.players[Player::One].hand,
-        state.players[Player::Two].hand,
-    );
     Some(timeline)
 }
 

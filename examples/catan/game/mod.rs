@@ -649,25 +649,14 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
     let opp = state.current_player.opponent();
     let tile_mask = state.topology.adj.tile_nodes[tid.0 as usize];
     let opp_buildings = state.player_buildings(opp);
-    let opp_cards = state.players[opp].hand.total();
-    let opp_bvp = state.players[opp].building_vps;
-    let has_target = (tile_mask & opp_buildings) != 0 && opp_cards > 0;
+    let has_target = (tile_mask & opp_buildings) != 0 && state.players[opp].hand.total() > 0;
 
-    if has_target && opp_bvp >= FRIENDLY_ROBBER_VP {
+    if has_target && state.players[opp].building_vps >= FRIENDLY_ROBBER_VP {
         state.phase = Phase::StealResolve;
+    } else if state.pre_roll {
+        state.phase = Phase::Roll;
     } else {
-        eprintln!(
-            "  robber skip steal: tile={tid:?} cp={:?} opp={opp:?} \
-             tile_mask={tile_mask:#018x} opp_buildings={opp_buildings:#018x} \
-             overlap={:#018x} opp_cards={opp_cards} opp_bvp={opp_bvp}",
-            state.current_player,
-            tile_mask & opp_buildings,
-        );
-        if state.pre_roll {
-            state.phase = Phase::Roll;
-        } else {
-            state.phase = Phase::Main;
-        }
+        state.phase = Phase::Main;
     }
 }
 

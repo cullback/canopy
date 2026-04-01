@@ -340,8 +340,8 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
     let opp = me.opponent();
     let my_buildings = state.player_buildings(me);
     let opp_buildings = state.player_buildings(opp);
-    let friendly_opp = state.public_vps(opp) < super::FRIENDLY_ROBBER_VP;
-    let friendly_me = state.public_vps(me) < super::FRIENDLY_ROBBER_VP;
+    let friendly_opp = state.players[opp].building_vps < super::FRIENDLY_ROBBER_VP;
+    let friendly_me = state.players[me].building_vps < super::FRIENDLY_ROBBER_VP;
 
     for tile in &topo.tiles {
         if tile.id == state.robber {
@@ -1034,7 +1034,7 @@ mod tests {
         }
     }
 
-    /// When opponent < 3 public VP, populate_move_robber excludes tiles with
+    /// When opponent < 3 building VP, populate_move_robber excludes tiles with
     /// opponent buildings.
     #[test]
     fn friendly_robber_restricts_tiles() {
@@ -1042,8 +1042,8 @@ mod tests {
         play_setup(&mut state);
 
         state.current_player = Player::One;
-        // P2 has 2 VP from setup settlements (< 3 = FRIENDLY_ROBBER_VP)
-        assert!(state.public_vps(Player::Two) < crate::game::FRIENDLY_ROBBER_VP);
+        // P2 has 2 building VP from setup settlements (< 3 = FRIENDLY_ROBBER_VP)
+        assert!(state.players[Player::Two].building_vps < crate::game::FRIENDLY_ROBBER_VP);
 
         state.phase = Phase::MoveRobber;
         let mut actions = Vec::new();
@@ -1075,6 +1075,68 @@ mod tests {
             has_opp_tile,
             "above threshold, should include opponent tiles"
         );
+    }
+
+    /// When both players share a tile and one is friendly-protected,
+    /// the current player can't place the robber on their own shared tile.
+    #[test]
+    fn friendly_robber_excludes_shared_tile() {
+        let mut state = make_state();
+        play_setup(&mut state);
+
+        let topo = &state.topology;
+        let p1_buildings = state.player_buildings(Player::One);
+        let p2_buildings = state.player_buildings(Player::Two);
+
+        // Find a P1 tile and place a P2 settlement on it to create a shared tile.
+        let mut shared_tid = None;
+        for tile in &topo.tiles {
+            let tile_mask = topo.adj.tile_nodes[tile.id.0 as usize];
+            if tile_mask & p1_buildings != 0 {
+                // Find a free node on this tile for P2
+                let occupied = state.occupied_nodes();
+                for &nid in &tile.nodes {
+                    let bit = 1u64 << nid.0;
+                    if bit & occupied == 0 {
+                        // Check distance rule: no adjacent occupied node
+                        let adj_nodes = topo.adj.node_adj_nodes[nid.0 as usize];
+                        if adj_nodes & occupied == 0 {
+                            state.boards[Player::Two].settlements |= bit;
+                            state.players[Player::Two].settlements_left -= 1;
+                            state.players[Player::Two].building_vps += 1;
+                            shared_tid = Some(tile.id);
+                            break;
+                        }
+                    }
+                }
+                if shared_tid.is_some() {
+                    break;
+                }
+            }
+        }
+        let shared_tid = shared_tid.expect("should find a shared tile");
+
+        // P1 is current player, both have <= 2 building VP (P2 now has 3 from
+        // the extra settlement, so set P1 to move robber while P2 is protected)
+        // Actually P2 has 3 building VP now, so let's keep P2's building_vps at 2
+        // by not incrementing (undo the +1 above and just place the building).
+        state.players[Player::Two].building_vps = 2;
+
+        state.current_player = Player::One;
+        assert!(state.players[Player::Two].building_vps < crate::game::FRIENDLY_ROBBER_VP);
+
+        state.phase = Phase::MoveRobber;
+        let mut actions = Vec::new();
+        legal_actions(&state, &mut actions);
+
+        // The shared tile must be excluded because P2 is friendly-protected
+        for a in &actions {
+            assert_ne!(
+                a.robber_tile(),
+                shared_tid,
+                "shared tile should be excluded when opponent is friendly-protected"
+            );
+        }
     }
 
     /// Settling on a generic port during setup reduces all trade ratios to 3:1.
