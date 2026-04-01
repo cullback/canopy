@@ -947,13 +947,6 @@ fn try_replay(
                     }
                 }
 
-                eprintln!(
-                    "  settle[{i}]: player={player} sc={} candidates={:?} is_second={}",
-                    state.setup_count,
-                    candidates.iter().map(|n| n.0).collect::<Vec<_>>(),
-                    setup_after == 3 || setup_after == 4,
-                );
-
                 if candidates.len() == 1 {
                     state.apply_action(candidates[0].0 as usize);
                     timeline.push(TimelineEntry {
@@ -964,7 +957,6 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if candidates.is_empty() {
-                    eprintln!("  → no candidates, backtrack");
                     return None;
                 } else {
                     // Branch: try each candidate, recurse with full replay.
@@ -983,7 +975,6 @@ fn try_replay(
                             return Some(result);
                         }
                     }
-                    eprintln!("  → all {} branches failed", candidates.len());
                     return None; // all branches failed
                 }
             }
@@ -1013,11 +1004,7 @@ fn try_replay(
             GameEvent::StartingResources { player, resources } => {
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     if state.players[pid].hand != *resources {
-                        eprintln!(
-                            "  starting mismatch[{i}]: player={player} engine={:?} log={resources:?}",
-                            state.players[pid].hand
-                        );
-                        return None;
+                        return None; // contradiction
                     }
                 }
             }
@@ -1072,12 +1059,7 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
-                                eprintln!(
-                                    "  roll mismatch[{i}]: roll {total} {p}: \
-                                     engine={engine_gain:?} log={:?} robber={:?}",
-                                    log_gains[p as usize], state.robber,
-                                );
-                                return None;
+                                return None; // resource mismatch → backtrack
                             }
                         }
                     }
@@ -1175,47 +1157,70 @@ fn try_replay(
             // -- Post-setup builds -----------------------------------------
             GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
                 let pid = player_of_color(ctx.color_map, *player);
-                let aid = edge
+                let from_coords = edge
                     .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
-                    .and_then(|e| ctx.edge_map.get(&e))
-                    .map(|&eid| action::road_id(eid).0 as usize)
-                    .or_else(|| {
-                        let p = pid?;
-                        let eid = ctx.dom_roads[p].iter().find(|&&eid| {
-                            state.boards[p].road_network.roads & (1u128 << eid.0) == 0
-                        })?;
-                        Some(action::road_id(*eid).0 as usize)
-                    });
-                if let Some(aid) = aid {
+                    .and_then(|e| ctx.edge_map.get(&e).copied());
+
+                let verb = if matches!(&events[i], GameEvent::BuildRoad { .. }) {
+                    "builds"
+                } else {
+                    "places"
+                };
+
+                if let Some(eid) = from_coords {
+                    let aid = action::road_id(eid).0 as usize;
                     crate::game::apply_with_chance(&mut state, aid, None);
-                    let verb = if matches!(&events[i], GameEvent::BuildRoad { .. }) {
-                        "builds"
-                    } else {
-                        "places"
-                    };
                     let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
                         label,
                         state: state.clone(),
                     });
+                } else if let Some(p) = pid {
+                    let candidates: Vec<EdgeId> = ctx.dom_roads[p]
+                        .iter()
+                        .filter(|&&eid| state.boards[p].road_network.roads & (1u128 << eid.0) == 0)
+                        .copied()
+                        .collect();
+                    if candidates.len() == 1 {
+                        let aid = action::road_id(candidates[0]).0 as usize;
+                        crate::game::apply_with_chance(&mut state, aid, None);
+                        let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
+                        timeline.push(TimelineEntry {
+                            label,
+                            state: state.clone(),
+                        });
+                    } else if candidates.is_empty() {
+                        return None;
+                    } else {
+                        for &eid in &candidates {
+                            let mut trial = state.clone();
+                            let aid = action::road_id(eid).0 as usize;
+                            crate::game::apply_with_chance(&mut trial, aid, None);
+                            let mut trial_tl = timeline.clone();
+                            trial_tl.push(TimelineEntry {
+                                label: format!(
+                                    "{} {verb} road",
+                                    player_label(*player, ctx.color_map)
+                                ),
+                                state: trial.clone(),
+                            });
+                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                                return Some(result);
+                            }
+                        }
+                        return None;
+                    }
                 }
             }
 
             GameEvent::BuildSettlement { player, corner } => {
                 let pid = player_of_color(ctx.color_map, *player);
-                let aid = corner
+                let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
-                    .and_then(|c| ctx.corner_map.get(&c))
-                    .map(|&nid| action::settlement_id(nid).0 as usize)
-                    .or_else(|| {
-                        let p = pid?;
-                        let nid = ctx.dom_settlements[p].iter().find(|&&nid| {
-                            state.boards[p].settlements & (1u64 << nid.0) == 0
-                                && state.boards[p].cities & (1u64 << nid.0) == 0
-                        })?;
-                        Some(action::settlement_id(*nid).0 as usize)
-                    });
-                if let Some(aid) = aid {
+                    .and_then(|c| ctx.corner_map.get(&c).copied());
+
+                if let Some(nid) = from_coords {
+                    let aid = action::settlement_id(nid).0 as usize;
                     crate::game::apply_with_chance(&mut state, aid, None);
                     let label =
                         format!("{} builds settlement", player_label(*player, ctx.color_map));
@@ -1223,18 +1228,69 @@ fn try_replay(
                         label,
                         state: state.clone(),
                     });
+                } else if let Some(p) = pid {
+                    // No coordinates — branch on unplaced DOM settlements.
+                    let candidates: Vec<NodeId> = ctx.dom_settlements[p]
+                        .iter()
+                        .filter(|&&nid| {
+                            state.boards[p].settlements & (1u64 << nid.0) == 0
+                                && state.boards[p].cities & (1u64 << nid.0) == 0
+                        })
+                        .copied()
+                        .collect();
+                    if candidates.len() == 1 {
+                        let aid = action::settlement_id(candidates[0]).0 as usize;
+                        crate::game::apply_with_chance(&mut state, aid, None);
+                        let label =
+                            format!("{} builds settlement", player_label(*player, ctx.color_map));
+                        timeline.push(TimelineEntry {
+                            label,
+                            state: state.clone(),
+                        });
+                    } else if candidates.is_empty() {
+                        return None;
+                    } else {
+                        for &nid in &candidates {
+                            let mut trial = state.clone();
+                            let aid = action::settlement_id(nid).0 as usize;
+                            crate::game::apply_with_chance(&mut trial, aid, None);
+                            let mut trial_tl = timeline.clone();
+                            trial_tl.push(TimelineEntry {
+                                label: format!(
+                                    "{} builds settlement",
+                                    player_label(*player, ctx.color_map)
+                                ),
+                                state: trial.clone(),
+                            });
+                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                                return Some(result);
+                            }
+                        }
+                        return None;
+                    }
                 }
             }
 
             GameEvent::BuildCity { player, corner } => {
                 let pid = player_of_color(ctx.color_map, *player);
-                let aid = corner
+                let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
-                    .and_then(|c| ctx.corner_map.get(&c))
-                    .map(|&nid| action::city_id(nid).0 as usize)
-                    .or_else(|| {
-                        let p = pid?;
-                        let nid = ctx.dom.cities.iter().find_map(|&(color, x, y, z)| {
+                    .and_then(|c| ctx.corner_map.get(&c).copied());
+
+                if let Some(nid) = from_coords {
+                    let aid = action::city_id(nid).0 as usize;
+                    crate::game::apply_with_chance(&mut state, aid, None);
+                    let label = format!("{} builds city", player_label(*player, ctx.color_map));
+                    timeline.push(TimelineEntry {
+                        label,
+                        state: state.clone(),
+                    });
+                } else if let Some(p) = pid {
+                    let candidates: Vec<NodeId> = ctx
+                        .dom
+                        .cities
+                        .iter()
+                        .filter_map(|&(color, x, y, z)| {
                             if player_of_color(ctx.color_map, color) != Some(p) {
                                 return None;
                             }
@@ -1245,16 +1301,37 @@ fn try_replay(
                             } else {
                                 None
                             }
-                        })?;
-                        Some(action::city_id(nid).0 as usize)
-                    });
-                if let Some(aid) = aid {
-                    crate::game::apply_with_chance(&mut state, aid, None);
-                    let label = format!("{} builds city", player_label(*player, ctx.color_map));
-                    timeline.push(TimelineEntry {
-                        label,
-                        state: state.clone(),
-                    });
+                        })
+                        .collect();
+                    if candidates.len() == 1 {
+                        let aid = action::city_id(candidates[0]).0 as usize;
+                        crate::game::apply_with_chance(&mut state, aid, None);
+                        let label = format!("{} builds city", player_label(*player, ctx.color_map));
+                        timeline.push(TimelineEntry {
+                            label,
+                            state: state.clone(),
+                        });
+                    } else if candidates.is_empty() {
+                        return None;
+                    } else {
+                        for &nid in &candidates {
+                            let mut trial = state.clone();
+                            let aid = action::city_id(nid).0 as usize;
+                            crate::game::apply_with_chance(&mut trial, aid, None);
+                            let mut trial_tl = timeline.clone();
+                            trial_tl.push(TimelineEntry {
+                                label: format!(
+                                    "{} builds city",
+                                    player_label(*player, ctx.color_map)
+                                ),
+                                state: trial.clone(),
+                            });
+                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                                return Some(result);
+                            }
+                        }
+                        return None;
+                    }
                 }
             }
 
