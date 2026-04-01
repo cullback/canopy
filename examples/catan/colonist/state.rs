@@ -816,25 +816,19 @@ pub(crate) struct ReplayCtx<'a> {
 
 /// Replay new events onto an existing state using engine actions.
 /// Used by the live polling path to process incremental events.
+/// Returns `Some(entries)` on success (state updated), `None` on failure
+/// (state unchanged — caller should retry with more events later).
 pub fn replay_events(
     state: &mut GameState,
     events: &[GameEvent],
     ctx: &ReplayCtx,
-) -> Vec<TimelineEntry> {
+) -> Option<Vec<TimelineEntry>> {
     let timeline = Vec::new();
-    match try_replay(state.clone(), events, 0, ctx, timeline) {
-        Some(entries) => {
-            // Update the state to match the end of the replay.
-            if let Some(last) = entries.last() {
-                *state = last.state.clone();
-            }
-            entries
-        }
-        None => {
-            eprintln!("replay_events: try_replay failed for incremental events");
-            Vec::new()
-        }
+    let entries = try_replay(state.clone(), events, 0, ctx, timeline)?;
+    if let Some(last) = entries.last() {
+        *state = last.state.clone();
     }
+    Some(entries)
 }
 
 impl<'a> ReplayCtx<'a> {

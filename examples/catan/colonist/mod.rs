@@ -676,10 +676,18 @@ impl ColonistPollState {
                     &self.edge_map,
                     &self.mapper,
                 );
-                let entries =
-                    state::replay_events(&mut self.committed_state, new_events, &replay_ctx);
-                self.committed_event_count = total_events;
-                entries
+                match state::replay_events(&mut self.committed_state, new_events, &replay_ctx) {
+                    Some(entries) => {
+                        self.committed_event_count = total_events;
+                        entries
+                    }
+                    None => {
+                        // Don't advance committed_event_count — next poll
+                        // retries with more events, giving robber inference
+                        // validation data from future rolls.
+                        Vec::new()
+                    }
+                }
             };
 
             eprintln!("poll: {} new entries", new_entries.len());
