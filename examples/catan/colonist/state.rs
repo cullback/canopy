@@ -729,6 +729,9 @@ pub(crate) struct ReplayCtx<'a> {
     pub dom: board::BuildingData,
     pub dom_settlements: PerPlayer<Vec<NodeId>>,
     pub dom_roads: PerPlayer<Vec<EdgeId>>,
+    /// Tiles where each player gets stolen from. Precomputed from the full log.
+    /// Used to sort building candidates — nodes adjacent to steal tiles first.
+    pub steal_tiles: PerPlayer<Vec<TileId>>,
 }
 
 /// Replay new events onto an existing state using engine actions.
@@ -792,8 +795,100 @@ impl<'a> ReplayCtx<'a> {
             dom,
             dom_settlements,
             dom_roads,
+            steal_tiles: PerPlayer::default(),
         }
     }
+}
+
+/// Scan the full log to find tiles where each player gets stolen from.
+/// Uses TileBlocked to infer intermediate robber positions and DOM for the last.
+fn precompute_steal_tiles(
+    events: &[GameEvent],
+    color_map: &[(u8, Player)],
+    topology: &Topology,
+    ctx: &ReplayCtx,
+) -> PerPlayer<Vec<TileId>> {
+    let mut result: PerPlayer<Vec<TileId>> = PerPlayer::default();
+
+    // Track current robber tile through the log.
+    // Start on desert (topology default).
+    let desert = (0..topology.tiles.len())
+        .find(|&i| topology.tiles[i].terrain.resource().is_none())
+        .unwrap_or(0);
+    let mut robber = TileId(desert as u8);
+
+    // Find the last MoveRobber index to use DOM position.
+    let last_robber_idx = events
+        .iter()
+        .rposition(|e| matches!(e, GameEvent::MoveRobber { .. }));
+
+    for (i, event) in events.iter().enumerate() {
+        match event {
+            GameEvent::MoveRobber { .. } => {
+                if Some(i) == last_robber_idx {
+                    // Last move: DOM is authoritative.
+                    if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
+                        robber = tile;
+                    }
+                } else {
+                    // Intermediate: infer from TileBlocked after this move.
+                    for e in &events[i + 1..] {
+                        match e {
+                            GameEvent::TileBlocked {
+                                dice_number,
+                                resource: Some(resource),
+                            } => {
+                                // Find tile matching this terrain + number.
+                                for &tid in &topology.dice_to_tiles[*dice_number as usize] {
+                                    let t = &topology.tiles[tid.0 as usize];
+                                    if t.terrain.resource() == Some(*resource) {
+                                        robber = tid;
+                                        break;
+                                    }
+                                }
+                                break;
+                            }
+                            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => break,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            GameEvent::Stole { victim, .. } => {
+                // The victim must have a building adjacent to the current robber tile.
+                if let Some(pid) = player_of_color(color_map, *victim) {
+                    if !result[pid].contains(&robber) {
+                        result[pid].push(robber);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    result
+}
+
+/// Sort building candidates: nodes adjacent to steal-required tiles first.
+fn sort_by_steal_coverage(
+    candidates: &mut [NodeId],
+    player: Player,
+    topology: &Topology,
+    steal_tiles: &PerPlayer<Vec<TileId>>,
+) {
+    let required = &steal_tiles[player];
+    if required.is_empty() {
+        return;
+    }
+    candidates.sort_by_key(|&nid| {
+        let node = &topology.nodes[nid.0 as usize];
+        let covers = node
+            .adjacent_tiles
+            .iter()
+            .filter(|&&tid| required.contains(&tid))
+            .count();
+        std::cmp::Reverse(covers) // more coverage first
+    });
 }
 
 /// Replay the game log through the engine's action system, using search to
@@ -814,7 +909,8 @@ fn replay_search(
     let state = GameState::new(topology, dev_deck, dice);
 
     let dom = board::extract_buildings(board, mapper);
-    let ctx = ReplayCtx::from_buildings(dom, color_map, corner_map, edge_map, mapper);
+    let mut ctx = ReplayCtx::from_buildings(dom, color_map, corner_map, edge_map, mapper);
+    ctx.steal_tiles = precompute_steal_tiles(events, color_map, &state.topology, &ctx);
 
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),
@@ -919,7 +1015,14 @@ fn try_replay(
                 } else if candidates.is_empty() {
                     return None;
                 } else {
-                    // Branch: try each candidate, recurse with full replay.
+                    if let Some(pid) = pid {
+                        sort_by_steal_coverage(
+                            &mut candidates,
+                            pid,
+                            &state.topology,
+                            &ctx.steal_tiles,
+                        );
+                    }
                     for &nid in &candidates {
                         let mut trial = state.clone();
                         trial.apply_action(nid.0 as usize);
@@ -1291,7 +1394,7 @@ fn try_replay(
                     });
                 } else if let Some(p) = pid {
                     // No coordinates — branch on unplaced DOM settlements.
-                    let candidates: Vec<NodeId> = ctx.dom_settlements[p]
+                    let mut candidates: Vec<NodeId> = ctx.dom_settlements[p]
                         .iter()
                         .filter(|&&nid| {
                             state.boards[p].settlements & (1u64 << nid.0) == 0
@@ -1312,6 +1415,14 @@ fn try_replay(
                     } else if candidates.is_empty() {
                         return None;
                     } else {
+                        if let Some(p) = pid {
+                            sort_by_steal_coverage(
+                                &mut candidates,
+                                p,
+                                &state.topology,
+                                &ctx.steal_tiles,
+                            );
+                        }
                         for &nid in &candidates {
                             let mut trial = state.clone();
                             let aid = action::settlement_id(nid).0 as usize;
@@ -1352,7 +1463,7 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if let Some(p) = pid {
-                    let candidates: Vec<NodeId> = ctx
+                    let mut candidates: Vec<NodeId> = ctx
                         .dom
                         .cities
                         .iter()
@@ -1381,6 +1492,14 @@ fn try_replay(
                     } else if candidates.is_empty() {
                         return None;
                     } else {
+                        if let Some(p) = pid {
+                            sort_by_steal_coverage(
+                                &mut candidates,
+                                p,
+                                &state.topology,
+                                &ctx.steal_tiles,
+                            );
+                        }
                         for &nid in &candidates {
                             let mut trial = state.clone();
                             let aid = action::city_id(nid).0 as usize;
