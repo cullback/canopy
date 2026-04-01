@@ -1397,17 +1397,32 @@ fn try_replay(
                 received,
             } => {
                 if player_of_color(ctx.color_map, *player).is_some() {
-                    let give_res = ALL_RESOURCES.iter().find(|&&r| given[r] > 0);
-                    let recv_res = ALL_RESOURCES.iter().find(|&&r| received[r] > 0);
-                    if let (Some(&give), Some(&recv)) = (give_res, recv_res) {
-                        let aid = action::maritime_id(give, recv).0 as usize;
-                        crate::game::apply_with_chance(&mut state, aid, None);
-                        let label = format!("{} bank trade", player_label(*player, ctx.color_map));
-                        timeline.push(TimelineEntry {
-                            label,
-                            state: state.clone(),
-                        });
+                    // Decompose multi-resource trades into individual
+                    // maritime actions. A combined event like "L L L L B B → G G"
+                    // is two trades: 4L→1G + 2B→1G at different ratios.
+                    let mut remaining = *given;
+                    for &recv in &ALL_RESOURCES {
+                        for _ in 0..received[recv] {
+                            for &give in &ALL_RESOURCES {
+                                if give == recv {
+                                    continue;
+                                }
+                                let ratio =
+                                    state.players[state.current_player].trade_ratios[give as usize];
+                                if remaining[give] >= ratio {
+                                    remaining[give] -= ratio;
+                                    let aid = action::maritime_id(give, recv).0 as usize;
+                                    crate::game::apply_with_chance(&mut state, aid, None);
+                                    break;
+                                }
+                            }
+                        }
                     }
+                    let label = format!("{} bank trade", player_label(*player, ctx.color_map));
+                    timeline.push(TimelineEntry {
+                        label,
+                        state: state.clone(),
+                    });
                 }
             }
 

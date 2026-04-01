@@ -337,7 +337,7 @@ fn parse_entry(
         }
 
         // Stole (robber's perspective): from=robber, victim=specificRecipients[0]
-        15 => {
+        15 | 139 => {
             let robber = entry["from"].as_u64()? as u8;
             let victim = entry["specificRecipients"]
                 .as_array()
