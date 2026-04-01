@@ -804,14 +804,86 @@ fn format_resources(r: ResourceArray) -> String {
 // -- Search-based log replay ---------------------------------------------------
 
 /// Shared context for replay, avoiding repeated parameter passing.
-struct ReplayCtx<'a> {
-    color_map: &'a [(u8, Player)],
-    corner_map: &'a HashMap<(i32, i32, u8), NodeId>,
-    edge_map: &'a HashMap<(i32, i32, u8), EdgeId>,
-    mapper: &'a CoordMapper,
-    dom: board::BuildingData,
-    dom_settlements: PerPlayer<Vec<NodeId>>,
-    dom_roads: PerPlayer<Vec<EdgeId>>,
+pub(crate) struct ReplayCtx<'a> {
+    pub color_map: &'a [(u8, Player)],
+    pub corner_map: &'a HashMap<(i32, i32, u8), NodeId>,
+    pub edge_map: &'a HashMap<(i32, i32, u8), EdgeId>,
+    pub mapper: &'a CoordMapper,
+    pub dom: board::BuildingData,
+    pub dom_settlements: PerPlayer<Vec<NodeId>>,
+    pub dom_roads: PerPlayer<Vec<EdgeId>>,
+}
+
+/// Replay new events onto an existing state using engine actions.
+/// Used by the live polling path to process incremental events.
+pub fn replay_events(
+    state: &mut GameState,
+    events: &[GameEvent],
+    ctx: &ReplayCtx,
+) -> Vec<TimelineEntry> {
+    let timeline = Vec::new();
+    match try_replay(state.clone(), events, 0, ctx, timeline) {
+        Some(entries) => {
+            // Update the state to match the end of the replay.
+            if let Some(last) = entries.last() {
+                *state = last.state.clone();
+            }
+            entries
+        }
+        None => {
+            eprintln!("replay_events: try_replay failed for incremental events");
+            Vec::new()
+        }
+    }
+}
+
+impl<'a> ReplayCtx<'a> {
+    pub fn from_buildings(
+        dom: board::BuildingData,
+        color_map: &'a [(u8, Player)],
+        corner_map: &'a HashMap<(i32, i32, u8), NodeId>,
+        edge_map: &'a HashMap<(i32, i32, u8), EdgeId>,
+        mapper: &'a CoordMapper,
+    ) -> Self {
+        let mut dom_settlements: PerPlayer<Vec<NodeId>> = PerPlayer::default();
+        let mut dom_roads: PerPlayer<Vec<EdgeId>> = PerPlayer::default();
+        for &(color, x, y, z) in &dom.settlements {
+            let Some(pid) = player_of_color(color_map, color) else {
+                continue;
+            };
+            let mapped = mapper.map_corner(x, y, z);
+            if let Some(&nid) = corner_map.get(&mapped) {
+                dom_settlements[pid].push(nid);
+            }
+        }
+        for &(color, x, y, z) in &dom.cities {
+            let Some(pid) = player_of_color(color_map, color) else {
+                continue;
+            };
+            let mapped = mapper.map_corner(x, y, z);
+            if let Some(&nid) = corner_map.get(&mapped) {
+                dom_settlements[pid].push(nid);
+            }
+        }
+        for &(color, x, y, z) in &dom.roads {
+            let Some(pid) = player_of_color(color_map, color) else {
+                continue;
+            };
+            let mapped = mapper.map_edge(x, y, z);
+            if let Some(&eid) = edge_map.get(&mapped) {
+                dom_roads[pid].push(eid);
+            }
+        }
+        ReplayCtx {
+            color_map,
+            corner_map,
+            edge_map,
+            mapper,
+            dom,
+            dom_settlements,
+            dom_roads,
+        }
+    }
 }
 
 /// Replay the game log through the engine's action system, using search to
@@ -832,45 +904,7 @@ fn replay_search(
     let state = GameState::new(topology, dev_deck, dice);
 
     let dom = board::extract_buildings(board, mapper);
-    let mut dom_settlements: PerPlayer<Vec<NodeId>> = PerPlayer::default();
-    let mut dom_roads: PerPlayer<Vec<EdgeId>> = PerPlayer::default();
-    for &(color, x, y, z) in &dom.settlements {
-        let Some(pid) = player_of_color(color_map, color) else {
-            continue;
-        };
-        let mapped = mapper.map_corner(x, y, z);
-        if let Some(&nid) = corner_map.get(&mapped) {
-            dom_settlements[pid].push(nid);
-        }
-    }
-    for &(color, x, y, z) in &dom.cities {
-        let Some(pid) = player_of_color(color_map, color) else {
-            continue;
-        };
-        let mapped = mapper.map_corner(x, y, z);
-        if let Some(&nid) = corner_map.get(&mapped) {
-            dom_settlements[pid].push(nid);
-        }
-    }
-    for &(color, x, y, z) in &dom.roads {
-        let Some(pid) = player_of_color(color_map, color) else {
-            continue;
-        };
-        let mapped = mapper.map_edge(x, y, z);
-        if let Some(&eid) = edge_map.get(&mapped) {
-            dom_roads[pid].push(eid);
-        }
-    }
-
-    let ctx = ReplayCtx {
-        color_map,
-        corner_map,
-        edge_map,
-        mapper,
-        dom,
-        dom_settlements,
-        dom_roads,
-    };
+    let ctx = ReplayCtx::from_buildings(dom, color_map, corner_map, edge_map, mapper);
 
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),

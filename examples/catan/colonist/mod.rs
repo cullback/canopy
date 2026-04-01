@@ -18,7 +18,7 @@ use crate::game::dev_card::DevCardKind;
 use crate::game::dice::{BalancedDice, Dice};
 use crate::game::state::Phase;
 use crate::presenter::CatanPresenter;
-use canopy::player::{PerPlayer, Player};
+use canopy::player::Player;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -626,11 +626,8 @@ impl ColonistPollState {
         let mut entries_to_extend = Vec::new();
         let mut actions_to_walk: Vec<usize> = Vec::new();
         let mut needs_rollback = false;
-        let mut detected_ids: PerPlayer<Vec<usize>>;
 
         if was_setup {
-            // Setup: sync_buildings places buildings directly (engine doesn't
-            // handle setup phase transitions from DOM). Keep as-is.
             let sync = state::sync_buildings(
                 &mut self.committed_state,
                 &poll.buildings,
@@ -648,28 +645,6 @@ impl ColonistPollState {
                 state::sync_setup_phase(&mut self.committed_state);
                 actions_to_walk.extend(&sync.walk_actions);
             }
-            // Pass synced building IDs as detected_ids so PlaceRoad events
-            // that cross the setup→post-setup boundary can still resolve
-            // coordinates when the event has None. All go into current
-            // player's bucket since the boundary crossing is always for them.
-            detected_ids = PerPlayer::default();
-            let cp = self.committed_state.current_player;
-            detected_ids[cp] = sync.walk_actions;
-        } else {
-            // Post-setup: read-only detection. process_new_events handles
-            // placement through the engine.
-            detected_ids = state::detect_new_buildings(
-                &self.committed_state,
-                &poll.buildings,
-                &self.color_map,
-                &self.corner_map,
-                &self.edge_map,
-                &self.mapper,
-            );
-            let total = detected_ids[Player::One].len() + detected_ids[Player::Two].len();
-            if total > 0 {
-                eprintln!("poll: detected {total} new buildings from board");
-            }
         }
 
         if total_events > self.committed_event_count {
@@ -680,29 +655,18 @@ impl ColonistPollState {
                 total_events
             );
 
-            let (rx, ry) = poll.robber_hex;
-            let live_robber = self
-                .mapper
-                .tile_index(rx, ry)
-                .map(|i| crate::game::board::TileId(i as u8));
-            let (new_entries, new_actions) = state::process_new_events(
-                &mut self.committed_state,
-                new_events,
+            let replay_ctx = state::ReplayCtx::from_buildings(
+                poll.buildings.clone(),
                 &self.color_map,
                 &self.corner_map,
                 &self.edge_map,
                 &self.mapper,
-                live_robber,
-                &mut detected_ids,
             );
+            let new_entries =
+                state::replay_events(&mut self.committed_state, new_events, &replay_ctx);
             self.committed_event_count = total_events;
 
-            eprintln!(
-                "poll: process_new_events → {} entries, {} walk actions: {:?}",
-                new_entries.len(),
-                new_actions.len(),
-                new_actions,
-            );
+            eprintln!("poll: replay_events → {} entries", new_entries.len(),);
 
             if !self.pending_actions.is_empty() {
                 match match_pending_actions(
@@ -722,21 +686,13 @@ impl ColonistPollState {
                         // matched action IDs from the front of new_actions and
                         // walk the remainder so the tree pointer reaches the
                         // correct depth.
-                        let matched_ids: Vec<usize> = self.pending_actions[..matched].to_vec();
                         self.pending_actions.drain(..matched);
                         if self.pending_actions.is_empty() {
                             self.pre_pending_cursor = None;
                         }
                         entries_to_extend = new_entries.into_iter().skip(matched).collect();
-                        let mut skip = 0;
-                        for &pa in &matched_ids {
-                            if skip < new_actions.len() && new_actions[skip] == pa {
-                                skip += 1;
-                            }
-                        }
-                        if skip < new_actions.len() {
-                            actions_to_walk.extend_from_slice(&new_actions[skip..]);
-                        }
+                        // replay_events doesn't return walk actions;
+                        // the tree will reset via need_reset.
                     }
                     Ok(_) => {
                         // No events matched yet — keep waiting.
@@ -746,12 +702,10 @@ impl ColonistPollState {
                         needs_rollback = true;
                         self.pending_actions.clear();
                         entries_to_extend = new_entries;
-                        actions_to_walk.extend(new_actions);
                     }
                 }
             } else {
                 entries_to_extend = new_entries;
-                actions_to_walk.extend(new_actions);
             }
         }
 
