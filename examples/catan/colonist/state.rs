@@ -1183,6 +1183,11 @@ fn try_replay(
                         actions.push(idx);
                         state.apply_action(idx);
                     }
+                } else {
+                    // Engine didn't enter StealResolve — the current building
+                    // placement has the wrong tile adjacency. Backtrack to
+                    // try a different node that IS adjacent to the robber tile.
+                    return None;
                 }
                 // After steal, engine may set Phase::Roll for pre_roll knight.
                 // We want PreRoll so colonist events drive dice resolution.
