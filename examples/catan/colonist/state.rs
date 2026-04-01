@@ -1225,6 +1225,7 @@ fn try_replay(
 
             // -- Post-setup builds -----------------------------------------
             GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
+                ensure_player(&mut state, *player);
                 let pid = player_of_color(ctx.color_map, *player);
                 let from_coords = edge
                     .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
@@ -1283,6 +1284,7 @@ fn try_replay(
             }
 
             GameEvent::BuildSettlement { player, corner } => {
+                ensure_player(&mut state, *player);
                 let pid = player_of_color(ctx.color_map, *player);
                 let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
@@ -1341,6 +1343,7 @@ fn try_replay(
             }
 
             GameEvent::BuildCity { player, corner } => {
+                ensure_player(&mut state, *player);
                 let pid = player_of_color(ctx.color_map, *player);
                 let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
@@ -1470,6 +1473,7 @@ fn try_replay(
                 given,
                 received,
             } => {
+                ensure_player(&mut state, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     // Decompose multi-resource trades into individual
                     // maritime actions. A combined event like "L L L L B B → G G"
