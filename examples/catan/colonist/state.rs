@@ -730,11 +730,12 @@ pub fn replay_events(
     state: &mut GameState,
     events: &[GameEvent],
     ctx: &ReplayCtx,
-) -> Option<Vec<TimelineEntry>> {
+) -> Option<(Vec<TimelineEntry>, Vec<usize>)> {
     let timeline = Vec::new();
-    let (final_state, entries) = try_replay(state.clone(), events, 0, ctx, timeline)?;
+    let (final_state, entries, walk_actions) =
+        try_replay(state.clone(), events, 0, ctx, timeline, Vec::new())?;
     *state = final_state;
-    Some(entries)
+    Some((entries, walk_actions))
 }
 
 impl<'a> ReplayCtx<'a> {
@@ -811,30 +812,33 @@ fn replay_search(
         state: state.clone(),
     }];
 
-    let (_final_state, entries) = try_replay(state, events, 0, &ctx, timeline)?;
+    let (_final_state, entries, _actions) =
+        try_replay(state, events, 0, &ctx, timeline, Vec::new())?;
     eprintln!("replay_search: {} timeline entries", entries.len());
     Some(entries)
 }
 
 /// Recursive replay: process events from `idx`, branching at ambiguous points.
 /// Returns `None` on contradiction (GotResources mismatch, no valid candidate).
-/// On success returns (final_state, timeline_entries).
+/// On success returns (final_state, timeline_entries, walk_actions).
 fn try_replay(
     mut state: GameState,
     events: &[GameEvent],
     idx: usize,
     ctx: &ReplayCtx,
     mut timeline: Vec<TimelineEntry>,
-) -> Option<(GameState, Vec<TimelineEntry>)> {
+    mut actions: Vec<usize>,
+) -> Option<(GameState, Vec<TimelineEntry>, Vec<usize>)> {
     use crate::game::action::{self, END_TURN, ROLL};
     use crate::game::resource::ALL_RESOURCES;
 
     // Ensure current_player matches the event's player. Pre-roll actions
     // (Knight, etc.) from the next player arrive before their Roll event,
     // so we need to inject END_TURN when we see a different player acting.
-    let ensure_player = |state: &mut GameState, player: u8| {
+    let ensure_player = |state: &mut GameState, actions: &mut Vec<usize>, player: u8| {
         if let Some(pid) = player_of_color(ctx.color_map, player) {
             if state.current_player != pid && matches!(state.phase, Phase::Main) {
+                actions.push(END_TURN as usize);
                 state.apply_action(END_TURN as usize);
             }
         }
@@ -894,6 +898,7 @@ fn try_replay(
                 }
 
                 if candidates.len() == 1 {
+                    actions.push(candidates[0].0 as usize);
                     state.apply_action(candidates[0].0 as usize);
                     timeline.push(TimelineEntry {
                         label: format!(
@@ -917,7 +922,9 @@ fn try_replay(
                             ),
                             state: trial.clone(),
                         });
-                        if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                        if let Some(result) =
+                            try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                        {
                             return Some(result);
                         }
                     }
@@ -939,6 +946,7 @@ fn try_replay(
                             .copied()
                     });
                 if let Some(eid) = eid {
+                    actions.push((54 + eid.0) as usize);
                     state.apply_action((54 + eid.0) as usize);
                     timeline.push(TimelineEntry {
                         label: format!("{} places road", player_label(*player, ctx.color_map)),
@@ -958,8 +966,9 @@ fn try_replay(
             // -- Rolls with validation -------------------------------------
             GameEvent::Roll { player, d1, d2 } => {
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    ensure_player(&mut state, *player);
+                    ensure_player(&mut state, &mut actions, *player);
                     if matches!(state.phase, Phase::PreRoll) {
+                        actions.push(ROLL as usize);
                         state.apply_action(ROLL as usize);
                     }
 
@@ -969,6 +978,7 @@ fn try_replay(
                     ];
 
                     let chance = (*d1 + *d2 - 2) as usize;
+                    actions.push(chance);
                     state.apply_action(chance);
 
                     let mut log_gains: [ResourceArray; 2] = Default::default();
@@ -1034,6 +1044,7 @@ fn try_replay(
                 if player_of_color(ctx.color_map, *player).is_some() {
                     for &res in &ALL_RESOURCES {
                         for _ in 0..resources[res] {
+                            actions.push(action::discard_id(res).0 as usize);
                             state.apply_action(action::discard_id(res).0 as usize);
                         }
                     }
@@ -1053,6 +1064,7 @@ fn try_replay(
                     if is_last_robber_move {
                         if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
                             if tile != state.robber {
+                                actions.push(action::robber_id(tile).0 as usize);
                                 state.apply_action(action::robber_id(tile).0 as usize);
                             } else {
                                 // Same tile (shouldn't happen in standard rules).
@@ -1133,6 +1145,7 @@ fn try_replay(
 
                     if candidates.len() == 1 {
                         let aid = action::robber_id(candidates[0]).0 as usize;
+                        actions.push(aid);
                         state.apply_action(aid);
                     } else if candidates.is_empty() {
                         // No valid tile — an earlier robber placement was wrong.
@@ -1144,7 +1157,9 @@ fn try_replay(
                             let mut trial = state.clone();
                             trial.apply_action(action::robber_id(tile).0 as usize);
                             let trial_tl = timeline.clone();
-                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                            if let Some(result) =
+                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                            {
                                 return Some(result);
                             }
                         }
@@ -1156,6 +1171,7 @@ fn try_replay(
             GameEvent::Stole { resources, .. } => {
                 if matches!(state.phase, Phase::StealResolve) {
                     if let Some(idx) = ALL_RESOURCES.iter().position(|&r| resources[r] > 0) {
+                        actions.push(idx);
                         state.apply_action(idx);
                     }
                 }
@@ -1180,7 +1196,7 @@ fn try_replay(
 
             // -- Post-setup builds -----------------------------------------
             GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 let pid = player_of_color(ctx.color_map, *player);
                 let from_coords = edge
                     .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
@@ -1194,6 +1210,7 @@ fn try_replay(
 
                 if let Some(eid) = from_coords {
                     let aid = action::road_id(eid).0 as usize;
+                    actions.push(aid);
                     crate::game::apply_with_chance(&mut state, aid, None);
                     let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
@@ -1208,6 +1225,7 @@ fn try_replay(
                         .collect();
                     if candidates.len() == 1 {
                         let aid = action::road_id(candidates[0]).0 as usize;
+                        actions.push(aid);
                         crate::game::apply_with_chance(&mut state, aid, None);
                         let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
                         timeline.push(TimelineEntry {
@@ -1229,7 +1247,9 @@ fn try_replay(
                                 ),
                                 state: trial.clone(),
                             });
-                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                            if let Some(result) =
+                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                            {
                                 return Some(result);
                             }
                         }
@@ -1239,7 +1259,7 @@ fn try_replay(
             }
 
             GameEvent::BuildSettlement { player, corner } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 let pid = player_of_color(ctx.color_map, *player);
                 let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
@@ -1247,6 +1267,7 @@ fn try_replay(
 
                 if let Some(nid) = from_coords {
                     let aid = action::settlement_id(nid).0 as usize;
+                    actions.push(aid);
                     crate::game::apply_with_chance(&mut state, aid, None);
                     let label =
                         format!("{} builds settlement", player_label(*player, ctx.color_map));
@@ -1266,6 +1287,7 @@ fn try_replay(
                         .collect();
                     if candidates.len() == 1 {
                         let aid = action::settlement_id(candidates[0]).0 as usize;
+                        actions.push(aid);
                         crate::game::apply_with_chance(&mut state, aid, None);
                         let label =
                             format!("{} builds settlement", player_label(*player, ctx.color_map));
@@ -1288,7 +1310,9 @@ fn try_replay(
                                 ),
                                 state: trial.clone(),
                             });
-                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                            if let Some(result) =
+                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                            {
                                 return Some(result);
                             }
                         }
@@ -1298,7 +1322,7 @@ fn try_replay(
             }
 
             GameEvent::BuildCity { player, corner } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 let pid = player_of_color(ctx.color_map, *player);
                 let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
@@ -1306,6 +1330,7 @@ fn try_replay(
 
                 if let Some(nid) = from_coords {
                     let aid = action::city_id(nid).0 as usize;
+                    actions.push(aid);
                     crate::game::apply_with_chance(&mut state, aid, None);
                     let label = format!("{} builds city", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
@@ -1332,6 +1357,7 @@ fn try_replay(
                         .collect();
                     if candidates.len() == 1 {
                         let aid = action::city_id(candidates[0]).0 as usize;
+                        actions.push(aid);
                         crate::game::apply_with_chance(&mut state, aid, None);
                         let label = format!("{} builds city", player_label(*player, ctx.color_map));
                         timeline.push(TimelineEntry {
@@ -1353,7 +1379,9 @@ fn try_replay(
                                 ),
                                 state: trial.clone(),
                             });
-                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                            if let Some(result) =
+                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                            {
                                 return Some(result);
                             }
                         }
@@ -1364,38 +1392,42 @@ fn try_replay(
 
             // -- Dev cards -------------------------------------------------
             GameEvent::BuyDevCard { player } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
+                    // hidden dev card buy has no single action ID
                     crate::game::apply_hidden_dev_card_buy(&mut state);
                 }
             }
             GameEvent::PlayedKnight { player } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
+                    actions.push(action::PLAY_KNIGHT as usize);
                     state.apply_action(action::PLAY_KNIGHT as usize);
                 }
             }
             GameEvent::PlayedRoadBuilding { player } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
+                    actions.push(action::PLAY_ROAD_BUILDING as usize);
                     state.apply_action(action::PLAY_ROAD_BUILDING as usize);
                 }
             }
             GameEvent::PlayedMonopoly { player } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     let resource = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::MonopolyResult { resource, .. } => Some(*resource),
                         _ => None,
                     });
                     if let Some(res) = resource {
+                        actions.push(action::monopoly_id(res).0 as usize);
                         state.apply_action(action::monopoly_id(res).0 as usize);
                     }
                 }
             }
             GameEvent::MonopolyResult { .. } => {}
             GameEvent::PlayedYearOfPlenty { player } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     let gain = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::YearOfPlentyGain { resources, .. } => Some(*resources),
@@ -1414,6 +1446,7 @@ fn try_replay(
                             }
                         }
                         if let (Some(a), Some(b)) = (r1, r2) {
+                            actions.push(action::yop_id(a, b).0 as usize);
                             state.apply_action(action::yop_id(a, b).0 as usize);
                         }
                     }
@@ -1428,7 +1461,7 @@ fn try_replay(
                 given,
                 received,
             } => {
-                ensure_player(&mut state, *player);
+                ensure_player(&mut state, &mut actions, *player);
                 if player_of_color(ctx.color_map, *player).is_some() {
                     // Decompose multi-resource trades into individual
                     // maritime actions. A combined event like "L L L L B B → G G"
@@ -1446,6 +1479,7 @@ fn try_replay(
                                 if remaining[give] >= ratio {
                                     remaining[give] -= ratio;
                                     let aid = action::maritime_id(give, recv).0 as usize;
+                                    actions.push(aid);
                                     crate::game::apply_with_chance(&mut state, aid, None);
                                     break;
                                 }
@@ -1486,7 +1520,7 @@ fn try_replay(
         i += 1;
     }
 
-    Some((state, timeline))
+    Some((state, timeline, actions))
 }
 
 /// Collect all (roll, per-player gains) pairs until the next MoveRobber or

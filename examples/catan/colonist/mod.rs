@@ -679,9 +679,10 @@ impl ColonistPollState {
                     &self.mapper,
                 );
                 match state::replay_events(&mut self.committed_state, new_events, &replay_ctx) {
-                    Some(entries) => {
+                    Some((entries, new_actions)) => {
                         self.committed_event_count = total_events;
                         committed_new_events = true;
+                        actions_to_walk.extend(new_actions);
                         entries
                     }
                     None => {
