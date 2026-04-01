@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use canopy::game::Game;
-use canopy::player::Player;
+use canopy::player::{PerPlayer, Player};
 
 use crate::game::board::{EdgeId, NodeId, TileId};
 use crate::game::dev_card::{DevCardDeck, DevCardKind};
@@ -54,8 +54,8 @@ pub fn build_timeline(
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);
 
-    if is_full_log(events, &corner_map, &edge_map, mapper) {
-        eprintln!("full log detected — building complete timeline");
+    if is_full_log(events) {
+        eprintln!("full log — building timeline from setup events");
         build_full_timeline(
             board,
             topology,
@@ -397,6 +397,16 @@ fn place_settlement(state: &mut GameState, pid: Player, nid: NodeId) {
     state.boards[pid]
         .road_network
         .add_building(nid, &state.topology.adj, opp_roads);
+
+    // Break opponent's road continuity through this node.
+    let opp_own_buildings = state.boards[opp].settlements | state.boards[opp].cities;
+    let pid_buildings = state.boards[pid].settlements | state.boards[pid].cities;
+    state.boards[opp].road_network.on_opponent_build(
+        nid,
+        &state.topology.adj,
+        opp_own_buildings,
+        pid_buildings,
+    );
 }
 
 /// Place a city on the board.
@@ -411,6 +421,8 @@ fn place_city(state: &mut GameState, pid: Player, nid: NodeId) {
         state.players[pid].building_vps += 1;
     }
     state.players[pid].cities_left = state.players[pid].cities_left.saturating_sub(1);
+    // Upgrading a settlement returns the settlement piece.
+    state.players[pid].settlements_left += 1;
     update_port_access(state, pid, nid);
 
     let opp = pid.opponent();
@@ -448,6 +460,67 @@ pub struct SyncBuildingsResult {
     /// Action IDs corresponding to each newly placed building, in placement order.
     /// Useful for walking the MCTS tree during setup.
     pub walk_actions: Vec<usize>,
+}
+
+/// Detect new buildings from a board snapshot without mutating state.
+///
+/// Compares `buildings` against the current board bitmasks and returns
+/// action IDs for any buildings present in the snapshot but missing from
+/// state. Used post-setup so that all mutations flow through the engine.
+pub fn detect_new_buildings(
+    state: &GameState,
+    buildings: &board::BuildingData,
+    color_map: &[(u8, Player)],
+    corner_map: &std::collections::HashMap<(i32, i32, u8), NodeId>,
+    edge_map: &std::collections::HashMap<(i32, i32, u8), EdgeId>,
+    mapper: &CoordMapper,
+) -> Vec<usize> {
+    use crate::game::action;
+
+    let mut ids = Vec::new();
+
+    for &(color, x, y, z) in &buildings.settlements {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let (mx, my, mz) = mapper.map_corner(x, y, z);
+        let Some(&nid) = corner_map.get(&(mx, my, mz)) else {
+            continue;
+        };
+        if state.boards[pid].settlements & (1u64 << nid.0) == 0
+            && state.boards[pid].cities & (1u64 << nid.0) == 0
+        {
+            ids.push(action::settlement_id(nid).0 as usize);
+        }
+    }
+
+    for &(color, x, y, z) in &buildings.cities {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let (mx, my, mz) = mapper.map_corner(x, y, z);
+        let Some(&nid) = corner_map.get(&(mx, my, mz)) else {
+            continue;
+        };
+        if state.boards[pid].cities & (1u64 << nid.0) == 0 {
+            ids.push(action::city_id(nid).0 as usize);
+        }
+    }
+
+    for &(color, x, y, z) in &buildings.roads {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let (mx, my, mz) = mapper.map_edge(x, y, z);
+        let Some(&eid) = edge_map.get(&(mx, my, mz)) else {
+            continue;
+        };
+        if state.boards[pid].road_network.roads & (1u128 << eid.0) == 0 {
+            ids.push(action::road_id(eid).0 as usize);
+        }
+    }
+
+    ids
 }
 
 /// Sync buildings from a board snapshot onto the game state.
@@ -706,36 +779,16 @@ fn sync_phase_from_log(state: &mut GameState, events: &[GameEvent], color_map: &
 
 // -- Timeline building --------------------------------------------------------
 
-/// Check if the log has enough setup placement events with valid coordinates
-/// to replay the full game from scratch.
-fn is_full_log(
-    events: &[GameEvent],
-    corner_map: &HashMap<(i32, i32, u8), NodeId>,
-    edge_map: &HashMap<(i32, i32, u8), EdgeId>,
-    mapper: &CoordMapper,
-) -> bool {
+/// Check if the log has enough setup placement events to replay the full game.
+/// Coordinates are not required — events without coordinates can be resolved
+/// from the DOM board snapshot.
+fn is_full_log(events: &[GameEvent]) -> bool {
     let mut settlements = 0u32;
     let mut roads = 0u32;
     for event in events {
         match event {
-            GameEvent::PlaceSettlement {
-                corner: Some((x, y, z)),
-                ..
-            } => {
-                let mapped = mapper.map_corner(*x, *y, *z);
-                if corner_map.contains_key(&mapped) {
-                    settlements += 1;
-                }
-            }
-            GameEvent::PlaceRoad {
-                edge: Some((x, y, z)),
-                ..
-            } => {
-                let mapped = mapper.map_edge(*x, *y, *z);
-                if edge_map.contains_key(&mapped) {
-                    roads += 1;
-                }
-            }
+            GameEvent::PlaceSettlement { .. } => settlements += 1,
+            GameEvent::PlaceRoad { .. } => roads += 1,
             _ => {}
         }
     }
@@ -781,18 +834,50 @@ fn build_full_timeline(
         state: state.clone(),
     }];
 
+    // Build per-player lists of DOM buildings for resolving events without
+    // coordinates. Settlements/roads are consumed in event order.
+    let dom = board::extract_buildings(board, mapper);
+    let mut dom_settlements: PerPlayer<Vec<NodeId>> = PerPlayer::default();
+    let mut dom_roads: PerPlayer<Vec<EdgeId>> = PerPlayer::default();
+    for &(color, x, y, z) in &dom.settlements {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let mapped = mapper.map_corner(x, y, z);
+        if let Some(&nid) = corner_map.get(&mapped) {
+            dom_settlements[pid].push(nid);
+        }
+    }
+    for &(color, x, y, z) in &dom.roads {
+        let Some(pid) = player_of_color(color_map, color) else {
+            continue;
+        };
+        let mapped = mapper.map_edge(x, y, z);
+        if let Some(&eid) = edge_map.get(&mapped) {
+            dom_roads[pid].push(eid);
+        }
+    }
+
     // Phase 1: Replay setup through the game action system.
     let mut event_idx = 0;
     while event_idx < events.len()
         && matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad)
     {
         match &events[event_idx] {
-            GameEvent::PlaceSettlement {
-                player,
-                corner: Some((x, y, z)),
-            } => {
-                let mapped = mapper.map_corner(*x, *y, *z);
-                if let Some(&nid) = corner_map.get(&mapped) {
+            GameEvent::PlaceSettlement { player, corner } => {
+                // Resolve node from coordinates, or fall back to DOM buildings.
+                let nid = corner
+                    .map(|(x, y, z)| mapper.map_corner(x, y, z))
+                    .and_then(|c| corner_map.get(&c).copied())
+                    .or_else(|| {
+                        let pid = player_of_color(color_map, *player)?;
+                        let idx = dom_settlements[pid].iter().position(|&nid| {
+                            state.boards[pid].settlements & (1u64 << nid.0) == 0
+                                && state.boards[pid].cities & (1u64 << nid.0) == 0
+                        })?;
+                        Some(dom_settlements[pid].remove(idx))
+                    });
+                if let Some(nid) = nid {
                     state.apply_action(nid.0 as usize);
                     let label = format!("{} places settlement", player_label(*player, color_map));
                     timeline.push(TimelineEntry {
@@ -801,12 +886,18 @@ fn build_full_timeline(
                     });
                 }
             }
-            GameEvent::PlaceRoad {
-                player,
-                edge: Some((x, y, z)),
-            } => {
-                let mapped = mapper.map_edge(*x, *y, *z);
-                if let Some(&eid) = edge_map.get(&mapped) {
+            GameEvent::PlaceRoad { player, edge } => {
+                let eid = edge
+                    .map(|(x, y, z)| mapper.map_edge(x, y, z))
+                    .and_then(|e| edge_map.get(&e).copied())
+                    .or_else(|| {
+                        let pid = player_of_color(color_map, *player)?;
+                        let idx = dom_roads[pid].iter().position(|&eid| {
+                            state.boards[pid].road_network.roads & (1u128 << eid.0) == 0
+                        })?;
+                        Some(dom_roads[pid].remove(idx))
+                    });
+                if let Some(eid) = eid {
                     state.apply_action((54 + eid.0) as usize);
                     let label = format!("{} places road", player_label(*player, color_map));
                     timeline.push(TimelineEntry {
@@ -831,11 +922,9 @@ fn build_full_timeline(
     // Phase 2: Post-setup events routed through the engine action system.
     // State is in PreRoll after setup — the first Roll event transitions
     // through ROLL → resolve, so no manual phase override needed.
-    let robber_tile = {
-        let buildings = board::extract_buildings(board, mapper);
-        buildings.robber_tile_index.map(TileId)
-    };
+    let robber_tile = dom.robber_tile_index.map(TileId);
     let mut _actions = Vec::new();
+    let mut no_synced = Vec::new();
     process_post_setup(
         &mut state,
         &events[event_idx..],
@@ -846,6 +935,7 @@ fn build_full_timeline(
         mapper,
         robber_tile,
         &mut _actions,
+        &mut no_synced,
     );
 
     eprintln!("timeline: {} total entries", timeline.len());
@@ -875,11 +965,12 @@ fn process_post_setup(
     mapper: &CoordMapper,
     robber_tile: Option<TileId>,
     actions: &mut Vec<usize>,
+    detected_ids: &mut Vec<usize>,
 ) {
     use crate::game::action::{
         self, BUY_DEV_CARD, END_TURN, PLAY_KNIGHT, PLAY_ROAD_BUILDING, ROLL,
     };
-    use crate::game::resource::{ALL_RESOURCES, CITY_COST, ROAD_COST, SETTLEMENT_COST};
+    use crate::game::resource::ALL_RESOURCES;
 
     let mut pending_label: Option<String> = None;
     let mut roll_gains: [ResourceArray; 2] = [ResourceArray::default(); 2];
@@ -955,17 +1046,24 @@ fn process_post_setup(
             }
 
             GameEvent::BuildRoad { player, edge } => {
-                if let Some(&eid) = edge
+                let aid = edge
                     .map(|(x, y, z)| mapper.map_edge(x, y, z))
                     .and_then(|e| edge_map.get(&e))
-                {
-                    let aid = action::road_id(eid).0 as usize;
-                    crate::game::apply_with_chance(state, aid, None);
-                    actions.push(aid);
-                } else if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(ROAD_COST);
-                    state.bank.add(ROAD_COST);
-                }
+                    .map(|&eid| action::road_id(eid).0 as usize)
+                    .or_else(|| {
+                        let idx = detected_ids.iter().position(|&a| {
+                            (action::ROAD_START..action::ROAD_END).contains(&(a as u8))
+                        })?;
+                        Some(detected_ids.remove(idx))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BuildRoad: unmapped edge {edge:?} for player {player} \
+                             and no detected road available"
+                        )
+                    });
+                crate::game::apply_with_chance(state, aid, None);
+                actions.push(aid);
                 pending_label = Some(format!("{} builds road", player_label(*player, color_map)));
             }
 
@@ -985,44 +1083,47 @@ fn process_post_setup(
             // (type 5).  Apply as a road action — apply_build_road handles the
             // free cost and phase transition.
             GameEvent::PlaceRoad { player, edge } if state.setup_count >= 4 => {
-                if let Some(&eid) = edge
+                let aid = edge
                     .map(|(x, y, z)| mapper.map_edge(x, y, z))
                     .and_then(|e| edge_map.get(&e))
-                {
-                    let aid = action::road_id(eid).0 as usize;
-                    crate::game::apply_with_chance(state, aid, None);
-                    actions.push(aid);
-                } else if let Phase::RoadBuilding { roads_left } = state.phase {
-                    // No edge coordinates — road already placed by sync_buildings.
-                    // Manually advance the Road Building phase counter.
-                    let remaining = roads_left - 1;
-                    if remaining == 0 || state.current().roads_left == 0 {
-                        state.phase = if state.pre_roll {
-                            Phase::PreRoll
-                        } else {
-                            Phase::Main
-                        };
-                    } else {
-                        state.phase = Phase::RoadBuilding {
-                            roads_left: remaining,
-                        };
-                    }
-                }
+                    .map(|&eid| action::road_id(eid).0 as usize)
+                    .or_else(|| {
+                        // No edge coordinates — find the road from detected buildings.
+                        let idx = detected_ids.iter().position(|&a| {
+                            (action::ROAD_START..action::ROAD_END).contains(&(a as u8))
+                        })?;
+                        Some(detected_ids.remove(idx))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "PlaceRoad: unmapped edge {edge:?} for player {player} \
+                             and no detected road available"
+                        )
+                    });
+                crate::game::apply_with_chance(state, aid, None);
+                actions.push(aid);
                 pending_label = Some(format!("{} places road", player_label(*player, color_map)));
             }
 
             GameEvent::BuildSettlement { player, corner, .. } => {
-                if let Some(&nid) = corner
+                let aid = corner
                     .map(|(x, y, z)| mapper.map_corner(x, y, z))
                     .and_then(|c| corner_map.get(&c))
-                {
-                    let aid = action::settlement_id(nid).0 as usize;
-                    crate::game::apply_with_chance(state, aid, None);
-                    actions.push(aid);
-                } else if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(SETTLEMENT_COST);
-                    state.bank.add(SETTLEMENT_COST);
-                }
+                    .map(|&nid| action::settlement_id(nid).0 as usize)
+                    .or_else(|| {
+                        let idx = detected_ids.iter().position(|&a| {
+                            (action::SETTLEMENT_START..action::SETTLEMENT_END).contains(&(a as u8))
+                        })?;
+                        Some(detected_ids.remove(idx))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BuildSettlement: unmapped corner {corner:?} for player {player} \
+                             and no detected settlement available"
+                        )
+                    });
+                crate::game::apply_with_chance(state, aid, None);
+                actions.push(aid);
                 pending_label = Some(format!(
                     "{} builds settlement",
                     player_label(*player, color_map)
@@ -1030,17 +1131,24 @@ fn process_post_setup(
             }
 
             GameEvent::BuildCity { player, corner, .. } => {
-                if let Some(&nid) = corner
+                let aid = corner
                     .map(|(x, y, z)| mapper.map_corner(x, y, z))
                     .and_then(|c| corner_map.get(&c))
-                {
-                    let aid = action::city_id(nid).0 as usize;
-                    crate::game::apply_with_chance(state, aid, None);
-                    actions.push(aid);
-                } else if let Some(pid) = player_of_color(color_map, *player) {
-                    state.players[pid].hand.sub(CITY_COST);
-                    state.bank.add(CITY_COST);
-                }
+                    .map(|&nid| action::city_id(nid).0 as usize)
+                    .or_else(|| {
+                        let idx = detected_ids.iter().position(|&a| {
+                            (action::CITY_START..action::CITY_END).contains(&(a as u8))
+                        })?;
+                        Some(detected_ids.remove(idx))
+                    })
+                    .unwrap_or_else(|| {
+                        panic!(
+                            "BuildCity: unmapped corner {corner:?} for player {player} \
+                             and no detected city available"
+                        )
+                    });
+                crate::game::apply_with_chance(state, aid, None);
+                actions.push(aid);
                 pending_label = Some(format!("{} builds city", player_label(*player, color_map)));
             }
 
@@ -1304,6 +1412,7 @@ pub fn process_new_events(
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
     mapper: &CoordMapper,
     robber_tile: Option<TileId>,
+    detected_ids: &mut Vec<usize>,
 ) -> (Vec<TimelineEntry>, Vec<usize>) {
     let mut timeline = Vec::new();
     let mut actions = Vec::new();
@@ -1317,6 +1426,7 @@ pub fn process_new_events(
         mapper,
         robber_tile,
         &mut actions,
+        detected_ids,
     );
     (timeline, actions)
 }

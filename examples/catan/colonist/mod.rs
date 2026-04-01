@@ -621,32 +621,54 @@ impl ColonistPollState {
             self.committed_state.phase,
             Phase::PlaceSettlement | Phase::PlaceRoad
         );
-        let sync = state::sync_buildings(
-            &mut self.committed_state,
-            &poll.buildings,
-            &self.color_map,
-            &self.corner_map,
-            &self.edge_map,
-            &self.mapper,
-        );
-        let building_count = sync.settlements + sync.cities + sync.roads;
-        if building_count > 0 {
-            eprintln!(
-                "poll: synced {} settlements, {} cities, {} roads from board",
-                sync.settlements, sync.cities, sync.roads
-            );
-            state::sync_setup_phase(&mut self.committed_state);
-        }
 
         let mut entries_to_extend = Vec::new();
         let mut actions_to_walk: Vec<usize> = Vec::new();
         let mut needs_rollback = false;
+        let mut detected_ids: Vec<usize>;
 
-        // During setup, sync_buildings places buildings directly and returns
-        // the corresponding action IDs. Prepend them so the tree pointer
-        // advances to match the new committed_state.
-        if building_count > 0 && was_setup {
-            actions_to_walk.extend(sync.walk_actions);
+        if was_setup {
+            // Setup: sync_buildings places buildings directly (engine doesn't
+            // handle setup phase transitions from DOM). Keep as-is.
+            let sync = state::sync_buildings(
+                &mut self.committed_state,
+                &poll.buildings,
+                &self.color_map,
+                &self.corner_map,
+                &self.edge_map,
+                &self.mapper,
+            );
+            let building_count = sync.settlements + sync.cities + sync.roads;
+            if building_count > 0 {
+                eprintln!(
+                    "poll: synced {} settlements, {} cities, {} roads from board",
+                    sync.settlements, sync.cities, sync.roads
+                );
+                state::sync_setup_phase(&mut self.committed_state);
+                actions_to_walk.extend(&sync.walk_actions);
+            }
+            // Pass synced building IDs as detected_ids so PlaceRoad events
+            // that cross the setup→post-setup boundary (sync_setup_phase
+            // completes setup before the event is processed) can still
+            // resolve coordinates when the event has None.
+            detected_ids = sync.walk_actions;
+        } else {
+            // Post-setup: read-only detection. process_new_events handles
+            // placement through the engine.
+            detected_ids = state::detect_new_buildings(
+                &self.committed_state,
+                &poll.buildings,
+                &self.color_map,
+                &self.corner_map,
+                &self.edge_map,
+                &self.mapper,
+            );
+            if !detected_ids.is_empty() {
+                eprintln!(
+                    "poll: detected {} new buildings from board",
+                    detected_ids.len()
+                );
+            }
         }
 
         if total_events > self.committed_event_count {
@@ -670,6 +692,7 @@ impl ColonistPollState {
                 &self.edge_map,
                 &self.mapper,
                 live_robber,
+                &mut detected_ids,
             );
             self.committed_event_count = total_events;
 
@@ -731,38 +754,6 @@ impl ColonistPollState {
             }
         }
 
-        // Recompute derived state from board bits.
-        {
-            use canopy::player::Player;
-            for &pid in &[Player::One, Player::Two] {
-                let s = self.committed_state.boards[pid].settlements.count_ones() as u8;
-                let c = self.committed_state.boards[pid].cities.count_ones() as u8;
-                self.committed_state.players[pid].building_vps = s + c * 2;
-            }
-            let len1 = self.committed_state.boards[Player::One]
-                .road_network
-                .longest_road();
-            let len2 = self.committed_state.boards[Player::Two]
-                .road_network
-                .longest_road();
-            self.committed_state.longest_road = match (len1 >= 5, len2 >= 5) {
-                (false, false) => None,
-                (true, false) => Some((Player::One, len1)),
-                (false, true) => Some((Player::Two, len2)),
-                (true, true) => {
-                    if len1 > len2 {
-                        Some((Player::One, len1))
-                    } else if len2 > len1 {
-                        Some((Player::Two, len2))
-                    } else {
-                        self.committed_state
-                            .longest_road
-                            .map(|(pid, _)| (pid, len1))
-                    }
-                }
-            };
-        }
-
         let has_event_updates = needs_rollback || !entries_to_extend.is_empty();
         apply_live_state(
             &mut self.committed_state,
@@ -810,6 +801,7 @@ impl ColonistPollState {
             session.rollback_to_cursor(cursor);
         }
 
+        let mut need_reset = false;
         if !actions_to_walk.is_empty() {
             let pre_visits = session.root_visits();
             let walked = session.walk_tree(&actions_to_walk);
@@ -822,12 +814,17 @@ impl ColonistPollState {
                     pre_visits,
                     post_visits
                 );
+                need_reset = true;
             } else {
                 eprintln!(
                     "poll: walk_tree {:?} — visits {} → {}",
                     actions_to_walk, pre_visits, post_visits
                 );
             }
+        } else if has_event_updates {
+            // State changed (new events processed) but no walk actions were
+            // generated — the tree edges are stale and must be rebuilt.
+            need_reset = true;
         }
 
         if !entries_to_extend.is_empty() {
@@ -839,7 +836,11 @@ impl ColonistPollState {
         }
 
         if self.pending_actions.is_empty() {
-            session.set_final_state(self.committed_state.clone());
+            if need_reset {
+                session.reset_to_state(self.committed_state.clone());
+            } else {
+                session.set_final_state(self.committed_state.clone());
+            }
         }
 
         let mut msgs = vec![session.state_msg()];

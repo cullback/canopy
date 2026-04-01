@@ -266,6 +266,20 @@ impl<G: Game + 'static> GameSession<G> {
         }
     }
 
+    /// Replace the final timeline state and reset the search tree.
+    ///
+    /// Use when the state changed but the tree can't be walked to match
+    /// (e.g. an action wasn't mapped to an engine action, or walk_tree
+    /// failed partway). Discards accumulated search work.
+    pub fn reset_to_state(&mut self, state: G) {
+        if let Some(last) = self.history.last_mut() {
+            last.next_state = Some(state.clone());
+        }
+        if self.cursor == self.history.len() {
+            self.search.reset(state);
+        }
+    }
+
     /// Current cursor position in the history (0..=history.len()).
     pub fn cursor(&self) -> usize {
         self.cursor
