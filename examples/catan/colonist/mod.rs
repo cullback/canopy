@@ -655,18 +655,34 @@ impl ColonistPollState {
                 total_events
             );
 
-            let replay_ctx = state::ReplayCtx::from_buildings(
-                poll.buildings.clone(),
-                &self.color_map,
-                &self.corner_map,
-                &self.edge_map,
-                &self.mapper,
-            );
-            let new_entries =
-                state::replay_events(&mut self.committed_state, new_events, &replay_ctx);
-            self.committed_event_count = total_events;
+            let new_entries = if was_setup {
+                // During setup, sync_buildings + sync_setup_phase handle
+                // placement. Apply StartingResources from the log directly.
+                for event in new_events {
+                    if let log::GameEvent::StartingResources { player, resources } = event {
+                        if let Some(pid) = state::player_of_color(&self.color_map, *player) {
+                            self.committed_state.players[pid].hand = *resources;
+                            self.committed_state.bank.sub(*resources);
+                        }
+                    }
+                }
+                self.committed_event_count = total_events;
+                Vec::new()
+            } else {
+                let replay_ctx = state::ReplayCtx::from_buildings(
+                    poll.buildings.clone(),
+                    &self.color_map,
+                    &self.corner_map,
+                    &self.edge_map,
+                    &self.mapper,
+                );
+                let entries =
+                    state::replay_events(&mut self.committed_state, new_events, &replay_ctx);
+                self.committed_event_count = total_events;
+                entries
+            };
 
-            eprintln!("poll: replay_events → {} entries", new_entries.len(),);
+            eprintln!("poll: {} new entries", new_entries.len());
 
             if !self.pending_actions.is_empty() {
                 match match_pending_actions(
