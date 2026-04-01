@@ -1177,12 +1177,9 @@ fn try_replay(
                         let aid = action::robber_id(candidates[0]).0 as usize;
                         state.apply_action(aid);
                     } else if candidates.is_empty() {
-                        // Can't determine — skip phase manually.
-                        state.phase = if state.pre_roll {
-                            Phase::PreRoll
-                        } else {
-                            Phase::Main
-                        };
+                        // No valid tile — an earlier robber placement was wrong.
+                        // Backtrack to try a different assignment.
+                        return None;
                     } else {
                         // Multiple candidates survive — branch and backtrack.
                         for &tile in &candidates {
@@ -1526,6 +1523,32 @@ fn try_replay(
             | GameEvent::EmbargoSet { .. }
             | GameEvent::EmbargoLifted { .. }
             | GameEvent::Unknown { .. } => {}
+        }
+
+        // Per-event hand log for debugging resource drift.
+        match &events[i] {
+            GameEvent::Roll { .. }
+            | GameEvent::Stole { .. }
+            | GameEvent::StoleNothing { .. }
+            | GameEvent::Discard { .. }
+            | GameEvent::BankTrade { .. }
+            | GameEvent::BuildRoad { .. }
+            | GameEvent::BuildSettlement { .. }
+            | GameEvent::BuildCity { .. }
+            | GameEvent::BuyDevCard { .. }
+            | GameEvent::PlayedKnight { .. }
+            | GameEvent::PlayedMonopoly { .. }
+            | GameEvent::PlayedYearOfPlenty { .. }
+            | GameEvent::MoveRobber { .. } => {
+                eprintln!(
+                    "  [{i}] {:?} cp={:?} → P1={:?} P2={:?}",
+                    std::mem::discriminant(&events[i]),
+                    state.current_player,
+                    state.players[Player::One].hand.0,
+                    state.players[Player::Two].hand.0,
+                );
+            }
+            _ => {}
         }
 
         i += 1;

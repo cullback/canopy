@@ -649,14 +649,25 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
     let opp = state.current_player.opponent();
     let tile_mask = state.topology.adj.tile_nodes[tid.0 as usize];
     let opp_buildings = state.player_buildings(opp);
-    let has_target = (tile_mask & opp_buildings) != 0 && state.players[opp].hand.total() > 0;
+    let opp_cards = state.players[opp].hand.total();
+    let opp_bvp = state.players[opp].building_vps;
+    let has_target = (tile_mask & opp_buildings) != 0 && opp_cards > 0;
 
-    if has_target && state.public_vps(opp) >= FRIENDLY_ROBBER_VP {
+    if has_target && opp_bvp >= FRIENDLY_ROBBER_VP {
         state.phase = Phase::StealResolve;
-    } else if state.pre_roll {
-        state.phase = Phase::Roll;
     } else {
-        state.phase = Phase::Main;
+        eprintln!(
+            "  robber skip steal: tile={tid:?} cp={:?} opp={opp:?} \
+             tile_mask={tile_mask:#018x} opp_buildings={opp_buildings:#018x} \
+             overlap={:#018x} opp_cards={opp_cards} opp_bvp={opp_bvp}",
+            state.current_player,
+            tile_mask & opp_buildings,
+        );
+        if state.pre_roll {
+            state.phase = Phase::Roll;
+        } else {
+            state.phase = Phase::Main;
+        }
     }
 }
 
@@ -1423,7 +1434,7 @@ mod tests {
         if let Some(tid) = target_tile {
             // Empty P2's hand
             state.players[Player::Two].hand = ResourceArray::default();
-            // Give P2 enough public VP to bypass friendly robber
+            // Give P2 enough building VP to bypass friendly robber
             state.players[Player::Two].building_vps = 3;
             state.phase = Phase::MoveRobber;
 
@@ -1440,7 +1451,7 @@ mod tests {
         }
     }
 
-    /// When opponent has <= 2 public VP, robber can't be placed on their tiles
+    /// When opponent has <= 2 building VP, robber can't be placed on their tiles
     /// and steal is skipped.
     #[test]
     fn friendly_robber_blocks_targeting() {
@@ -1449,10 +1460,10 @@ mod tests {
 
         state.current_player = Player::One;
         state.pre_roll = false;
-        // P2 has 2 VP from setup settlements (< FRIENDLY_ROBBER_VP=3)
+        // P2 has 2 building VP from setup settlements (< FRIENDLY_ROBBER_VP=3)
         assert!(
-            state.public_vps(Player::Two) < FRIENDLY_ROBBER_VP,
-            "P2 should have < 3 public VP after setup"
+            state.players[Player::Two].building_vps < FRIENDLY_ROBBER_VP,
+            "P2 should have < 3 building VP after setup"
         );
 
         state.phase = Phase::MoveRobber;
@@ -1497,7 +1508,7 @@ mod tests {
         }
     }
 
-    /// When opponent has >= 3 public VP, normal robber rules apply.
+    /// When opponent has >= 3 building VP, normal robber rules apply.
     #[test]
     fn friendly_robber_allows_targeting_above_threshold() {
         let mut state = make_state_with_seed(42);
@@ -1546,23 +1557,24 @@ mod tests {
         }
     }
 
-    /// Opponent has 2 settlements + 1 VP dev card (3 total but only 2 public).
-    /// Friendly robber still protects them because VP cards don't count as public VP.
+    /// Opponent has 2 settlements + largest army (4 public VP but only 2 building).
+    /// Friendly robber still protects them because only building VP count.
     #[test]
-    fn friendly_robber_ignores_vp_cards() {
+    fn friendly_robber_ignores_largest_army() {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
 
         state.current_player = Player::One;
-        // P2 has 2 VP from settlements + 1 VP dev card, but only 2 public
-        state.players[Player::Two].dev_cards[DevCardKind::VictoryPoint] = 1;
-        assert_eq!(state.public_vps(Player::Two), 2);
+        // P2 has 2 building VP from settlements + largest army (2 more public VP)
+        state.largest_army = Some((Player::Two, 3));
+        assert_eq!(state.public_vps(Player::Two), 4);
+        assert_eq!(state.players[Player::Two].building_vps, 2);
 
         state.phase = Phase::MoveRobber;
         let mut actions = Vec::new();
         action::legal_actions(&state, &mut actions);
 
-        // Should still block opponent tiles since public VP = 2 < 3
+        // Should still block opponent tiles since building VP = 2 < 3
         let opp_buildings = state.player_buildings(Player::Two);
         let topo = &state.topology;
         for a in &actions {
@@ -1571,7 +1583,7 @@ mod tests {
             assert_eq!(
                 tile_mask & opp_buildings,
                 0,
-                "VP dev cards shouldn't count for friendly robber"
+                "largest army shouldn't count for friendly robber"
             );
         }
     }
