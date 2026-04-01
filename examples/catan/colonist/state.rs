@@ -732,6 +732,10 @@ pub(crate) struct ReplayCtx<'a> {
     /// Tiles where each player gets stolen from. Precomputed from the full log.
     /// Used to sort building candidates — nodes adjacent to steal tiles first.
     pub steal_tiles: PerPlayer<Vec<TileId>>,
+    /// Event indices of Stole events where the robber position is known.
+    /// Only these should trigger backtracking; unknown-position steals
+    /// are applied directly since we can't validate adjacency.
+    pub known_steal_indices: Vec<usize>,
 }
 
 /// Replay new events onto an existing state using engine actions.
@@ -796,6 +800,7 @@ impl<'a> ReplayCtx<'a> {
             dom_settlements,
             dom_roads,
             steal_tiles: PerPlayer::default(),
+            known_steal_indices: Vec::new(),
         }
     }
 }
@@ -807,8 +812,9 @@ fn precompute_steal_tiles(
     color_map: &[(u8, Player)],
     topology: &Topology,
     ctx: &ReplayCtx,
-) -> PerPlayer<Vec<TileId>> {
+) -> (PerPlayer<Vec<TileId>>, Vec<usize>) {
     let mut result: PerPlayer<Vec<TileId>> = PerPlayer::default();
+    let mut known_indices: Vec<usize> = Vec::new();
 
     // Track current robber tile through the log.
     // Start on desert (topology default).
@@ -853,20 +859,22 @@ fn precompute_steal_tiles(
                 }
             }
             GameEvent::Stole { victim, .. } => {
-                // Only add constraint when we know the robber position.
                 if let Some(tile) = robber {
+                    // Known robber position → constraint + backtrackable.
                     if let Some(pid) = player_of_color(color_map, *victim) {
                         if !result[pid].contains(&tile) {
                             result[pid].push(tile);
                         }
                     }
+                    known_indices.push(i);
                 }
+                // Unknown position → will be applied directly, no backtrack.
             }
             _ => {}
         }
     }
 
-    result
+    (result, known_indices)
 }
 
 /// Sort building candidates: nodes adjacent to steal-required tiles first.
@@ -910,7 +918,10 @@ fn replay_search(
 
     let dom = board::extract_buildings(board, mapper);
     let mut ctx = ReplayCtx::from_buildings(dom, color_map, corner_map, edge_map, mapper);
-    ctx.steal_tiles = precompute_steal_tiles(events, color_map, &state.topology, &ctx);
+    let (steal_tiles, known_steal_indices) =
+        precompute_steal_tiles(events, color_map, &state.topology, &ctx);
+    ctx.steal_tiles = steal_tiles;
+    ctx.known_steal_indices = known_steal_indices;
 
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),
@@ -941,6 +952,15 @@ fn try_replay(
     let n = CALLS.fetch_add(1, Ordering::Relaxed);
     if n > 0 && n % 10000 == 0 {
         eprintln!("  try_replay: {n} calls, at event {idx}/{}", events.len());
+    }
+    // After many calls, log what's failing at the hot event, then bail.
+    if n == 500000 && idx < events.len() {
+        for ei in 140..=150.min(events.len() - 1) {
+            eprintln!("  event[{ei}]: {:?}", std::mem::discriminant(&events[ei]),);
+        }
+    }
+    if n > 600000 {
+        return None;
     }
 
     // Ensure current_player matches the event's player. Pre-roll actions
@@ -1223,6 +1243,35 @@ fn try_replay(
                         }
                     }
 
+                    // Inverse constraint: if a roll after this MoveRobber
+                    // produces resources from a tile, the robber is NOT on
+                    // that tile. Scan all rolls until next MoveRobber.
+                    for e in &events[i + 1..] {
+                        match e {
+                            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => break,
+                            GameEvent::Roll { d1, d2, .. } => {
+                                let total = d1 + d2;
+                                if total != 7 {
+                                    // Any tile with this number that has buildings
+                                    // and produced resources is NOT the robber tile.
+                                    for &tid in &state.topology.dice_to_tiles[total as usize] {
+                                        let tile = &state.topology.tiles[tid.0 as usize];
+                                        if tile.terrain.resource().is_some() {
+                                            let mask =
+                                                state.topology.adj.tile_nodes[tid.0 as usize];
+                                            let all_buildings = state.player_buildings(Player::One)
+                                                | state.player_buildings(Player::Two);
+                                            if mask & all_buildings != 0 {
+                                                candidates.retain(|&c| c != tid);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            _ => {}
+                        }
+                    }
+
                     // Peek for steal outcome: constrains whether the tile
                     // has opponent buildings.
                     let steal_outcome = events[i + 1..].iter().find_map(|e| match e {
@@ -1286,17 +1335,29 @@ fn try_replay(
                 }
             }
 
-            GameEvent::Stole { resources, .. } => {
+            GameEvent::Stole {
+                player,
+                victim,
+                resources,
+            } => {
                 if matches!(state.phase, Phase::StealResolve) {
                     if let Some(idx) = ALL_RESOURCES.iter().position(|&r| resources[r] > 0) {
                         actions.push(idx);
                         state.apply_action(idx);
                     }
-                } else {
-                    // Engine didn't enter StealResolve — the current building
-                    // placement has the wrong tile adjacency. Backtrack to
-                    // try a different node that IS adjacent to the robber tile.
+                } else if ctx.known_steal_indices.contains(&i) {
+                    // Robber position is known but engine didn't enter
+                    // StealResolve → building placement is wrong. Backtrack.
                     return None;
+                } else {
+                    // Robber position unknown for this steal. Apply directly
+                    // since we can't validate adjacency.
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        state.players[pid].hand.add(*resources);
+                    }
+                    if let Some(vid) = player_of_color(ctx.color_map, *victim) {
+                        state.players[vid].hand.sub(*resources);
+                    }
                 }
                 // After steal, engine may set Phase::Roll for pre_roll knight.
                 // We want PreRoll so colonist events drive dice resolution.
