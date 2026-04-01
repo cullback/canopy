@@ -626,6 +626,7 @@ impl ColonistPollState {
         let mut entries_to_extend = Vec::new();
         let mut actions_to_walk: Vec<usize> = Vec::new();
         let mut needs_rollback = false;
+        let mut committed_new_events = false;
 
         if was_setup {
             let sync = state::sync_buildings(
@@ -667,6 +668,7 @@ impl ColonistPollState {
                     }
                 }
                 self.committed_event_count = total_events;
+                committed_new_events = true;
                 Vec::new()
             } else {
                 let replay_ctx = state::ReplayCtx::from_buildings(
@@ -679,6 +681,7 @@ impl ColonistPollState {
                 match state::replay_events(&mut self.committed_state, new_events, &replay_ctx) {
                     Some(entries) => {
                         self.committed_event_count = total_events;
+                        committed_new_events = true;
                         entries
                     }
                     None => {
@@ -733,7 +736,8 @@ impl ColonistPollState {
             }
         }
 
-        let has_event_updates = needs_rollback || !entries_to_extend.is_empty();
+        let has_event_updates =
+            needs_rollback || !entries_to_extend.is_empty() || committed_new_events;
         apply_live_state(
             &mut self.committed_state,
             &poll,
