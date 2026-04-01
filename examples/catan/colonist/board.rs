@@ -1001,7 +1001,7 @@ pub fn print(board: &BoardData) {
 
     for (&y, tiles) in &rows {
         // Indent based on row for hex layout
-        let indent = ((y + 2) * 3) as usize; // adjust offset so top row is least indented
+        let indent = (y.unsigned_abs() * 3) as usize;
         let pad = " ".repeat(indent);
         let mut terrain_line = pad.clone();
         let mut dice_line = pad;
