@@ -25,6 +25,7 @@ use super::board::{self, BoardData, CoordMapper};
 use super::log::GameEvent;
 
 /// A snapshot in the game timeline for undo/redo navigation.
+#[derive(Clone)]
 pub struct TimelineEntry {
     pub label: String,
     pub state: GameState,
@@ -802,6 +803,17 @@ fn format_resources(r: ResourceArray) -> String {
 
 // -- Search-based log replay ---------------------------------------------------
 
+/// Shared context for replay, avoiding repeated parameter passing.
+struct ReplayCtx<'a> {
+    color_map: &'a [(u8, Player)],
+    corner_map: &'a HashMap<(i32, i32, u8), NodeId>,
+    edge_map: &'a HashMap<(i32, i32, u8), EdgeId>,
+    mapper: &'a CoordMapper,
+    dom: board::BuildingData,
+    dom_settlements: PerPlayer<Vec<NodeId>>,
+    dom_roads: PerPlayer<Vec<EdgeId>>,
+}
+
 /// Replay the game log through the engine's action system, using search to
 /// resolve ambiguous events (placements without coordinates, robber moves).
 ///
@@ -815,19 +827,10 @@ fn replay_search(
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
     mapper: &CoordMapper,
 ) -> Option<Vec<TimelineEntry>> {
-    use crate::game::action::{self, END_TURN, ROLL};
-    use crate::game::resource::ALL_RESOURCES;
-
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
-    let mut state = GameState::new(topology, dev_deck, dice);
+    let state = GameState::new(topology, dev_deck, dice);
 
-    let mut timeline = vec![TimelineEntry {
-        label: "Game start".into(),
-        state: state.clone(),
-    }];
-
-    // Per-player DOM buildings for resolving coordinate-less events.
     let dom = board::extract_buildings(board, mapper);
     let mut dom_settlements: PerPlayer<Vec<NodeId>> = PerPlayer::default();
     let mut dom_roads: PerPlayer<Vec<EdgeId>> = PerPlayer::default();
@@ -840,7 +843,6 @@ fn replay_search(
             dom_settlements[pid].push(nid);
         }
     }
-    // Cities imply a prior settlement at that node.
     for &(color, x, y, z) in &dom.cities {
         let Some(pid) = player_of_color(color_map, color) else {
             continue;
@@ -860,59 +862,171 @@ fn replay_search(
         }
     }
 
-    // -- Batch setup: solve all settlement assignments jointly ---------------
-    // Collect setup events and resolve assignments using StartingResources
-    // and first roll distribution as constraints.
-    let setup_rolls = peek_all_roll_gains(events, color_map);
-    let setup_state = solve_setup(
-        &state,
-        events,
+    let ctx = ReplayCtx {
         color_map,
         corner_map,
         edge_map,
         mapper,
-        &dom_settlements,
-        &dom_roads,
-        &setup_rolls,
-    );
-    let Some((solved_state, setup_end, mut setup_timeline)) = setup_state else {
-        eprintln!("replay_search: could not solve setup");
-        return None;
+        dom,
+        dom_settlements,
+        dom_roads,
     };
-    state = solved_state;
-    timeline.append(&mut setup_timeline);
 
-    let mut i = setup_end;
+    let timeline = vec![TimelineEntry {
+        label: "Game start".into(),
+        state: state.clone(),
+    }];
+
+    let result = try_replay(state, events, 0, &ctx, timeline)?;
+    eprintln!("replay_search: {} timeline entries", result.len(),);
+    Some(result)
+}
+
+/// Recursive replay: process events from `idx`, branching at ambiguous points.
+/// Returns `None` on contradiction (GotResources mismatch, no valid candidate).
+fn try_replay(
+    mut state: GameState,
+    events: &[GameEvent],
+    idx: usize,
+    ctx: &ReplayCtx,
+    mut timeline: Vec<TimelineEntry>,
+) -> Option<Vec<TimelineEntry>> {
+    use crate::game::action::{self, END_TURN, ROLL};
+    use crate::game::resource::ALL_RESOURCES;
+
+    let mut i = idx;
     while i < events.len() {
         match &events[i] {
-            // Setup events already processed by solve_setup.
-            GameEvent::StartingResources { .. } => {}
+            // -- Setup placements (with backtracking) ----------------------
+            GameEvent::PlaceSettlement { player, corner }
+                if matches!(state.phase, Phase::PlaceSettlement) =>
+            {
+                let pid = player_of_color(ctx.color_map, *player);
+                let nid_from_coords = corner
+                    .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
+                    .and_then(|c| ctx.corner_map.get(&c).copied());
 
-            // -- Rolls and turn transitions --------------------------------
+                let mut candidates: Vec<NodeId> = if let Some(nid) = nid_from_coords {
+                    vec![nid]
+                } else if let Some(pid) = pid {
+                    ctx.dom_settlements[pid]
+                        .iter()
+                        .filter(|&&nid| {
+                            state.boards[pid].settlements & (1u64 << nid.0) == 0
+                                && state.boards[pid].cities & (1u64 << nid.0) == 0
+                        })
+                        .copied()
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                // Filter 2nd settlements by StartingResources.
+                let setup_after = state.setup_count + 1;
+                let is_second = setup_after == 3 || setup_after == 4;
+                if is_second {
+                    let starting = events[i + 1..].iter().find_map(|e| match e {
+                        GameEvent::StartingResources {
+                            player: p,
+                            resources,
+                        } if *p == *player => Some(*resources),
+                        _ => None,
+                    });
+                    if let Some(expected) = starting {
+                        candidates.retain(|&nid| {
+                            let node = &state.topology.nodes[nid.0 as usize];
+                            let mut would_give = ResourceArray::default();
+                            for &tid in &node.adjacent_tiles {
+                                let tile = &state.topology.tiles[tid.0 as usize];
+                                if let Some(resource) = tile.terrain.resource() {
+                                    would_give[resource] += 1;
+                                }
+                            }
+                            would_give == expected
+                        });
+                    }
+                }
+
+                if candidates.len() == 1 {
+                    state.apply_action(candidates[0].0 as usize);
+                    timeline.push(TimelineEntry {
+                        label: format!(
+                            "{} places settlement",
+                            player_label(*player, ctx.color_map)
+                        ),
+                        state: state.clone(),
+                    });
+                } else if candidates.is_empty() {
+                    return None;
+                } else {
+                    // Branch: try each candidate, recurse with full replay.
+                    for &nid in &candidates {
+                        let mut trial = state.clone();
+                        trial.apply_action(nid.0 as usize);
+                        let mut trial_tl = timeline.clone();
+                        trial_tl.push(TimelineEntry {
+                            label: format!(
+                                "{} places settlement",
+                                player_label(*player, ctx.color_map)
+                            ),
+                            state: trial.clone(),
+                        });
+                        if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                            return Some(result);
+                        }
+                    }
+                    return None; // all branches failed
+                }
+            }
+
+            GameEvent::PlaceRoad { player, edge } if matches!(state.phase, Phase::PlaceRoad) => {
+                let eid = edge
+                    .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
+                    .and_then(|e| ctx.edge_map.get(&e).copied())
+                    .or_else(|| {
+                        let pid = player_of_color(ctx.color_map, *player)?;
+                        ctx.dom_roads[pid]
+                            .iter()
+                            .find(|&&eid| {
+                                state.boards[pid].road_network.roads & (1u128 << eid.0) == 0
+                            })
+                            .copied()
+                    });
+                if let Some(eid) = eid {
+                    state.apply_action((54 + eid.0) as usize);
+                    timeline.push(TimelineEntry {
+                        label: format!("{} places road", player_label(*player, ctx.color_map)),
+                        state: state.clone(),
+                    });
+                }
+            }
+
+            GameEvent::StartingResources { player, resources } => {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    if state.players[pid].hand != *resources {
+                        return None; // contradiction
+                    }
+                }
+            }
+
+            // -- Rolls with validation -------------------------------------
             GameEvent::Roll { player, d1, d2 } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    // Inject END_TURN if needed.
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     if matches!(state.phase, Phase::Main) {
                         state.apply_action(END_TURN as usize);
                     }
-                    // Inject ROLL action.
                     if matches!(state.phase, Phase::PreRoll) {
                         state.apply_action(ROLL as usize);
                     }
 
-                    // Snapshot hands before the roll for validation.
                     let hands_before: [ResourceArray; 2] = [
                         state.players[Player::One].hand,
                         state.players[Player::Two].hand,
                     ];
 
-                    // Apply dice outcome — engine distributes resources or
-                    // triggers 7-handling.
                     let chance = (*d1 + *d2 - 2) as usize;
                     state.apply_action(chance);
 
-                    // Collect GotResources from log and validate against
-                    // the engine's distribution.
                     let mut log_gains: [ResourceArray; 2] = Default::default();
                     for e in &events[i + 1..] {
                         match e {
@@ -920,7 +1034,7 @@ fn replay_search(
                                 player: p,
                                 resources,
                             } => {
-                                if let Some(pid) = player_of_color(color_map, *p) {
+                                if let Some(pid) = player_of_color(ctx.color_map, *p) {
                                     log_gains[pid as usize].add(*resources);
                                 }
                             }
@@ -939,28 +1053,20 @@ fn replay_search(
                         }
                     }
 
-                    // Compare engine distribution vs log.
                     let total = d1 + d2;
                     if total != 7 {
                         for &p in &[Player::One, Player::Two] {
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
-                                eprintln!(
-                                    "replay_search: resource mismatch on roll {total} \
-                                     for {p}: engine={engine_gain:?} log={:?} \
-                                     (robber on tile {:?})",
-                                    log_gains[p as usize],
-                                    state.robber,
-                                );
+                                return None; // resource mismatch → backtrack
                             }
                         }
                     }
 
-                    let _ = pid; // turn switching handled by END_TURN
-
+                    let _ = pid;
                     let mut label =
-                        format!("{} rolls {total}", player_label(*player, color_map));
+                        format!("{} rolls {total}", player_label(*player, ctx.color_map));
                     let p1 = format_resources(log_gains[0]);
                     let p2 = format_resources(log_gains[1]);
                     if !p1.is_empty() {
@@ -979,14 +1085,12 @@ fn replay_search(
             GameEvent::GotResources { .. } | GameEvent::TileBlocked { .. } => {}
             GameEvent::RolledSeven => {}
 
-            // -- Discard on 7 ----------------------------------------------
+            // -- Discard ---------------------------------------------------
             GameEvent::Discard { player, resources } => {
-                if let Some(_pid) = player_of_color(color_map, *player) {
-                    // Decompose into individual discard actions.
+                if player_of_color(ctx.color_map, *player).is_some() {
                     for &res in &ALL_RESOURCES {
                         for _ in 0..resources[res] {
-                            let aid = action::discard_id(res).0 as usize;
-                            state.apply_action(aid);
+                            state.apply_action(action::discard_id(res).0 as usize);
                         }
                     }
                 }
@@ -994,42 +1098,38 @@ fn replay_search(
 
             // -- Robber flow -----------------------------------------------
             GameEvent::MoveRobber { player } => {
-                if let Some(_pid) = player_of_color(color_map, *player) {
-                    if matches!(state.phase, Phase::MoveRobber) {
-                        let candidates = all_robber_candidates(&state);
-                        let mut placed = false;
-
-                        for &tile in &candidates {
-                            if validate_robber_tile(
-                                &state,
-                                tile,
-                                &events[i + 1..],
-                                color_map,
-                                corner_map,
-                                edge_map,
-                                mapper,
-                                &dom_settlements,
-                                &dom_roads,
-                            ) {
-                                let aid = action::robber_id(tile).0 as usize;
-                                state.apply_action(aid);
-                                placed = true;
-                                break;
-                            }
+                if player_of_color(ctx.color_map, *player).is_some()
+                    && matches!(state.phase, Phase::MoveRobber)
+                {
+                    let candidates = all_robber_candidates(&state);
+                    let mut placed = false;
+                    for &tile in &candidates {
+                        if validate_robber_tile(
+                            &state,
+                            tile,
+                            &events[i + 1..],
+                            ctx.color_map,
+                            ctx.corner_map,
+                            ctx.edge_map,
+                            ctx.mapper,
+                            &ctx.dom_settlements,
+                            &ctx.dom_roads,
+                        ) {
+                            state.apply_action(action::robber_id(tile).0 as usize);
+                            placed = true;
+                            break;
                         }
-                        if !placed {
-                            // No validation possible — use DOM robber.
-                            if let Some(tile) = dom.robber_tile_index.map(TileId) {
-                                if tile != state.robber {
-                                    let aid = action::robber_id(tile).0 as usize;
-                                    state.apply_action(aid);
+                    }
+                    if !placed {
+                        if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
+                            if tile != state.robber {
+                                state.apply_action(action::robber_id(tile).0 as usize);
+                            } else {
+                                state.phase = if state.pre_roll {
+                                    Phase::PreRoll
                                 } else {
-                                    state.phase = if state.pre_roll {
-                                        Phase::PreRoll
-                                    } else {
-                                        Phase::Main
-                                    };
-                                }
+                                    Phase::Main
+                                };
                             }
                         }
                     }
@@ -1042,8 +1142,6 @@ fn replay_search(
                         state.apply_action(idx);
                     }
                 }
-                // After steal, engine may set Phase::Roll for pre_roll knight.
-                // We want PreRoll so colonist events drive dice resolution.
                 if matches!(state.phase, Phase::Roll) {
                     state.phase = Phase::PreRoll;
                 }
@@ -1053,14 +1151,14 @@ fn replay_search(
 
             // -- Post-setup builds -----------------------------------------
             GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
-                let pid = player_of_color(color_map, *player);
+                let pid = player_of_color(ctx.color_map, *player);
                 let aid = edge
-                    .map(|(x, y, z)| mapper.map_edge(x, y, z))
-                    .and_then(|e| edge_map.get(&e))
+                    .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
+                    .and_then(|e| ctx.edge_map.get(&e))
                     .map(|&eid| action::road_id(eid).0 as usize)
                     .or_else(|| {
                         let p = pid?;
-                        let eid = dom_roads[p].iter().find(|&&eid| {
+                        let eid = ctx.dom_roads[p].iter().find(|&&eid| {
                             state.boards[p].road_network.roads & (1u128 << eid.0) == 0
                         })?;
                         Some(action::road_id(*eid).0 as usize)
@@ -1072,7 +1170,7 @@ fn replay_search(
                     } else {
                         "places"
                     };
-                    let label = format!("{} {verb} road", player_label(*player, color_map));
+                    let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
                         label,
                         state: state.clone(),
@@ -1081,14 +1179,14 @@ fn replay_search(
             }
 
             GameEvent::BuildSettlement { player, corner } => {
-                let pid = player_of_color(color_map, *player);
+                let pid = player_of_color(ctx.color_map, *player);
                 let aid = corner
-                    .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                    .and_then(|c| corner_map.get(&c))
+                    .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
+                    .and_then(|c| ctx.corner_map.get(&c))
                     .map(|&nid| action::settlement_id(nid).0 as usize)
                     .or_else(|| {
                         let p = pid?;
-                        let nid = dom_settlements[p].iter().find(|&&nid| {
+                        let nid = ctx.dom_settlements[p].iter().find(|&&nid| {
                             state.boards[p].settlements & (1u64 << nid.0) == 0
                                 && state.boards[p].cities & (1u64 << nid.0) == 0
                         })?;
@@ -1096,7 +1194,8 @@ fn replay_search(
                     });
                 if let Some(aid) = aid {
                     crate::game::apply_with_chance(&mut state, aid, None);
-                    let label = format!("{} builds settlement", player_label(*player, color_map));
+                    let label =
+                        format!("{} builds settlement", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
                         label,
                         state: state.clone(),
@@ -1105,20 +1204,19 @@ fn replay_search(
             }
 
             GameEvent::BuildCity { player, corner } => {
-                let pid = player_of_color(color_map, *player);
+                let pid = player_of_color(ctx.color_map, *player);
                 let aid = corner
-                    .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                    .and_then(|c| corner_map.get(&c))
+                    .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
+                    .and_then(|c| ctx.corner_map.get(&c))
                     .map(|&nid| action::city_id(nid).0 as usize)
                     .or_else(|| {
                         let p = pid?;
-                        // City upgrades an existing settlement.
-                        let nid = dom.cities.iter().find_map(|&(color, x, y, z)| {
-                            if player_of_color(color_map, color) != Some(p) {
+                        let nid = ctx.dom.cities.iter().find_map(|&(color, x, y, z)| {
+                            if player_of_color(ctx.color_map, color) != Some(p) {
                                 return None;
                             }
-                            let mapped = mapper.map_corner(x, y, z);
-                            let &nid = corner_map.get(&mapped)?;
+                            let mapped = ctx.mapper.map_corner(x, y, z);
+                            let &nid = ctx.corner_map.get(&mapped)?;
                             if state.boards[p].cities & (1u64 << nid.0) == 0 {
                                 Some(nid)
                             } else {
@@ -1129,7 +1227,7 @@ fn replay_search(
                     });
                 if let Some(aid) = aid {
                     crate::game::apply_with_chance(&mut state, aid, None);
-                    let label = format!("{} builds city", player_label(*player, color_map));
+                    let label = format!("{} builds city", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
                         label,
                         state: state.clone(),
@@ -1139,46 +1237,39 @@ fn replay_search(
 
             // -- Dev cards -------------------------------------------------
             GameEvent::BuyDevCard { player } => {
-                if player_of_color(color_map, *player).is_some() {
+                if player_of_color(ctx.color_map, *player).is_some() {
                     crate::game::apply_hidden_dev_card_buy(&mut state);
                 }
             }
-
             GameEvent::PlayedKnight { player } => {
-                if player_of_color(color_map, *player).is_some() {
+                if player_of_color(ctx.color_map, *player).is_some() {
                     state.apply_action(action::PLAY_KNIGHT as usize);
                 }
             }
-
             GameEvent::PlayedRoadBuilding { player } => {
-                if player_of_color(color_map, *player).is_some() {
+                if player_of_color(ctx.color_map, *player).is_some() {
                     state.apply_action(action::PLAY_ROAD_BUILDING as usize);
                 }
             }
-
             GameEvent::PlayedMonopoly { player } => {
-                // Look ahead for MonopolyResult to get the resource.
-                if player_of_color(color_map, *player).is_some() {
+                if player_of_color(ctx.color_map, *player).is_some() {
                     let resource = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::MonopolyResult { resource, .. } => Some(*resource),
                         _ => None,
                     });
                     if let Some(res) = resource {
-                        let aid = action::monopoly_id(res).0 as usize;
-                        state.apply_action(aid);
+                        state.apply_action(action::monopoly_id(res).0 as usize);
                     }
                 }
             }
-            GameEvent::MonopolyResult { .. } => {} // consumed by PlayedMonopoly
-
+            GameEvent::MonopolyResult { .. } => {}
             GameEvent::PlayedYearOfPlenty { player } => {
-                if player_of_color(color_map, *player).is_some() {
+                if player_of_color(ctx.color_map, *player).is_some() {
                     let gain = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::YearOfPlentyGain { resources, .. } => Some(*resources),
                         _ => None,
                     });
                     if let Some(resources) = gain {
-                        // Find the two resources from the gain array.
                         let mut r1 = None;
                         let mut r2 = None;
                         for &res in &ALL_RESOURCES {
@@ -1191,15 +1282,13 @@ fn replay_search(
                             }
                         }
                         if let (Some(a), Some(b)) = (r1, r2) {
-                            let aid = action::yop_id(a, b).0 as usize;
-                            state.apply_action(aid);
+                            state.apply_action(action::yop_id(a, b).0 as usize);
                         }
                     }
                 }
             }
-            GameEvent::YearOfPlentyGain { .. } => {} // consumed by PlayedYearOfPlenty
-
-            GameEvent::PlayedDevCard { .. } => {} // generic fallback, handled above
+            GameEvent::YearOfPlentyGain { .. } => {}
+            GameEvent::PlayedDevCard { .. } => {}
 
             // -- Trades ----------------------------------------------------
             GameEvent::BankTrade {
@@ -1207,14 +1296,13 @@ fn replay_search(
                 given,
                 received,
             } => {
-                if player_of_color(color_map, *player).is_some() {
-                    // Extract the single give and receive resources.
+                if player_of_color(ctx.color_map, *player).is_some() {
                     let give_res = ALL_RESOURCES.iter().find(|&&r| given[r] > 0);
                     let recv_res = ALL_RESOURCES.iter().find(|&&r| received[r] > 0);
                     if let (Some(&give), Some(&recv)) = (give_res, recv_res) {
                         let aid = action::maritime_id(give, recv).0 as usize;
                         crate::game::apply_with_chance(&mut state, aid, None);
-                        let label = format!("{} bank trade", player_label(*player, color_map));
+                        let label = format!("{} bank trade", player_label(*player, ctx.color_map));
                         timeline.push(TimelineEntry {
                             label,
                             state: state.clone(),
@@ -1223,10 +1311,8 @@ fn replay_search(
                 }
             }
 
-            GameEvent::PlayerTrade { .. } => {}
-
-            // -- Informational / no-op events ------------------------------
-            GameEvent::PlaceSettlement { .. } // only during setup (handled above)
+            GameEvent::PlayerTrade { .. }
+            | GameEvent::PlaceSettlement { .. }
             | GameEvent::LongestRoad { .. }
             | GameEvent::LongestRoadChanged { .. }
             | GameEvent::TradeOffer { .. }
@@ -1238,209 +1324,12 @@ fn replay_search(
         i += 1;
     }
 
-    eprintln!(
-        "replay_search: {} timeline entries, phase={:?}, setup_count={}",
-        timeline.len(),
-        state.phase,
-        state.setup_count
-    );
     Some(timeline)
-}
-
-/// Solve setup placement assignments by trying all valid permutations.
-///
-/// Returns (state_after_setup, event_index_after_setup, timeline_entries).
-fn solve_setup(
-    initial: &GameState,
-    events: &[GameEvent],
-    color_map: &[(u8, Player)],
-    corner_map: &HashMap<(i32, i32, u8), NodeId>,
-    edge_map: &HashMap<(i32, i32, u8), EdgeId>,
-    mapper: &CoordMapper,
-    dom_settlements: &PerPlayer<Vec<NodeId>>,
-    dom_roads: &PerPlayer<Vec<EdgeId>>,
-    validation_rolls: &[(u8, [ResourceArray; 2])],
-) -> Option<(GameState, usize, Vec<TimelineEntry>)> {
-    // Replay setup events, branching on ambiguous placements.
-    fn recurse(
-        state: &mut GameState,
-        events: &[GameEvent],
-        idx: usize,
-        color_map: &[(u8, Player)],
-        corner_map: &HashMap<(i32, i32, u8), NodeId>,
-        edge_map: &HashMap<(i32, i32, u8), EdgeId>,
-        mapper: &CoordMapper,
-        dom_settlements: &PerPlayer<Vec<NodeId>>,
-        dom_roads: &PerPlayer<Vec<EdgeId>>,
-        timeline: &mut Vec<TimelineEntry>,
-        validation_rolls: &[(u8, [ResourceArray; 2])],
-    ) -> Option<usize> {
-        let mut i = idx;
-        while i < events.len() {
-            if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad) {
-                // Setup complete — validate against all pre-MoveRobber rolls.
-                for (roll, gains) in validation_rolls {
-                    if !validate_distribution(state, *roll, gains) {
-                        return None;
-                    }
-                }
-                return Some(i);
-            }
-            match &events[i] {
-                GameEvent::PlaceSettlement { player, corner } => {
-                    let pid = player_of_color(color_map, *player);
-                    let nid_from_coords = corner
-                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                        .and_then(|c| corner_map.get(&c).copied());
-
-                    let candidates: Vec<NodeId> = if let Some(nid) = nid_from_coords {
-                        vec![nid]
-                    } else if let Some(pid) = pid {
-                        dom_settlements[pid]
-                            .iter()
-                            .filter(|&&nid| {
-                                state.boards[pid].settlements & (1u64 << nid.0) == 0
-                                    && state.boards[pid].cities & (1u64 << nid.0) == 0
-                            })
-                            .copied()
-                            .collect()
-                    } else {
-                        vec![]
-                    };
-
-                    // Filter by StartingResources for 2nd settlements.
-                    let setup_after = state.setup_count + 1;
-                    let is_second = setup_after == 3 || setup_after == 4;
-                    let starting = if is_second {
-                        events[i + 1..].iter().find_map(|e| match e {
-                            GameEvent::StartingResources {
-                                player: p,
-                                resources,
-                            } if *p == *player => Some(*resources),
-                            _ => None,
-                        })
-                    } else {
-                        None
-                    };
-
-                    let filtered: Vec<NodeId> = candidates
-                        .iter()
-                        .filter(|&&nid| {
-                            if let Some(expected) = starting {
-                                let node = &state.topology.nodes[nid.0 as usize];
-                                let mut would_give = ResourceArray::default();
-                                for &tid in &node.adjacent_tiles {
-                                    let tile = &state.topology.tiles[tid.0 as usize];
-                                    if let Some(resource) = tile.terrain.resource() {
-                                        would_give[resource] += 1;
-                                    }
-                                }
-                                would_give == expected
-                            } else {
-                                true
-                            }
-                        })
-                        .copied()
-                        .collect();
-
-                    eprintln!(
-                        "  setup[{}]: player={} setup_count={} candidates={:?} \
-                         filtered={:?} is_second={is_second}",
-                        i,
-                        player,
-                        state.setup_count,
-                        candidates.iter().map(|n| n.0).collect::<Vec<_>>(),
-                        filtered.iter().map(|n| n.0).collect::<Vec<_>>(),
-                    );
-
-                    // Try each candidate, backtrack on failure.
-                    for &nid in &filtered {
-                        let mut trial = state.clone();
-                        trial.apply_action(nid.0 as usize);
-                        let entry = TimelineEntry {
-                            label: format!(
-                                "{} places settlement",
-                                player_label(*player, color_map)
-                            ),
-                            state: trial.clone(),
-                        };
-                        let mut trial_timeline = vec![entry];
-                        if let Some(end) = recurse(
-                            &mut trial,
-                            events,
-                            i + 1,
-                            color_map,
-                            corner_map,
-                            edge_map,
-                            mapper,
-                            dom_settlements,
-                            dom_roads,
-                            &mut trial_timeline,
-                            validation_rolls,
-                        ) {
-                            *state = trial;
-                            timeline.append(&mut trial_timeline);
-                            return Some(end);
-                        }
-                    }
-                    return None; // all candidates failed
-                }
-                GameEvent::PlaceRoad { player, edge } => {
-                    let eid = edge
-                        .map(|(x, y, z)| mapper.map_edge(x, y, z))
-                        .and_then(|e| edge_map.get(&e).copied())
-                        .or_else(|| {
-                            let pid = player_of_color(color_map, *player)?;
-                            dom_roads[pid]
-                                .iter()
-                                .find(|&&eid| {
-                                    state.boards[pid].road_network.roads & (1u128 << eid.0) == 0
-                                })
-                                .copied()
-                        });
-                    if let Some(eid) = eid {
-                        state.apply_action((54 + eid.0) as usize);
-                        timeline.push(TimelineEntry {
-                            label: format!("{} places road", player_label(*player, color_map)),
-                            state: state.clone(),
-                        });
-                    }
-                }
-                _ => {} // skip non-placement events during setup
-            }
-            i += 1;
-        }
-        // Ran out of events during setup.
-        Some(i)
-    }
-
-    let mut state = initial.clone();
-    let mut timeline = Vec::new();
-    let end = recurse(
-        &mut state,
-        events,
-        0,
-        color_map,
-        corner_map,
-        edge_map,
-        mapper,
-        dom_settlements,
-        dom_roads,
-        &mut timeline,
-        validation_rolls,
-    )?;
-
-    eprintln!(
-        "setup solved: {} entries, phase={:?}, setup_count={}",
-        timeline.len(),
-        state.phase,
-        state.setup_count
-    );
-    Some((state, end, timeline))
 }
 
 /// Collect all (roll, per-player gains) pairs until the next MoveRobber or
 /// PlayedKnight. Used to validate robber placement against multiple rolls.
+#[cfg(test)]
 fn peek_all_roll_gains(
     events: &[GameEvent],
     color_map: &[(u8, Player)],
