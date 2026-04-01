@@ -1104,6 +1104,28 @@ fn try_replay(
                     let mut candidates = all_robber_candidates(&state);
                     let opp = state.current_player.opponent();
 
+                    // Filter by TileBlocked: if a subsequent roll shows
+                    // "resource (N) blocked by robber", the robber must be
+                    // on a tile with that terrain and dice number.
+                    for e in &events[i + 1..] {
+                        match e {
+                            GameEvent::TileBlocked {
+                                dice_number,
+                                resource: Some(resource),
+                            } => {
+                                candidates.retain(|&tile| {
+                                    let t = &state.topology.tiles[tile.0 as usize];
+                                    t.terrain.resource() == Some(*resource)
+                                        && state.topology.dice_to_tiles[*dice_number as usize]
+                                            .contains(&tile)
+                                });
+                                break;
+                            }
+                            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => break,
+                            _ => {}
+                        }
+                    }
+
                     // Peek for steal outcome: constrains whether the tile
                     // has opponent buildings.
                     let steal_outcome = events[i + 1..].iter().find_map(|e| match e {
