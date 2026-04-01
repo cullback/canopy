@@ -947,6 +947,13 @@ fn try_replay(
                     }
                 }
 
+                eprintln!(
+                    "  settle[{i}]: player={player} sc={} candidates={:?} is_second={}",
+                    state.setup_count,
+                    candidates.iter().map(|n| n.0).collect::<Vec<_>>(),
+                    setup_after == 3 || setup_after == 4,
+                );
+
                 if candidates.len() == 1 {
                     state.apply_action(candidates[0].0 as usize);
                     timeline.push(TimelineEntry {
@@ -957,6 +964,7 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if candidates.is_empty() {
+                    eprintln!("  → no candidates, backtrack");
                     return None;
                 } else {
                     // Branch: try each candidate, recurse with full replay.
@@ -975,6 +983,7 @@ fn try_replay(
                             return Some(result);
                         }
                     }
+                    eprintln!("  → all {} branches failed", candidates.len());
                     return None; // all branches failed
                 }
             }
@@ -1004,7 +1013,11 @@ fn try_replay(
             GameEvent::StartingResources { player, resources } => {
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     if state.players[pid].hand != *resources {
-                        return None; // contradiction
+                        eprintln!(
+                            "  starting mismatch[{i}]: player={player} engine={:?} log={resources:?}",
+                            state.players[pid].hand
+                        );
+                        return None;
                     }
                 }
             }
@@ -1059,7 +1072,12 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
-                                return None; // resource mismatch → backtrack
+                                eprintln!(
+                                    "  roll mismatch[{i}]: roll {total} {p}: \
+                                     engine={engine_gain:?} log={:?} robber={:?}",
+                                    log_gains[p as usize], state.robber,
+                                );
+                                return None;
                             }
                         }
                     }
@@ -1096,42 +1114,47 @@ fn try_replay(
                 }
             }
 
-            // -- Robber flow -----------------------------------------------
+            // -- Robber flow (with backtracking) ---------------------------
             GameEvent::MoveRobber { player } => {
                 if player_of_color(ctx.color_map, *player).is_some()
                     && matches!(state.phase, Phase::MoveRobber)
                 {
-                    let candidates = all_robber_candidates(&state);
-                    let mut placed = false;
-                    for &tile in &candidates {
-                        if validate_robber_tile(
-                            &state,
-                            tile,
-                            &events[i + 1..],
-                            ctx.color_map,
-                            ctx.corner_map,
-                            ctx.edge_map,
-                            ctx.mapper,
-                            &ctx.dom_settlements,
-                            &ctx.dom_roads,
-                        ) {
-                            state.apply_action(action::robber_id(tile).0 as usize);
-                            placed = true;
-                            break;
-                        }
+                    let mut candidates = all_robber_candidates(&state);
+
+                    // Pre-filter: check all non-7 rolls until the next event
+                    // that changes the board or robber position.
+                    let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
+                    if !check_rolls.is_empty() {
+                        candidates.retain(|&tile| {
+                            let mut trial = state.clone();
+                            trial.robber = tile;
+                            check_rolls
+                                .iter()
+                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
+                        });
                     }
-                    if !placed {
-                        if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
-                            if tile != state.robber {
-                                state.apply_action(action::robber_id(tile).0 as usize);
-                            } else {
-                                state.phase = if state.pre_roll {
-                                    Phase::PreRoll
-                                } else {
-                                    Phase::Main
-                                };
+
+                    if candidates.len() == 1 {
+                        let aid = action::robber_id(candidates[0]).0 as usize;
+                        state.apply_action(aid);
+                    } else if candidates.is_empty() {
+                        // Can't determine — skip phase manually.
+                        state.phase = if state.pre_roll {
+                            Phase::PreRoll
+                        } else {
+                            Phase::Main
+                        };
+                    } else {
+                        // Multiple candidates survive — branch and backtrack.
+                        for &tile in &candidates {
+                            let mut trial = state.clone();
+                            trial.apply_action(action::robber_id(tile).0 as usize);
+                            let trial_tl = timeline.clone();
+                            if let Some(result) = try_replay(trial, events, i + 1, ctx, trial_tl) {
+                                return Some(result);
                             }
                         }
+                        return None; // all robber branches failed
                     }
                 }
             }
@@ -1378,105 +1401,50 @@ fn peek_all_roll_gains(
     results
 }
 
-/// Validate a robber tile candidate by replaying forward in a trial state.
-/// Applies builds to the trial so distribution checks stay consistent.
-/// Returns true if all GotResources match until the next MoveRobber.
-fn validate_robber_tile(
-    state: &GameState,
-    tile: TileId,
+/// Collect (roll, gains) pairs for robber pre-filtering. Stops at events that
+/// change the board (builds, robber moves, knight plays) since those invalidate
+/// the static distribution check.
+fn pre_filter_rolls(
     events: &[GameEvent],
     color_map: &[(u8, Player)],
-    corner_map: &HashMap<(i32, i32, u8), NodeId>,
-    _edge_map: &HashMap<(i32, i32, u8), EdgeId>,
-    mapper: &CoordMapper,
-    dom_settlements: &PerPlayer<Vec<NodeId>>,
-    _dom_roads: &PerPlayer<Vec<EdgeId>>,
-) -> bool {
-    use crate::game::action;
-
-    let mut trial = state.clone();
-    trial.robber = tile;
-    // Skip steal phase — we just care about distribution.
-    trial.phase = Phase::Main;
-
+) -> Vec<(u8, [ResourceArray; 2])> {
+    let mut results = Vec::new();
     let mut current_roll: Option<u8> = None;
-    let mut log_gains: [ResourceArray; 2] = Default::default();
-    let mut had_roll = false;
+    let mut gains: [ResourceArray; 2] = Default::default();
 
     for event in events {
         match event {
-            // Stop at next robber-changing event.
-            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => break,
-
+            GameEvent::MoveRobber { .. }
+            | GameEvent::PlayedKnight { .. }
+            | GameEvent::BuildSettlement { .. }
+            | GameEvent::BuildCity { .. } => {
+                if let Some(roll) = current_roll.take() {
+                    results.push((roll, gains));
+                }
+                break;
+            }
             GameEvent::Roll { d1, d2, .. } => {
-                // Validate previous roll if any.
-                if let Some(roll) = current_roll {
-                    if !validate_distribution(&trial, roll, &log_gains) {
-                        return false;
-                    }
+                if let Some(roll) = current_roll.take() {
+                    results.push((roll, gains));
+                    gains = Default::default();
                 }
                 let total = d1 + d2;
-                current_roll = if total != 7 { Some(total) } else { None };
-                log_gains = Default::default();
-                had_roll = true;
+                if total != 7 {
+                    current_roll = Some(total);
+                }
             }
-
             GameEvent::GotResources { player, resources } if current_roll.is_some() => {
                 if let Some(pid) = player_of_color(color_map, *player) {
-                    log_gains[pid as usize].add(*resources);
+                    gains[pid as usize].add(*resources);
                 }
             }
-
-            // Apply builds to keep trial state consistent.
-            GameEvent::BuildSettlement { player, corner } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    let aid = corner
-                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                        .and_then(|c| corner_map.get(&c))
-                        .map(|&nid| action::settlement_id(nid).0 as usize)
-                        .or_else(|| {
-                            let nid = dom_settlements[pid].iter().find(|&&nid| {
-                                trial.boards[pid].settlements & (1u64 << nid.0) == 0
-                                    && trial.boards[pid].cities & (1u64 << nid.0) == 0
-                            })?;
-                            Some(action::settlement_id(*nid).0 as usize)
-                        });
-                    if let Some(aid) = aid {
-                        crate::game::apply_with_chance(&mut trial, aid, None);
-                    }
-                }
-            }
-            GameEvent::BuildCity { player, corner } => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    let aid = corner
-                        .map(|(x, y, z)| mapper.map_corner(x, y, z))
-                        .and_then(|c| corner_map.get(&c))
-                        .map(|&nid| action::city_id(nid).0 as usize)
-                        .or_else(|| {
-                            let nid = dom_settlements[pid].iter().find(|&&nid| {
-                                trial.boards[pid].settlements & (1u64 << nid.0) != 0
-                                    && trial.boards[pid].cities & (1u64 << nid.0) == 0
-                            })?;
-                            Some(action::city_id(*nid).0 as usize)
-                        });
-                    if let Some(aid) = aid {
-                        crate::game::apply_with_chance(&mut trial, aid, None);
-                    }
-                }
-            }
-
             _ => {}
         }
     }
-
-    // Validate last roll.
     if let Some(roll) = current_roll {
-        if !validate_distribution(&trial, roll, &log_gains) {
-            return false;
-        }
+        results.push((roll, gains));
     }
-
-    had_roll // need at least one roll to validate
+    results
 }
 
 /// All legal robber tile candidates (any tile except current robber position).
