@@ -732,10 +732,8 @@ pub fn replay_events(
     ctx: &ReplayCtx,
 ) -> Option<Vec<TimelineEntry>> {
     let timeline = Vec::new();
-    let entries = try_replay(state.clone(), events, 0, ctx, timeline)?;
-    if let Some(last) = entries.last() {
-        *state = last.state.clone();
-    }
+    let (final_state, entries) = try_replay(state.clone(), events, 0, ctx, timeline)?;
+    *state = final_state;
     Some(entries)
 }
 
@@ -813,20 +811,21 @@ fn replay_search(
         state: state.clone(),
     }];
 
-    let result = try_replay(state, events, 0, &ctx, timeline)?;
-    eprintln!("replay_search: {} timeline entries", result.len(),);
-    Some(result)
+    let (_final_state, entries) = try_replay(state, events, 0, &ctx, timeline)?;
+    eprintln!("replay_search: {} timeline entries", entries.len());
+    Some(entries)
 }
 
 /// Recursive replay: process events from `idx`, branching at ambiguous points.
 /// Returns `None` on contradiction (GotResources mismatch, no valid candidate).
+/// On success returns (final_state, timeline_entries).
 fn try_replay(
     mut state: GameState,
     events: &[GameEvent],
     idx: usize,
     ctx: &ReplayCtx,
     mut timeline: Vec<TimelineEntry>,
-) -> Option<Vec<TimelineEntry>> {
+) -> Option<(GameState, Vec<TimelineEntry>)> {
     use crate::game::action::{self, END_TURN, ROLL};
     use crate::game::resource::ALL_RESOURCES;
 
@@ -1487,7 +1486,7 @@ fn try_replay(
         i += 1;
     }
 
-    Some(timeline)
+    Some((state, timeline))
 }
 
 /// Collect all (roll, per-player gains) pairs until the next MoveRobber or
