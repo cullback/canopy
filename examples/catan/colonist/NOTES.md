@@ -148,6 +148,42 @@ Extracted via CDP JavaScript on React fiber tree.
 Initial connection and live polling both use `try_replay` — a single recursive
 function that replays events through engine actions with backtracking.
 
+### Constraint-based search
+
+Ambiguous events (coordinate-less placements, robber moves) are resolved by
+trying candidates and backtracking on contradiction. Constraints are validated
+at different points:
+
+| Constraint          | When checked                                 |
+| ------------------- | -------------------------------------------- |
+| `StartingResources` | After 2nd settlement placement               |
+| `GotResources`      | After every non-7 roll (engine vs log delta) |
+| `TileBlocked`       | Pre-filter on robber candidates              |
+| Steal outcome       | Pre-filter (buildings + cards + friendly VP) |
+| `Stole` event       | If engine not in StealResolve → backtrack    |
+| `StoleNothing`      | Force exit StealResolve if engine entered it |
+
+**Steal-aware candidate ordering**: `precompute_steal_tiles` scans the full log
+upfront to find tiles where each player gets stolen from. At each ambiguous
+placement, `sort_by_steal_coverage` orders candidates so nodes adjacent to
+steal-required tiles are tried first. This avoids exponential backtracking from
+late Stole contradictions.
+
+**Why this matters**: two nodes can produce identical roll distributions (same
+adjacent tile resources) but differ in adjacency to OTHER tiles. Distribution
+validation can't distinguish them. Steal events are the additional signal.
+
+### Robber inference
+
+The robber tile is absent from the colonist log. Inference uses (in priority):
+
+1. **Last MoveRobber → DOM position** (authoritative, no search needed)
+2. **TileBlocked** — exact terrain + dice number, usually unique
+3. **Steal outcome** — buildings + cards + friendly robber VP check
+4. **Roll distribution pre-filter** — `pre_filter_rolls` checks all rolls before
+   the next board-changing event
+5. **Backtracking** — branch on remaining candidates, full forward replay
+
 ### Gotchas
 
 - **`ensure_player`**: pre-roll actions (Knight, dev cards) from the next player
@@ -158,14 +194,6 @@ function that replays events through engine actions with backtracking.
   `hidden_dev_cards`. The engine's `apply_play_knight` etc. check `dev_cards`
   which is 0 — `saturating_sub(1)` silently no-ops. Must move the card from
   hidden to revealed before playing.
-
-- **Robber: last move uses DOM**: the last `MoveRobber` in the event slice uses
-  the DOM robber position directly (authoritative). Only intermediate moves need
-  inference via TileBlocked + steal outcome + distribution filters + backtracking.
-
-- **Robber: empty candidates → backtrack**: if all robber candidates are filtered
-  out, return `None` to force the search to reconsider an earlier placement.
-  Previously silently continued with the wrong robber.
 
 - **Bank trades: multi-resource decomposition**: colonist can combine trades
   (e.g. `L L L L B B → G G`). Decompose by iterating received resources and
@@ -178,12 +206,20 @@ function that replays events through engine actions with backtracking.
   `replay_events` must NOT re-process setup events. Apply `StartingResources`
   directly from the log.
 
-- **State from `try_replay`**: returns final state explicitly. Don't extract from
-  last timeline entry — events like MoveRobber+StoleNothing produce 0 entries.
+- **State from `try_replay`**: returns `(GameState, Vec<TimelineEntry>,
+  Vec<usize>)`. Don't extract state from last timeline entry — events like
+  MoveRobber+StoleNothing produce 0 entries.
+
+- **Walk actions**: `try_replay` tracks engine action IDs for tree rerooting.
+  Without them, the search tree resets on every poll (losing accumulated work).
 
 - **Retry on failure**: when `replay_events` fails, don't advance
   `committed_event_count`. Next poll retries with more events (gives robber
   inference validation data from future rolls).
+
+- **Session sync**: `committed_new_events` flag triggers `set_final_state` /
+  `reset_to_state` even when 0 timeline entries were produced (e.g. BuyDevCard,
+  Stole events).
 
 - **Type 139**: colonist steal event (robber's perspective), same structure as
   type 15. Parse with `15 | 139 =>`.
