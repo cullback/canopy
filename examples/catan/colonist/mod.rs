@@ -18,6 +18,7 @@ use crate::game::dev_card::DevCardKind;
 use crate::game::dice::{BalancedDice, Dice};
 use crate::game::state::Phase;
 use crate::presenter::CatanPresenter;
+use canopy::player::{PerPlayer, Player};
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -625,7 +626,7 @@ impl ColonistPollState {
         let mut entries_to_extend = Vec::new();
         let mut actions_to_walk: Vec<usize> = Vec::new();
         let mut needs_rollback = false;
-        let mut detected_ids: Vec<usize>;
+        let mut detected_ids: PerPlayer<Vec<usize>>;
 
         if was_setup {
             // Setup: sync_buildings places buildings directly (engine doesn't
@@ -648,10 +649,12 @@ impl ColonistPollState {
                 actions_to_walk.extend(&sync.walk_actions);
             }
             // Pass synced building IDs as detected_ids so PlaceRoad events
-            // that cross the setup→post-setup boundary (sync_setup_phase
-            // completes setup before the event is processed) can still
-            // resolve coordinates when the event has None.
-            detected_ids = sync.walk_actions;
+            // that cross the setup→post-setup boundary can still resolve
+            // coordinates when the event has None. All go into current
+            // player's bucket since the boundary crossing is always for them.
+            detected_ids = PerPlayer::default();
+            let cp = self.committed_state.current_player;
+            detected_ids[cp] = sync.walk_actions;
         } else {
             // Post-setup: read-only detection. process_new_events handles
             // placement through the engine.
@@ -663,11 +666,9 @@ impl ColonistPollState {
                 &self.edge_map,
                 &self.mapper,
             );
-            if !detected_ids.is_empty() {
-                eprintln!(
-                    "poll: detected {} new buildings from board",
-                    detected_ids.len()
-                );
+            let total = detected_ids[Player::One].len() + detected_ids[Player::Two].len();
+            if total > 0 {
+                eprintln!("poll: detected {total} new buildings from board");
             }
         }
 
