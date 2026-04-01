@@ -1396,14 +1396,28 @@ fn try_replay(
                 given,
                 received,
             } => {
-                if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    // Apply exact amounts from the event — authoritative over
-                    // the engine's trade ratio computation (which depends on
-                    // port detection that may be wrong for ambiguous placements).
-                    state.players[pid].hand.sub(*given);
-                    state.bank.add(*given);
-                    state.players[pid].hand.add(*received);
-                    state.bank.sub(*received);
+                if player_of_color(ctx.color_map, *player).is_some() {
+                    // Decompose multi-resource trades into individual
+                    // maritime actions. A combined event like "L L L L B B → G G"
+                    // is two trades: 4L→1G + 2B→1G at different ratios.
+                    let mut remaining = *given;
+                    for &recv in &ALL_RESOURCES {
+                        for _ in 0..received[recv] {
+                            for &give in &ALL_RESOURCES {
+                                if give == recv {
+                                    continue;
+                                }
+                                let ratio =
+                                    state.players[state.current_player].trade_ratios[give as usize];
+                                if remaining[give] >= ratio {
+                                    remaining[give] -= ratio;
+                                    let aid = action::maritime_id(give, recv).0 as usize;
+                                    crate::game::apply_with_chance(&mut state, aid, None);
+                                    break;
+                                }
+                            }
+                        }
+                    }
                     let label = format!("{} bank trade", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
                         label,
