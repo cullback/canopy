@@ -1138,6 +1138,29 @@ fn try_replay(
                 if player_of_color(ctx.color_map, *player).is_some()
                     && matches!(state.phase, Phase::MoveRobber)
                 {
+                    // If this is the last MoveRobber in the events, the DOM
+                    // robber position is authoritative — use it directly.
+                    let is_last_robber_move = !events[i + 1..]
+                        .iter()
+                        .any(|e| matches!(e, GameEvent::MoveRobber { .. }));
+                    if is_last_robber_move {
+                        if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
+                            if tile != state.robber {
+                                state.apply_action(action::robber_id(tile).0 as usize);
+                            } else {
+                                // Same tile (shouldn't happen in standard rules).
+                                state.phase = if state.pre_roll {
+                                    Phase::PreRoll
+                                } else {
+                                    Phase::Main
+                                };
+                            }
+                            // Skip the search — handled by DOM.
+                            i += 1;
+                            continue;
+                        }
+                    }
+
                     let mut candidates = all_robber_candidates(&state);
                     let opp = state.current_player.opponent();
 
