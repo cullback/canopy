@@ -1456,7 +1456,7 @@ fn peek_all_roll_gains(
             | GameEvent::PlayedKnight { .. }
             | GameEvent::BuildSettlement { .. }
             | GameEvent::BuildCity { .. } => {
-                if let Some(roll) = current_roll {
+                if let Some(roll) = current_roll.take() {
                     results.push((roll, gains));
                 }
                 break;
@@ -2165,5 +2165,214 @@ pub fn apply_dev_cards(
     ps.dev_cards_bought_this_turn = Default::default();
     for &kind in bought_this_turn {
         ps.dev_cards_bought_this_turn[kind] += 1;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Create a fresh GameState on a deterministic board.
+    fn test_state() -> GameState {
+        let topo = Arc::new(Topology::from_seed(42));
+        let deck = DevCardDeck::new();
+        GameState::new(topo, deck, Dice::default())
+    }
+
+    #[test]
+    fn validate_distribution_empty_board() {
+        let state = test_state();
+        let empty = [ResourceArray::default(); 2];
+        // No buildings → no resources for any roll.
+        for roll in 2..=12 {
+            assert!(validate_distribution(&state, roll, &empty));
+        }
+    }
+
+    #[test]
+    fn validate_distribution_one_settlement() {
+        let mut state = test_state();
+        // Place P1 settlement at node 0 during setup.
+        state.apply_action(0); // PlaceSettlement at node 0
+
+        // Figure out what resources node 0 should produce.
+        let node = &state.topology.nodes[0];
+        for &tid in &node.adjacent_tiles {
+            let tile = &state.topology.tiles[tid.0 as usize];
+            if let Some(resource) = tile.terrain.resource() {
+                // This tile has a dice number. Find it.
+                let dice_num = state
+                    .topology
+                    .dice_to_tiles
+                    .iter()
+                    .enumerate()
+                    .find(|(_, tiles)| tiles.contains(&tid))
+                    .map(|(i, _)| i as u8)
+                    .unwrap();
+
+                let mut expected = [ResourceArray::default(); 2];
+                expected[0][resource] = 1;
+                assert!(
+                    validate_distribution(&state, dice_num, &expected),
+                    "roll={dice_num} resource={resource:?} should give P1 1"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn validate_distribution_robber_blocks() {
+        let mut state = test_state();
+        state.apply_action(0); // P1 settlement at node 0
+
+        let node = &state.topology.nodes[0];
+        // Find a producing adjacent tile and block it.
+        for &tid in &node.adjacent_tiles {
+            let tile = &state.topology.tiles[tid.0 as usize];
+            if tile.terrain.resource().is_some() {
+                let dice_num = state
+                    .topology
+                    .dice_to_tiles
+                    .iter()
+                    .enumerate()
+                    .find(|(_, tiles)| tiles.contains(&tid))
+                    .map(|(i, _)| i as u8)
+                    .unwrap();
+
+                // Put robber on this tile.
+                state.robber = tid;
+                let empty = [ResourceArray::default(); 2];
+                // With only one tile of this number adjacent, blocking it
+                // should produce zero (if no other tiles share the number).
+                // Just verify it doesn't produce the unblocked amount.
+                let mut unblocked = [ResourceArray::default(); 2];
+                unblocked[0][tile.terrain.resource().unwrap()] = 1;
+                // Distribution should differ from unblocked.
+                assert!(
+                    !validate_distribution(&state, dice_num, &unblocked)
+                        || validate_distribution(&state, dice_num, &empty),
+                    "robber should block production"
+                );
+                break;
+            }
+        }
+    }
+
+    #[test]
+    fn peek_all_roll_gains_collects_one_roll() {
+        let color_map = vec![(1, Player::One), (5, Player::Two)];
+        let events = vec![
+            GameEvent::Roll {
+                player: 1,
+                d1: 3,
+                d2: 6,
+            },
+            GameEvent::GotResources {
+                player: 1,
+                resources: ResourceArray::new(0, 0, 0, 1, 0),
+            },
+            GameEvent::GotResources {
+                player: 5,
+                resources: ResourceArray::new(0, 1, 0, 0, 0),
+            },
+            GameEvent::Roll {
+                player: 5,
+                d1: 4,
+                d2: 3,
+            },
+        ];
+        let rolls = peek_all_roll_gains(&events, &color_map);
+        assert_eq!(rolls.len(), 1, "should stop at second Roll");
+        assert_eq!(rolls[0].0, 9);
+        assert_eq!(rolls[0].1[0], ResourceArray::new(0, 0, 0, 1, 0)); // P1
+        assert_eq!(rolls[0].1[1], ResourceArray::new(0, 1, 0, 0, 0)); // P2
+    }
+
+    #[test]
+    fn peek_all_roll_gains_skips_seven() {
+        let color_map = vec![(1, Player::One), (5, Player::Two)];
+        let events = vec![
+            GameEvent::Roll {
+                player: 1,
+                d1: 3,
+                d2: 4,
+            }, // 7
+            GameEvent::MoveRobber { player: 1 },
+        ];
+        let rolls = peek_all_roll_gains(&events, &color_map);
+        assert!(rolls.is_empty(), "7-roll should not produce gains entry");
+    }
+
+    #[test]
+    fn peek_all_roll_gains_stops_at_move_robber() {
+        let color_map = vec![(1, Player::One), (5, Player::Two)];
+        let events = vec![
+            GameEvent::Roll {
+                player: 1,
+                d1: 3,
+                d2: 6,
+            },
+            GameEvent::GotResources {
+                player: 1,
+                resources: ResourceArray::new(0, 0, 0, 1, 0),
+            },
+            GameEvent::Roll {
+                player: 5,
+                d1: 2,
+                d2: 4,
+            },
+            GameEvent::GotResources {
+                player: 5,
+                resources: ResourceArray::new(0, 0, 1, 0, 0),
+            },
+            GameEvent::Roll {
+                player: 1,
+                d1: 3,
+                d2: 4,
+            }, // 7
+            GameEvent::MoveRobber { player: 1 },
+            // After this — should NOT be collected.
+            GameEvent::Roll {
+                player: 5,
+                d1: 5,
+                d2: 5,
+            },
+            GameEvent::GotResources {
+                player: 5,
+                resources: ResourceArray::new(1, 0, 0, 0, 0),
+            },
+        ];
+        let rolls = peek_all_roll_gains(&events, &color_map);
+        assert_eq!(rolls.len(), 2, "should stop at MoveRobber");
+        assert_eq!(rolls[0].0, 9);
+        assert_eq!(rolls[1].0, 6);
+    }
+
+    #[test]
+    fn peek_all_roll_gains_stops_at_build() {
+        let color_map = vec![(1, Player::One), (5, Player::Two)];
+        let events = vec![
+            GameEvent::Roll {
+                player: 1,
+                d1: 3,
+                d2: 6,
+            },
+            GameEvent::GotResources {
+                player: 1,
+                resources: ResourceArray::new(0, 0, 0, 1, 0),
+            },
+            GameEvent::BuildSettlement {
+                player: 1,
+                corner: None,
+            },
+            // After build — should NOT be collected.
+            GameEvent::Roll {
+                player: 5,
+                d1: 2,
+                d2: 4,
+            },
+        ];
+        let rolls = peek_all_roll_gains(&events, &color_map);
+        assert_eq!(rolls.len(), 1, "should stop at BuildSettlement");
     }
 }
