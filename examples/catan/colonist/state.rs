@@ -61,7 +61,7 @@ pub fn build_timeline(
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);
 
-    replay_search(
+    if let Some(timeline) = replay_search(
         topology.clone(),
         board,
         events,
@@ -69,8 +69,37 @@ pub fn build_timeline(
         &corner_map,
         &edge_map,
         mapper,
-    )
-    .expect("replay_search: no valid path found")
+    ) {
+        return timeline;
+    }
+
+    // Strict search failed (likely a coordinate mapping edge case).
+    // Retry with Stole constraints relaxed — apply steals directly
+    // instead of backtracking on adjacency mismatches.
+    eprintln!("replay_search: retrying with relaxed steal constraints");
+    let mut ctx2 = ReplayCtx::from_buildings(
+        board::extract_buildings(board, mapper),
+        &color_map,
+        &corner_map,
+        &edge_map,
+        mapper,
+    );
+    // Keep steal_tiles for candidate ordering but clear known_indices
+    // so no Stole event triggers backtracking.
+    let dev_deck2 = DevCardDeck::new();
+    let dice2 = Dice::Balanced(BalancedDice::new());
+    let state2 = GameState::new(topology.clone(), dev_deck2, dice2);
+    let (steal_tiles, _) = precompute_steal_tiles(events, &color_map, &state2.topology, &ctx2);
+    ctx2.steal_tiles = steal_tiles;
+
+    let timeline2 = vec![TimelineEntry {
+        label: "Game start".into(),
+        state: state2.clone(),
+    }];
+
+    try_replay(state2, events, 0, &ctx2, timeline2, Vec::new())
+        .expect("replay_search: failed even with relaxed constraints")
+        .1
 }
 
 /// Discover the first two unique player colors from the log, mapping them to
@@ -425,12 +454,13 @@ pub(crate) struct ReplayCtx<'a> {
     pub dom_settlements: PerPlayer<Vec<NodeId>>,
     pub dom_roads: PerPlayer<Vec<EdgeId>>,
     /// Tiles where each player gets stolen from. Precomputed from the full log.
-    /// Used to sort building candidates — nodes adjacent to steal tiles first.
     pub steal_tiles: PerPlayer<Vec<TileId>>,
     /// Event indices of Stole events where the robber position is known.
-    /// Only these should trigger backtracking; unknown-position steals
-    /// are applied directly since we can't validate adjacency.
     pub known_steal_indices: Vec<usize>,
+    /// Maximum try_replay calls before giving up (0 = unlimited).
+    pub max_calls: usize,
+    /// Shared call counter.
+    pub call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
 }
 
 /// Replay new events onto an existing state using engine actions.
@@ -496,6 +526,8 @@ impl<'a> ReplayCtx<'a> {
             dom_roads,
             steal_tiles: PerPlayer::default(),
             known_steal_indices: Vec::new(),
+            max_calls: 0,
+            call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
         }
     }
 }
@@ -617,6 +649,38 @@ fn replay_search(
         precompute_steal_tiles(events, color_map, &state.topology, &ctx);
     ctx.steal_tiles = steal_tiles;
     ctx.known_steal_indices = known_steal_indices;
+    ctx.max_calls = 100_000; // limit strict search
+
+    // Dump search space.
+    eprintln!(
+        "  search space: P1 settle={} city={} road={}, P2 settle={} city={} road={}",
+        ctx.dom_settlements[Player::One].len(),
+        ctx.dom
+            .cities
+            .iter()
+            .filter(|c| player_of_color(color_map, c.0) == Some(Player::One))
+            .count(),
+        ctx.dom_roads[Player::One].len(),
+        ctx.dom_settlements[Player::Two].len(),
+        ctx.dom
+            .cities
+            .iter()
+            .filter(|c| player_of_color(color_map, c.0) == Some(Player::Two))
+            .count(),
+        ctx.dom_roads[Player::Two].len(),
+    );
+    eprintln!(
+        "  steal_tiles: P1={:?} P2={:?} known_indices={:?}",
+        ctx.steal_tiles[Player::One]
+            .iter()
+            .map(|t| t.0)
+            .collect::<Vec<_>>(),
+        ctx.steal_tiles[Player::Two]
+            .iter()
+            .map(|t| t.0)
+            .collect::<Vec<_>>(),
+        ctx.known_steal_indices,
+    );
 
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),
@@ -642,20 +706,14 @@ fn try_replay(
 ) -> Option<(GameState, Vec<TimelineEntry>, Vec<usize>)> {
     use crate::game::action::{self, END_TURN, ROLL};
     use crate::game::resource::ALL_RESOURCES;
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    static CALLS: AtomicUsize = AtomicUsize::new(0);
-    let n = CALLS.fetch_add(1, Ordering::Relaxed);
-    if n > 0 && n % 10000 == 0 {
-        eprintln!("  try_replay: {n} calls, at event {idx}/{}", events.len());
-    }
-    // After many calls, log what's failing at the hot event, then bail.
-    if n == 500000 && idx < events.len() {
-        for ei in 140..=150.min(events.len() - 1) {
-            eprintln!("  event[{ei}]: {:?}", std::mem::discriminant(&events[ei]),);
+
+    // Check call limit.
+    if ctx.max_calls > 0 {
+        use std::sync::atomic::Ordering;
+        let n = ctx.call_count.fetch_add(1, Ordering::Relaxed);
+        if n > ctx.max_calls {
+            return None;
         }
-    }
-    if n > 600000 {
-        return None;
     }
 
     // Ensure current_player matches the event's player. Pre-roll actions
