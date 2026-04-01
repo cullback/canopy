@@ -815,7 +815,7 @@ fn precompute_steal_tiles(
     let desert = (0..topology.tiles.len())
         .find(|&i| topology.tiles[i].terrain.resource().is_none())
         .unwrap_or(0);
-    let mut robber = TileId(desert as u8);
+    let mut robber: Option<TileId> = Some(TileId(desert as u8));
 
     // Find the last MoveRobber index to use DOM position.
     let last_robber_idx = events
@@ -827,22 +827,20 @@ fn precompute_steal_tiles(
             GameEvent::MoveRobber { .. } => {
                 if Some(i) == last_robber_idx {
                     // Last move: DOM is authoritative.
-                    if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
-                        robber = tile;
-                    }
+                    robber = ctx.dom.robber_tile_index.map(TileId);
                 } else {
                     // Intermediate: infer from TileBlocked after this move.
+                    robber = None; // unknown until TileBlocked found
                     for e in &events[i + 1..] {
                         match e {
                             GameEvent::TileBlocked {
                                 dice_number,
                                 resource: Some(resource),
                             } => {
-                                // Find tile matching this terrain + number.
                                 for &tid in &topology.dice_to_tiles[*dice_number as usize] {
                                     let t = &topology.tiles[tid.0 as usize];
                                     if t.terrain.resource() == Some(*resource) {
-                                        robber = tid;
+                                        robber = Some(tid);
                                         break;
                                     }
                                 }
@@ -855,10 +853,12 @@ fn precompute_steal_tiles(
                 }
             }
             GameEvent::Stole { victim, .. } => {
-                // The victim must have a building adjacent to the current robber tile.
-                if let Some(pid) = player_of_color(color_map, *victim) {
-                    if !result[pid].contains(&robber) {
-                        result[pid].push(robber);
+                // Only add constraint when we know the robber position.
+                if let Some(tile) = robber {
+                    if let Some(pid) = player_of_color(color_map, *victim) {
+                        if !result[pid].contains(&tile) {
+                            result[pid].push(tile);
+                        }
                     }
                 }
             }
@@ -936,6 +936,12 @@ fn try_replay(
 ) -> Option<(GameState, Vec<TimelineEntry>, Vec<usize>)> {
     use crate::game::action::{self, END_TURN, ROLL};
     use crate::game::resource::ALL_RESOURCES;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    static CALLS: AtomicUsize = AtomicUsize::new(0);
+    let n = CALLS.fetch_add(1, Ordering::Relaxed);
+    if n > 0 && n % 10000 == 0 {
+        eprintln!("  try_replay: {n} calls, at event {idx}/{}", events.len());
+    }
 
     // Ensure current_player matches the event's player. Pre-roll actions
     // (Knight, etc.) from the next player arrive before their Roll event,
