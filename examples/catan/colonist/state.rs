@@ -1198,10 +1198,24 @@ fn try_replay(
                 }
             }
 
-            GameEvent::Stole { resources, .. } => {
+            GameEvent::Stole {
+                player,
+                victim,
+                resources,
+            } => {
                 if matches!(state.phase, Phase::StealResolve) {
                     if let Some(idx) = ALL_RESOURCES.iter().position(|&r| resources[r] > 0) {
                         state.apply_action(idx);
+                    }
+                } else {
+                    // Engine skipped StealResolve (robber tile mismatch with
+                    // building adjacency). Apply the steal directly — the
+                    // event is authoritative.
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        state.players[pid].hand.add(*resources);
+                    }
+                    if let Some(vid) = player_of_color(ctx.color_map, *victim) {
+                        state.players[vid].hand.sub(*resources);
                     }
                 }
                 // After steal, engine may set Phase::Roll for pre_roll knight.
@@ -1526,6 +1540,30 @@ fn try_replay(
             | GameEvent::EmbargoSet { .. }
             | GameEvent::EmbargoLifted { .. }
             | GameEvent::Unknown { .. } => {}
+        }
+
+        // Log hand totals after every event for debugging.
+        if !matches!(
+            &events[i],
+            GameEvent::GotResources { .. }
+                | GameEvent::TileBlocked { .. }
+                | GameEvent::RolledSeven
+                | GameEvent::LongestRoad { .. }
+                | GameEvent::LongestRoadChanged { .. }
+                | GameEvent::TradeOffer { .. }
+                | GameEvent::EmbargoSet { .. }
+                | GameEvent::EmbargoLifted { .. }
+                | GameEvent::Unknown { .. }
+                | GameEvent::MonopolyResult { .. }
+                | GameEvent::YearOfPlentyGain { .. }
+                | GameEvent::PlayedDevCard { .. }
+        ) {
+            eprintln!(
+                "  [{i}] {:?} → P1={:?} P2={:?}",
+                std::mem::discriminant(&events[i]),
+                state.players[Player::One].hand.0,
+                state.players[Player::Two].hand.0,
+            );
         }
 
         i += 1;
