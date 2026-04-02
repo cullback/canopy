@@ -96,6 +96,9 @@ pub enum Phase {
         player: Player,
         remaining: u8,
         roller: Player,
+        /// Lexicographic lower bound on resource index to prevent
+        /// transpositions (discard lumber before brick before wool …).
+        min_resource: u8,
     },
     MoveRobber,
     StealResolve,

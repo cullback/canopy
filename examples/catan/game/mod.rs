@@ -397,6 +397,7 @@ pub fn handle_seven(state: &mut GameState) {
             player: roller,
             remaining: roller_total / 2,
             roller,
+            min_resource: 0,
         };
     } else {
         let opp_total = state.players[opponent].hand.total();
@@ -406,6 +407,7 @@ pub fn handle_seven(state: &mut GameState) {
                 player: opponent,
                 remaining: opp_total / 2,
                 roller,
+                min_resource: 0,
             };
         } else {
             state.phase = Phase::MoveRobber;
@@ -652,6 +654,7 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
         player,
         remaining,
         roller,
+        ..
     } = state.phase
     {
         state.players[player].hand[resource] -= 1;
@@ -663,6 +666,7 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                 player,
                 remaining: new_remaining,
                 roller,
+                min_resource: resource as u8,
             };
         } else if player == roller {
             // Roller finished discarding — check if opponent also must discard
@@ -674,6 +678,7 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                     player: other,
                     remaining: other_total / 2,
                     roller,
+                    min_resource: 0,
                 };
             } else {
                 state.current_player = roller;

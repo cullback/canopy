@@ -262,7 +262,12 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
         Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => {
             // Chance nodes — resolved by chance_outcomes/apply_chance, not player actions
         }
-        Phase::Discard { player, .. } => populate_discard(state, *player, actions),
+        Phase::Discard {
+            player,
+            remaining,
+            min_resource,
+            ..
+        } => populate_discard(state, *player, *remaining, *min_resource, actions),
         Phase::MoveRobber => populate_move_robber(state, actions),
         Phase::Main => populate_main(state, actions),
         Phase::RoadBuilding { roads_left } => {
@@ -325,12 +330,25 @@ fn populate_place_road(state: &GameState, actions: &mut Vec<ActionId>) {
     }
 }
 
-fn populate_discard(state: &GameState, player: Player, actions: &mut Vec<ActionId>) {
+fn populate_discard(
+    state: &GameState,
+    player: Player,
+    remaining: u8,
+    min_resource: u8,
+    actions: &mut Vec<ActionId>,
+) {
     let hand = state.players[player].hand;
-    for &r in &ALL_RESOURCES {
-        if hand[r] > 0 {
+    // Enforce lexicographic ordering: only offer resources >= min_resource,
+    // and only if enough cards remain from that index onward to finish.
+    let mut suffix_total: u8 = ALL_RESOURCES[min_resource as usize..]
+        .iter()
+        .map(|&r| hand[r])
+        .sum();
+    for &r in &ALL_RESOURCES[min_resource as usize..] {
+        if hand[r] > 0 && suffix_total >= remaining {
             actions.push(discard_id(r));
         }
+        suffix_total -= hand[r];
     }
 }
 
