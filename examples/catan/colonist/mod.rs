@@ -373,17 +373,24 @@ fn apply_live_state(
         }
     }
 
-    // Turn/phase changes are driven by event processing (not mutated here)
-    // so that walk actions (END_TURN, ROLL) are correctly generated.
-    // Log colonist's live state for diagnostics.
+    // Log colonist turn mismatch once (not every poll).
     if !matches!(state.phase, Phase::PlaceSettlement | Phase::PlaceRoad)
         && let Some(pid) = state::player_of_color(color_map, data.current_turn_color)
     {
         if state.current_player != pid {
-            eprintln!(
-                "live: turn changed to {pid:?} (turnState={} actionState={})",
-                data.turn_state, data.action_state
-            );
+            use std::sync::atomic::{AtomicU8, Ordering};
+            static LAST_LOGGED: AtomicU8 = AtomicU8::new(255);
+            let key = pid as u8;
+            if LAST_LOGGED.swap(key, Ordering::Relaxed) != key {
+                eprintln!(
+                    "live: turn changed to {pid:?} (turnState={} actionState={} phase={:?})",
+                    data.turn_state, data.action_state, state.phase
+                );
+            }
+        } else {
+            use std::sync::atomic::{AtomicU8, Ordering};
+            static LAST_LOGGED2: AtomicU8 = AtomicU8::new(255);
+            LAST_LOGGED2.store(255, Ordering::Relaxed);
         }
     }
 
@@ -406,9 +413,13 @@ fn apply_live_state(
 
     // Phase::Roll is an internal chance node for auto-resolving dice.
     // In colonist mode dice come from events, so map back to PreRoll/Main.
-    // MoveRobber/StealResolve are valid searchable phases (after 7-roll or
-    // knight play) — leave them so the search explores robber placements.
-    if matches!(state.phase, Phase::Roll) {
+    //
+    // MoveRobber/StealResolve are valid when the player is actively placing
+    // the robber (actionState=24). Otherwise the robber action has resolved
+    // and the phase is stale — map back so the search can proceed.
+    let stale_robber =
+        matches!(state.phase, Phase::MoveRobber | Phase::StealResolve) && data.action_state != 24;
+    if matches!(state.phase, Phase::Roll) || stale_robber {
         state.phase = if state.pre_roll {
             Phase::PreRoll
         } else {
@@ -994,6 +1005,11 @@ pub fn run_serve(
     let mut timeline = state::build_timeline(&data.board, &data.events, &mapper, data.robber_hex);
     // Derive color → Player mapping from the event log (first to act = P1).
     let mut color_map = state::discover_colors(&data.events);
+    // If events haven't arrived yet, use the current turn color as P1
+    // (colonist shows whose turn it is even before placement events land).
+    if color_map.is_empty() && data.current_turn_color != 0 {
+        color_map.push((data.current_turn_color, canopy::player::Player::One));
+    }
     for &(color, _) in &data.player_names {
         if color_map.iter().any(|&(c, _)| c == color) {
             continue;
