@@ -423,70 +423,20 @@ fn apply_live_state(
 /// Check if a canopy action index matches a colonist `GameEvent`.
 ///
 /// Uses the corner_map/edge_map to reverse-lookup coordinates for settlements,
-/// cities, and roads. Other action types match by event type alone.
-fn match_action_to_event(
-    action: usize,
-    event: &log::GameEvent,
-    corner_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::NodeId>,
-    edge_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::EdgeId>,
-    mapper: &board::CoordMapper,
-) -> bool {
+/// Match a canopy action to a colonist event by type.
+fn match_action_to_event(action: usize, event: &log::GameEvent) -> bool {
     use crate::game::action::*;
     let a = action as u8;
     match a {
-        SETTLEMENT_START..SETTLEMENT_END => {
-            let nid = crate::game::board::NodeId(a - SETTLEMENT_START);
-            match event {
-                log::GameEvent::PlaceSettlement {
-                    corner: Some((x, y, z)),
-                    ..
-                }
-                | log::GameEvent::BuildSettlement {
-                    corner: Some((x, y, z)),
-                    ..
-                } => {
-                    let mapped = mapper.map_corner(*x, *y, *z);
-                    corner_map.get(&mapped) == Some(&nid)
-                }
-                // Accept without coordinates — trust event type match.
-                log::GameEvent::PlaceSettlement { corner: None, .. }
-                | log::GameEvent::BuildSettlement { corner: None, .. } => true,
-                _ => false,
-            }
-        }
-        ROAD_START..ROAD_END => {
-            let eid = crate::game::board::EdgeId(a - ROAD_START);
-            match event {
-                log::GameEvent::PlaceRoad {
-                    edge: Some((x, y, z)),
-                    ..
-                }
-                | log::GameEvent::BuildRoad {
-                    edge: Some((x, y, z)),
-                    ..
-                } => {
-                    let mapped = mapper.map_edge(*x, *y, *z);
-                    edge_map.get(&mapped) == Some(&eid)
-                }
-                log::GameEvent::PlaceRoad { edge: None, .. }
-                | log::GameEvent::BuildRoad { edge: None, .. } => true,
-                _ => false,
-            }
-        }
-        CITY_START..CITY_END => {
-            let nid = crate::game::board::NodeId(a - CITY_START);
-            match event {
-                log::GameEvent::BuildCity {
-                    corner: Some((x, y, z)),
-                    ..
-                } => {
-                    let mapped = mapper.map_corner(*x, *y, *z);
-                    corner_map.get(&mapped) == Some(&nid)
-                }
-                log::GameEvent::BuildCity { corner: None, .. } => true,
-                _ => false,
-            }
-        }
+        SETTLEMENT_START..SETTLEMENT_END => matches!(
+            event,
+            log::GameEvent::PlaceSettlement { .. } | log::GameEvent::BuildSettlement { .. }
+        ),
+        ROAD_START..ROAD_END => matches!(
+            event,
+            log::GameEvent::PlaceRoad { .. } | log::GameEvent::BuildRoad { .. }
+        ),
+        CITY_START..CITY_END => matches!(event, log::GameEvent::BuildCity { .. }),
         BUY_DEV_CARD => matches!(event, log::GameEvent::BuyDevCard { .. }),
         PLAY_KNIGHT => matches!(event, log::GameEvent::PlayedKnight { .. }),
         PLAY_ROAD_BUILDING => matches!(event, log::GameEvent::PlayedRoadBuilding { .. }),
@@ -501,13 +451,7 @@ fn match_action_to_event(
 ///
 /// Returns `Ok(matched_count)` if events confirm pending actions in order,
 /// or `Err(())` on the first mismatch.
-fn match_pending_actions(
-    pending: &[usize],
-    new_events: &[log::GameEvent],
-    corner_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::NodeId>,
-    edge_map: &std::collections::HashMap<(i32, i32, u8), crate::game::board::EdgeId>,
-    mapper: &board::CoordMapper,
-) -> Result<usize, ()> {
+fn match_pending_actions(pending: &[usize], new_events: &[log::GameEvent]) -> Result<usize, ()> {
     // Filter new events to "significant" ones (the ones that correspond to
     // player actions, not silent resource gains etc.).
     let significant: Vec<&log::GameEvent> = new_events
@@ -536,7 +480,7 @@ fn match_pending_actions(
             // Not enough events yet to confirm all pending — partial match is ok.
             break;
         }
-        if match_action_to_event(action, significant[i], corner_map, edge_map, mapper) {
+        if match_action_to_event(action, significant[i]) {
             matched += 1;
         } else {
             eprintln!(
@@ -667,13 +611,7 @@ impl ColonistPollState {
             eprintln!("poll: {} new entries", new_entries.len());
 
             if !self.pending_actions.is_empty() {
-                match match_pending_actions(
-                    &self.pending_actions,
-                    new_events,
-                    &self.corner_map,
-                    &self.edge_map,
-                    &self.mapper,
-                ) {
+                match match_pending_actions(&self.pending_actions, new_events) {
                     Ok(matched) if matched > 0 => {
                         eprintln!("poll: {matched} pending actions confirmed by colonist");
                         // The session already walked the tree for these pending

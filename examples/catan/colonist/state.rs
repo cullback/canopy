@@ -724,24 +724,13 @@ fn try_replay(
     let mut i = idx;
     while i < events.len() {
         match &events[i] {
-            GameEvent::PlaceSettlement { player, corner }
+            GameEvent::PlaceSettlement { player }
                 if matches!(state.phase, Phase::PlaceSettlement) =>
             {
                 let pid = player_of_color(ctx.color_map, *player);
                 legal_set(&state, &mut legal_buf);
 
-                let nid_from_coords = corner
-                    .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
-                    .and_then(|c| ctx.corner_map.get(&c).copied());
-
-                let mut candidates: Vec<usize> = if let Some(nid) = nid_from_coords {
-                    let aid = action::settlement_id(nid).0 as usize;
-                    if legal_buf.contains(&aid) {
-                        vec![aid]
-                    } else {
-                        vec![]
-                    }
-                } else if let Some(pid) = pid {
+                let mut candidates: Vec<usize> = if let Some(pid) = pid {
                     ctx.dom_settlements[pid]
                         .iter()
                         .map(|&nid| action::settlement_id(nid).0 as usize)
@@ -828,29 +817,19 @@ fn try_replay(
                 }
             }
 
-            GameEvent::PlaceRoad { player, edge } if matches!(state.phase, Phase::PlaceRoad) => {
+            GameEvent::PlaceRoad { player } if matches!(state.phase, Phase::PlaceRoad) => {
                 legal_set(&state, &mut legal_buf);
 
-                let from_coords = edge
-                    .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
-                    .and_then(|e| ctx.edge_map.get(&e).copied());
-
-                let candidates: Vec<usize> = if let Some(eid) = from_coords {
-                    let aid = action::road_id(eid).0 as usize;
-                    if legal_buf.contains(&aid) {
-                        vec![aid]
+                let candidates: Vec<usize> =
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        ctx.dom_roads[pid]
+                            .iter()
+                            .map(|&eid| action::road_id(eid).0 as usize)
+                            .filter(|aid| legal_buf.contains(aid))
+                            .collect()
                     } else {
                         vec![]
-                    }
-                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    ctx.dom_roads[pid]
-                        .iter()
-                        .map(|&eid| action::road_id(eid).0 as usize)
-                        .filter(|aid| legal_buf.contains(aid))
-                        .collect()
-                } else {
-                    vec![]
-                };
+                    };
 
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
@@ -1132,13 +1111,9 @@ fn try_replay(
                 }
             }
 
-            GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
+            GameEvent::BuildRoad { player } | GameEvent::PlaceRoad { player } => {
                 advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 legal_set(&state, &mut legal_buf);
-
-                let from_coords = edge
-                    .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
-                    .and_then(|e| ctx.edge_map.get(&e).copied());
 
                 let verb = if matches!(&events[i], GameEvent::BuildRoad { .. }) {
                     "builds"
@@ -1146,22 +1121,16 @@ fn try_replay(
                     "places"
                 };
 
-                let candidates: Vec<usize> = if let Some(eid) = from_coords {
-                    let aid = action::road_id(eid).0 as usize;
-                    if legal_buf.contains(&aid) {
-                        vec![aid]
+                let candidates: Vec<usize> =
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        ctx.dom_roads[pid]
+                            .iter()
+                            .map(|&eid| action::road_id(eid).0 as usize)
+                            .filter(|aid| legal_buf.contains(aid))
+                            .collect()
                     } else {
                         vec![]
-                    }
-                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    ctx.dom_roads[pid]
-                        .iter()
-                        .map(|&eid| action::road_id(eid).0 as usize)
-                        .filter(|aid| legal_buf.contains(aid))
-                        .collect()
-                } else {
-                    vec![]
-                };
+                    };
 
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
@@ -1195,30 +1164,20 @@ fn try_replay(
                 }
             }
 
-            GameEvent::BuildSettlement { player, corner } => {
+            GameEvent::BuildSettlement { player } => {
                 advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 legal_set(&state, &mut legal_buf);
 
-                let from_coords = corner
-                    .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
-                    .and_then(|c| ctx.corner_map.get(&c).copied());
-
-                let mut candidates: Vec<usize> = if let Some(nid) = from_coords {
-                    let aid = action::settlement_id(nid).0 as usize;
-                    if legal_buf.contains(&aid) {
-                        vec![aid]
+                let mut candidates: Vec<usize> =
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        ctx.dom_settlements[pid]
+                            .iter()
+                            .map(|&nid| action::settlement_id(nid).0 as usize)
+                            .filter(|aid| legal_buf.contains(aid))
+                            .collect()
                     } else {
                         vec![]
-                    }
-                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    ctx.dom_settlements[pid]
-                        .iter()
-                        .map(|&nid| action::settlement_id(nid).0 as usize)
-                        .filter(|aid| legal_buf.contains(aid))
-                        .collect()
-                } else {
-                    vec![]
-                };
+                    };
 
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
@@ -1272,42 +1231,32 @@ fn try_replay(
                 }
             }
 
-            GameEvent::BuildCity { player, corner } => {
+            GameEvent::BuildCity { player } => {
                 advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 legal_set(&state, &mut legal_buf);
 
-                let from_coords = corner
-                    .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
-                    .and_then(|c| ctx.corner_map.get(&c).copied());
-
-                let mut candidates: Vec<usize> = if let Some(nid) = from_coords {
-                    let aid = action::city_id(nid).0 as usize;
-                    if legal_buf.contains(&aid) {
-                        vec![aid]
+                let mut candidates: Vec<usize> =
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        ctx.dom
+                            .cities
+                            .iter()
+                            .filter_map(|&(color, x, y, z)| {
+                                if player_of_color(ctx.color_map, color) != Some(pid) {
+                                    return None;
+                                }
+                                let mapped = ctx.mapper.map_corner(x, y, z);
+                                let &nid = ctx.corner_map.get(&mapped)?;
+                                let aid = action::city_id(nid).0 as usize;
+                                if legal_buf.contains(&aid) {
+                                    Some(aid)
+                                } else {
+                                    None
+                                }
+                            })
+                            .collect()
                     } else {
                         vec![]
-                    }
-                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    ctx.dom
-                        .cities
-                        .iter()
-                        .filter_map(|&(color, x, y, z)| {
-                            if player_of_color(ctx.color_map, color) != Some(pid) {
-                                return None;
-                            }
-                            let mapped = ctx.mapper.map_corner(x, y, z);
-                            let &nid = ctx.corner_map.get(&mapped)?;
-                            let aid = action::city_id(nid).0 as usize;
-                            if legal_buf.contains(&aid) {
-                                Some(aid)
-                            } else {
-                                None
-                            }
-                        })
-                        .collect()
-                } else {
-                    vec![]
-                };
+                    };
 
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
@@ -1862,10 +1811,7 @@ mod tests {
                 player: 1,
                 resources: ResourceArray::new(0, 0, 0, 1, 0),
             },
-            GameEvent::BuildSettlement {
-                player: 1,
-                corner: None,
-            },
+            GameEvent::BuildSettlement { player: 1 },
             // After build — should NOT be collected.
             GameEvent::Roll {
                 player: 5,

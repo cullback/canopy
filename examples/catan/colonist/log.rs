@@ -45,41 +45,6 @@ fn cards_to_resources(cards: &[serde_json::Value]) -> ResourceArray {
     arr
 }
 
-/// Try to extract a corner coordinate from a log entry's text.
-/// Colonist may use field names like "tileCorner", "corner", etc.
-fn parse_corner(text: &serde_json::Value) -> Option<CornerCoord> {
-    for field in ["tileCorner", "corner", "position"] {
-        if let Some(pos) = text.get(field) {
-            if let (Some(x), Some(y), Some(z)) = (
-                pos.get("x").and_then(|v| v.as_i64()),
-                pos.get("y").and_then(|v| v.as_i64()),
-                pos.get("z").and_then(|v| v.as_u64()),
-            ) {
-                return Some((x as i32, y as i32, z as u8));
-            }
-        }
-    }
-    // Try direct x, y, z on the text object itself (some log types)
-    // But only if pieceEnum indicates a corner piece
-    None
-}
-
-/// Try to extract an edge coordinate from a log entry's text.
-fn parse_edge(text: &serde_json::Value) -> Option<EdgeCoord> {
-    for field in ["tileEdge", "edge", "position"] {
-        if let Some(pos) = text.get(field) {
-            if let (Some(x), Some(y), Some(z)) = (
-                pos.get("x").and_then(|v| v.as_i64()),
-                pos.get("y").and_then(|v| v.as_i64()),
-                pos.get("z").and_then(|v| v.as_u64()),
-            ) {
-                return Some((x as i32, y as i32, z as u8));
-            }
-        }
-    }
-    None
-}
-
 /// Player color name for display.
 fn color_name(color: u8) -> &'static str {
     match color {
@@ -94,21 +59,14 @@ fn color_name(color: u8) -> &'static str {
 
 // -- Event types --------------------------------------------------------------
 
-/// Corner coordinate (x, y, z) from colonist.io.
-pub type CornerCoord = (i32, i32, u8);
-/// Edge coordinate (x, y, z) from colonist.io.
-pub type EdgeCoord = (i32, i32, u8);
-
 #[derive(Debug)]
 pub enum GameEvent {
     // Setup
     PlaceSettlement {
         player: u8,
-        corner: Option<CornerCoord>,
     },
     PlaceRoad {
         player: u8,
-        edge: Option<EdgeCoord>,
     },
     StartingResources {
         player: u8,
@@ -139,15 +97,12 @@ pub enum GameEvent {
     // Building
     BuildRoad {
         player: u8,
-        edge: Option<EdgeCoord>,
     },
     BuildSettlement {
         player: u8,
-        corner: Option<CornerCoord>,
     },
     BuildCity {
         player: u8,
-        corner: Option<CornerCoord>,
     },
 
     // Robber
@@ -276,17 +231,9 @@ fn parse_entry(
         // Placement (setup)
         4 => {
             let piece = text["pieceEnum"].as_u64()?;
-            let corner = parse_corner(text);
-            let edge = parse_edge(text);
             match piece {
-                0 => Some(GameEvent::PlaceRoad {
-                    player: player(),
-                    edge,
-                }),
-                2 => Some(GameEvent::PlaceSettlement {
-                    player: player(),
-                    corner,
-                }),
+                0 => Some(GameEvent::PlaceRoad { player: player() }),
+                2 => Some(GameEvent::PlaceSettlement { player: player() }),
                 _ => None,
             }
         }
@@ -294,21 +241,10 @@ fn parse_entry(
         // Build
         5 => {
             let piece = text["pieceEnum"].as_u64()?;
-            let corner = parse_corner(text);
-            let edge = parse_edge(text);
             match piece {
-                0 => Some(GameEvent::BuildRoad {
-                    player: player(),
-                    edge,
-                }),
-                2 => Some(GameEvent::BuildSettlement {
-                    player: player(),
-                    corner,
-                }),
-                3 => Some(GameEvent::BuildCity {
-                    player: player(),
-                    corner,
-                }),
+                0 => Some(GameEvent::BuildRoad { player: player() }),
+                2 => Some(GameEvent::BuildSettlement { player: player() }),
+                3 => Some(GameEvent::BuildCity { player: player() }),
                 _ => None,
             }
         }
@@ -566,41 +502,26 @@ pub fn print(events: &[GameEvent]) {
                 h.add(*resources);
                 println!("  {} got {}", color_name(*player), fmt_resources(resources));
             }
-            GameEvent::PlaceSettlement { player, corner } => {
-                let pos = corner
-                    .map(|(x, y, z)| format!(" at ({x},{y},{z})"))
-                    .unwrap_or_default();
-                println!("  {} placed settlement{pos}", color_name(*player));
+            GameEvent::PlaceSettlement { player } => {
+                println!("  {} placed settlement", color_name(*player));
             }
-            GameEvent::PlaceRoad { player, edge } => {
-                let pos = edge
-                    .map(|(x, y, z)| format!(" at ({x},{y},{z})"))
-                    .unwrap_or_default();
-                println!("  {} placed road{pos}", color_name(*player));
+            GameEvent::PlaceRoad { player } => {
+                println!("  {} placed road", color_name(*player));
             }
-            GameEvent::BuildRoad { player, edge } => {
+            GameEvent::BuildRoad { player } => {
                 let h = hands.entry(*player).or_default();
                 h.sub(crate::game::resource::ROAD_COST);
-                let pos = edge
-                    .map(|(x, y, z)| format!(" at ({x},{y},{z})"))
-                    .unwrap_or_default();
-                println!("  {} built road{pos}", color_name(*player));
+                println!("  {} built road", color_name(*player));
             }
-            GameEvent::BuildSettlement { player, corner, .. } => {
+            GameEvent::BuildSettlement { player } => {
                 let h = hands.entry(*player).or_default();
                 h.sub(crate::game::resource::SETTLEMENT_COST);
-                let pos = corner
-                    .map(|(x, y, z)| format!(" at ({x},{y},{z})"))
-                    .unwrap_or_default();
-                println!("  {} built settlement{pos}", color_name(*player));
+                println!("  {} built settlement", color_name(*player));
             }
-            GameEvent::BuildCity { player, corner, .. } => {
+            GameEvent::BuildCity { player } => {
                 let h = hands.entry(*player).or_default();
                 h.sub(crate::game::resource::CITY_COST);
-                let pos = corner
-                    .map(|(x, y, z)| format!(" at ({x},{y},{z})"))
-                    .unwrap_or_default();
-                println!("  {} built city{pos}", color_name(*player));
+                println!("  {} built city", color_name(*player));
             }
             GameEvent::BuyDevCard { player } => {
                 let h = hands.entry(*player).or_default();
