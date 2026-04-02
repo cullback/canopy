@@ -18,7 +18,6 @@ use crate::game::dev_card::DevCardKind;
 use crate::game::dice::{BalancedDice, Dice};
 use crate::game::state::Phase;
 use crate::presenter::CatanPresenter;
-use canopy::player::Player;
 
 type WsStream = WebSocketStream<MaybeTlsStream<TcpStream>>;
 
@@ -225,7 +224,6 @@ async fn extract_game_data(ws: &mut WsStream) -> Result<GameData, String> {
     let result = try_evaluate(ws, EXTRACT_LOG_JS).await?;
     let json_str = result.as_str().unwrap_or("[]");
     let entries: Vec<serde_json::Value> = serde_json::from_str(json_str).unwrap_or_default();
-    eprintln!("{} log entries", entries.len());
     let events = log::parse(&entries);
 
     // Extract board state
@@ -242,13 +240,6 @@ async fn extract_game_data(ws: &mut WsStream) -> Result<GameData, String> {
     let cards_json = try_evaluate(ws, board::EXTRACT_CARDS_JS).await?;
     let cards_str = cards_json.as_str().unwrap_or("{}");
     let dcs = parse_dev_card_state(cards_str);
-    if !dcs.cards.is_empty() {
-        eprintln!(
-            "extracted {} dev cards from React state (bought this turn: {})",
-            dcs.cards.len(),
-            dcs.bought_this_turn.len(),
-        );
-    }
 
     // Extract player names, local player identity, current turn, dice, robber.
     let live_json = try_evaluate(ws, board::EXTRACT_LIVE_JS).await?;
@@ -424,25 +415,6 @@ fn apply_live_state(
         changed = true;
     }
 
-    // Diagnostic log.
-    if state.setup_count >= 4 {
-        let cp = state.current_player;
-        let p = &state.players[cp];
-        eprintln!(
-            "live: cp={cp:?} phase={:?} colonist:turnState={} actionState={}",
-            state.phase, data.turn_state, data.action_state,
-        );
-        if p.hidden_dev_cards > 0 || p.has_played_dev_card_this_turn {
-            eprintln!(
-                "  dev: knights={} bought={} played={} hidden={}",
-                p.dev_cards[crate::game::dev_card::DevCardKind::Knight],
-                p.dev_cards_bought_this_turn[crate::game::dev_card::DevCardKind::Knight],
-                p.has_played_dev_card_this_turn,
-                p.hidden_dev_cards,
-            );
-        }
-    }
-
     changed
 }
 
@@ -611,10 +583,6 @@ impl ColonistPollState {
         };
 
         let total_events = poll.events.len();
-        eprintln!(
-            "poll ok: {total_events} events (committed {})",
-            self.committed_event_count
-        );
 
         // --- Mutate committed_state (single copy, single place) ---
 
@@ -1051,7 +1019,7 @@ pub fn run_serve(
     }
 
     let mapper = board::CoordMapper::detect(&data.board.tiles);
-    let mut timeline = state::build_timeline(&data.board, &data.events, &mapper);
+    let mut timeline = state::build_timeline(&data.board, &data.events, &mapper, data.robber_hex);
     // Derive color → Player mapping from the event log (first to act = P1).
     let mut color_map = state::discover_colors(&data.events);
     for &(color, _) in &data.player_names {

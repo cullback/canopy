@@ -49,6 +49,7 @@ pub fn build_timeline(
     board: &BoardData,
     events: &[GameEvent],
     mapper: &CoordMapper,
+    live_robber_hex: (i32, i32),
 ) -> Vec<TimelineEntry> {
     let (terrains, numbers, port_resources, port_specs) = board::to_layout(board, mapper);
     let topology = Arc::new(Topology::from_layout_with_ports(
@@ -61,45 +62,22 @@ pub fn build_timeline(
     let corner_map = board::build_corner_map(&topology);
     let edge_map = board::build_edge_map(&topology);
 
-    if let Some(timeline) = replay_search(
-        topology.clone(),
+    // Map live robber hex to canonical tile index.
+    let live_robber_tile = mapper
+        .tile_index(live_robber_hex.0, live_robber_hex.1)
+        .map(|i| i as u8);
+
+    replay_search(
+        topology,
         board,
         events,
         &color_map,
         &corner_map,
         &edge_map,
         mapper,
-    ) {
-        return timeline;
-    }
-
-    // Strict search failed (likely a coordinate mapping edge case).
-    // Retry with Stole constraints relaxed — apply steals directly
-    // instead of backtracking on adjacency mismatches.
-    eprintln!("replay_search: retrying with relaxed steal constraints");
-    let mut ctx2 = ReplayCtx::from_buildings(
-        board::extract_buildings(board, mapper),
-        &color_map,
-        &corner_map,
-        &edge_map,
-        mapper,
-    );
-    // Keep steal_tiles for candidate ordering but clear known_indices
-    // so no Stole event triggers backtracking.
-    let dev_deck2 = DevCardDeck::new();
-    let dice2 = Dice::Balanced(BalancedDice::new());
-    let state2 = GameState::new(topology.clone(), dev_deck2, dice2);
-    let (steal_tiles, _) = precompute_steal_tiles(events, &color_map, &state2.topology, &ctx2);
-    ctx2.steal_tiles = steal_tiles;
-
-    let timeline2 = vec![TimelineEntry {
-        label: "Game start".into(),
-        state: state2.clone(),
-    }];
-
-    try_replay(state2, events, 0, &ctx2, timeline2, Vec::new())
-        .expect("replay_search: failed even with relaxed constraints")
-        .1
+        live_robber_tile,
+    )
+    .expect("replay_search: no valid path found")
 }
 
 /// Discover the first two unique player colors from the log, mapping them to
@@ -461,6 +439,9 @@ pub(crate) struct ReplayCtx<'a> {
     pub max_calls: usize,
     /// Shared call counter.
     pub call_count: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    /// Deepest event index reached before backtracking, and reason.
+    pub max_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    pub max_depth_reason: std::sync::Arc<std::sync::Mutex<String>>,
 }
 
 /// Replay new events onto an existing state using engine actions.
@@ -528,6 +509,8 @@ impl<'a> ReplayCtx<'a> {
             known_steal_indices: Vec::new(),
             max_calls: 0,
             call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            max_depth_reason: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
         }
     }
 }
@@ -638,64 +621,50 @@ fn replay_search(
     corner_map: &HashMap<(i32, i32, u8), NodeId>,
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
     mapper: &CoordMapper,
+    live_robber_tile: Option<u8>,
 ) -> Option<Vec<TimelineEntry>> {
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
     let state = GameState::new(topology, dev_deck, dice);
 
-    let dom = board::extract_buildings(board, mapper);
+    let mut dom = board::extract_buildings(board, mapper);
+    // Override stale board robber with live robber position.
+    if let Some(idx) = live_robber_tile {
+        dom.robber_tile_index = Some(idx);
+    }
     let mut ctx = ReplayCtx::from_buildings(dom, color_map, corner_map, edge_map, mapper);
     let (steal_tiles, known_steal_indices) =
         precompute_steal_tiles(events, color_map, &state.topology, &ctx);
     ctx.steal_tiles = steal_tiles;
     ctx.known_steal_indices = known_steal_indices;
-    ctx.max_calls = 100_000; // limit strict search
-
-    // Dump search space.
-    eprintln!(
-        "  search space: P1 settle={} city={} road={}, P2 settle={} city={} road={}",
-        ctx.dom_settlements[Player::One].len(),
-        ctx.dom
-            .cities
-            .iter()
-            .filter(|c| player_of_color(color_map, c.0) == Some(Player::One))
-            .count(),
-        ctx.dom_roads[Player::One].len(),
-        ctx.dom_settlements[Player::Two].len(),
-        ctx.dom
-            .cities
-            .iter()
-            .filter(|c| player_of_color(color_map, c.0) == Some(Player::Two))
-            .count(),
-        ctx.dom_roads[Player::Two].len(),
-    );
-    eprintln!(
-        "  steal_tiles: P1={:?} P2={:?} known_indices={:?}",
-        ctx.steal_tiles[Player::One]
-            .iter()
-            .map(|t| t.0)
-            .collect::<Vec<_>>(),
-        ctx.steal_tiles[Player::Two]
-            .iter()
-            .map(|t| t.0)
-            .collect::<Vec<_>>(),
-        ctx.known_steal_indices,
-    );
+    ctx.max_calls = 5_000_000;
 
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),
         state: state.clone(),
     }];
 
-    let (_final_state, entries, _actions) =
-        try_replay(state, events, 0, &ctx, timeline, Vec::new())?;
-    eprintln!("replay_search: {} timeline entries", entries.len());
-    Some(entries)
+    let result = try_replay(state, events, 0, &ctx, timeline, Vec::new());
+    let calls = ctx.call_count.load(std::sync::atomic::Ordering::Relaxed);
+    let depth = ctx.max_depth.load(std::sync::atomic::Ordering::Relaxed);
+    let reason = ctx.max_depth_reason.lock().unwrap().clone();
+    match &result {
+        Some((_, entries, _)) => eprintln!(
+            "replay_search: OK — {} entries, {} calls",
+            entries.len(),
+            calls
+        ),
+        None => eprintln!(
+            "replay_search: FAILED after {} calls (max depth e{}/{}: {})",
+            calls,
+            depth,
+            events.len(),
+            reason
+        ),
+    }
+    result.map(|(_, entries, _)| entries)
 }
 
-/// Recursive replay: process events from `idx`, branching at ambiguous points.
-/// Returns `None` on contradiction (GotResources mismatch, no valid candidate).
-/// On success returns (final_state, timeline_entries, walk_actions).
 fn try_replay(
     mut state: GameState,
     events: &[GameEvent],
@@ -707,58 +676,83 @@ fn try_replay(
     use crate::game::action::{self, END_TURN, ROLL};
     use crate::game::resource::ALL_RESOURCES;
 
-    // Check call limit.
     if ctx.max_calls > 0 {
         use std::sync::atomic::Ordering;
         let n = ctx.call_count.fetch_add(1, Ordering::Relaxed);
         if n > ctx.max_calls {
             return None;
         }
+        if n % 100_000 == 0 && n > 0 {
+            eprintln!("  try_replay: {}K calls", n / 1000);
+        }
     }
 
-    // Ensure current_player matches the event's player. Pre-roll actions
-    // (Knight, etc.) from the next player arrive before their Roll event,
-    // so we need to inject END_TURN when we see a different player acting.
-    let ensure_player = |state: &mut GameState, actions: &mut Vec<usize>, player: u8| {
-        if let Some(pid) = player_of_color(ctx.color_map, player) {
-            if state.current_player != pid && matches!(state.phase, Phase::Main) {
-                actions.push(END_TURN as usize);
-                state.apply_action(END_TURN as usize);
-            }
+    let backtrack = |event_idx: usize, reason: &str| {
+        use std::sync::atomic::Ordering;
+        let prev = ctx.max_depth.fetch_max(event_idx, Ordering::Relaxed);
+        if event_idx > prev {
+            *ctx.max_depth_reason.lock().unwrap() = reason.to_string();
         }
     };
+
+    let mut legal_buf = Vec::new();
+
+    let legal_set = |state: &GameState, buf: &mut Vec<usize>| {
+        state.legal_actions(buf);
+    };
+
+    let advance_to_player =
+        |state: &mut GameState, actions: &mut Vec<usize>, color: u8, buf: &mut Vec<usize>| {
+            let Some(pid) = player_of_color(ctx.color_map, color) else {
+                return;
+            };
+            if state.current_player != pid {
+                legal_set(state, buf);
+                if buf.contains(&(END_TURN as usize)) {
+                    actions.push(END_TURN as usize);
+                    state.apply_action(END_TURN as usize);
+                }
+            }
+            if matches!(state.phase, Phase::PreRoll) {
+                legal_set(state, buf);
+                if buf.contains(&(ROLL as usize)) {
+                    // Don't inject ROLL here — only Roll events do that.
+                }
+            }
+        };
 
     let mut i = idx;
     while i < events.len() {
         match &events[i] {
-            // -- Setup placements (with backtracking) ----------------------
             GameEvent::PlaceSettlement { player, corner }
                 if matches!(state.phase, Phase::PlaceSettlement) =>
             {
                 let pid = player_of_color(ctx.color_map, *player);
+                legal_set(&state, &mut legal_buf);
+
                 let nid_from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
                     .and_then(|c| ctx.corner_map.get(&c).copied());
 
-                let mut candidates: Vec<NodeId> = if let Some(nid) = nid_from_coords {
-                    vec![nid]
+                let mut candidates: Vec<usize> = if let Some(nid) = nid_from_coords {
+                    let aid = action::settlement_id(nid).0 as usize;
+                    if legal_buf.contains(&aid) {
+                        vec![aid]
+                    } else {
+                        vec![]
+                    }
                 } else if let Some(pid) = pid {
                     ctx.dom_settlements[pid]
                         .iter()
-                        .filter(|&&nid| {
-                            state.boards[pid].settlements & (1u64 << nid.0) == 0
-                                && state.boards[pid].cities & (1u64 << nid.0) == 0
-                        })
-                        .copied()
+                        .map(|&nid| action::settlement_id(nid).0 as usize)
+                        .filter(|aid| legal_buf.contains(aid))
                         .collect()
                 } else {
                     vec![]
                 };
 
-                // Filter 2nd settlements by StartingResources.
                 let setup_after = state.setup_count + 1;
-                let is_second = setup_after == 3 || setup_after == 4;
-                if is_second {
+                if setup_after == 3 || setup_after == 4 {
                     let starting = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::StartingResources {
                             player: p,
@@ -767,7 +761,8 @@ fn try_replay(
                         _ => None,
                     });
                     if let Some(expected) = starting {
-                        candidates.retain(|&nid| {
+                        candidates.retain(|&aid| {
+                            let nid = NodeId(aid as u8);
                             let node = &state.topology.nodes[nid.0 as usize];
                             let mut would_give = ResourceArray::default();
                             for &tid in &node.adjacent_tiles {
@@ -782,8 +777,8 @@ fn try_replay(
                 }
 
                 if candidates.len() == 1 {
-                    actions.push(candidates[0].0 as usize);
-                    state.apply_action(candidates[0].0 as usize);
+                    actions.push(candidates[0]);
+                    state.apply_action(candidates[0]);
                     timeline.push(TimelineEntry {
                         label: format!(
                             "{} places settlement",
@@ -792,19 +787,26 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if candidates.is_empty() {
+                    backtrack(i, "setup settle: 0 candidates");
                     return None;
                 } else {
                     if let Some(pid) = pid {
+                        let mut node_candidates: Vec<NodeId> =
+                            candidates.iter().map(|&aid| NodeId(aid as u8)).collect();
                         sort_by_steal_coverage(
-                            &mut candidates,
+                            &mut node_candidates,
                             pid,
                             &state.topology,
                             &ctx.steal_tiles,
                         );
+                        candidates = node_candidates
+                            .iter()
+                            .map(|nid| action::settlement_id(*nid).0 as usize)
+                            .collect();
                     }
-                    for &nid in &candidates {
+                    for &aid in &candidates {
                         let mut trial = state.clone();
-                        trial.apply_action(nid.0 as usize);
+                        trial.apply_action(aid);
                         let mut trial_tl = timeline.clone();
                         trial_tl.push(TimelineEntry {
                             label: format!(
@@ -813,57 +815,107 @@ fn try_replay(
                             ),
                             state: trial.clone(),
                         });
+                        let mut trial_actions = actions.clone();
+                        trial_actions.push(aid);
                         if let Some(result) =
-                            try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                            try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
                         {
                             return Some(result);
                         }
                     }
-                    return None; // all branches failed
+                    backtrack(i, "setup settle: all branches failed");
+                    return None;
                 }
             }
 
             GameEvent::PlaceRoad { player, edge } if matches!(state.phase, Phase::PlaceRoad) => {
-                let eid = edge
+                legal_set(&state, &mut legal_buf);
+
+                let from_coords = edge
                     .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
-                    .and_then(|e| ctx.edge_map.get(&e).copied())
-                    .or_else(|| {
-                        let pid = player_of_color(ctx.color_map, *player)?;
-                        ctx.dom_roads[pid]
-                            .iter()
-                            .find(|&&eid| {
-                                state.boards[pid].road_network.roads & (1u128 << eid.0) == 0
-                            })
-                            .copied()
-                    });
-                if let Some(eid) = eid {
-                    actions.push((54 + eid.0) as usize);
-                    state.apply_action((54 + eid.0) as usize);
+                    .and_then(|e| ctx.edge_map.get(&e).copied());
+
+                let candidates: Vec<usize> = if let Some(eid) = from_coords {
+                    let aid = action::road_id(eid).0 as usize;
+                    if legal_buf.contains(&aid) {
+                        vec![aid]
+                    } else {
+                        vec![]
+                    }
+                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    ctx.dom_roads[pid]
+                        .iter()
+                        .map(|&eid| action::road_id(eid).0 as usize)
+                        .filter(|aid| legal_buf.contains(aid))
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                if candidates.len() == 1 {
+                    actions.push(candidates[0]);
+                    state.apply_action(candidates[0]);
                     timeline.push(TimelineEntry {
                         label: format!("{} places road", player_label(*player, ctx.color_map)),
                         state: state.clone(),
                     });
+                } else if candidates.is_empty() {
+                    backtrack(i, "setup road: 0 candidates");
+                    return None;
+                } else {
+                    for &aid in &candidates {
+                        let mut trial = state.clone();
+                        trial.apply_action(aid);
+                        let mut trial_tl = timeline.clone();
+                        trial_tl.push(TimelineEntry {
+                            label: format!("{} places road", player_label(*player, ctx.color_map)),
+                            state: trial.clone(),
+                        });
+                        let mut trial_actions = actions.clone();
+                        trial_actions.push(aid);
+                        if let Some(result) =
+                            try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                        {
+                            return Some(result);
+                        }
+                    }
+                    backtrack(i, "setup road: all branches failed");
+                    return None;
                 }
             }
 
             GameEvent::StartingResources { player, resources } => {
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     if state.players[pid].hand != *resources {
-                        return None; // contradiction
+                        backtrack(i, "StartingResources mismatch");
+                        return None;
                     }
                 }
             }
 
-            // -- Rolls with validation -------------------------------------
             GameEvent::Roll { player, d1, d2 } => {
-                if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                    ensure_player(&mut state, &mut actions, *player);
-                    if matches!(state.phase, Phase::PreRoll) {
-                        actions.push(ROLL as usize);
-                        state.apply_action(ROLL as usize);
+                if let Some(_pid) = player_of_color(ctx.color_map, *player) {
+                    advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
+
+                    // If still in Main (same player's turn), inject END_TURN
+                    // to transition to PreRoll for the next roll.
+                    if matches!(state.phase, Phase::Main) {
+                        legal_set(&state, &mut legal_buf);
+                        if legal_buf.contains(&(END_TURN as usize)) {
+                            actions.push(END_TURN as usize);
+                            state.apply_action(END_TURN as usize);
+                        }
                     }
 
-                    let hands_before: [ResourceArray; 2] = [
+                    if matches!(state.phase, Phase::PreRoll) {
+                        legal_set(&state, &mut legal_buf);
+                        if legal_buf.contains(&(ROLL as usize)) {
+                            actions.push(ROLL as usize);
+                            state.apply_action(ROLL as usize);
+                        }
+                    }
+
+                    let hands_before = [
                         state.players[Player::One].hand,
                         state.players[Player::Two].hand,
                     ];
@@ -904,12 +956,15 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
-                                return None; // resource mismatch → backtrack
+                                backtrack(
+                                    i,
+                                    &format!("roll {} dist mismatch P{}", total, p as usize + 1),
+                                );
+                                return None;
                             }
                         }
                     }
 
-                    let _ = pid;
                     let mut label =
                         format!("{} rolls {total}", player_label(*player, ctx.color_map));
                     let p1 = format_resources(log_gains[0]);
@@ -927,63 +982,67 @@ fn try_replay(
                 }
             }
 
-            GameEvent::GotResources { .. } | GameEvent::TileBlocked { .. } => {}
-            GameEvent::RolledSeven => {}
+            GameEvent::GotResources { .. }
+            | GameEvent::TileBlocked { .. }
+            | GameEvent::RolledSeven => {}
 
-            // -- Discard ---------------------------------------------------
             GameEvent::Discard { player, resources } => {
                 if player_of_color(ctx.color_map, *player).is_some() {
                     for &res in &ALL_RESOURCES {
                         for _ in 0..resources[res] {
-                            actions.push(action::discard_id(res).0 as usize);
-                            state.apply_action(action::discard_id(res).0 as usize);
+                            let aid = action::discard_id(res).0 as usize;
+                            legal_set(&state, &mut legal_buf);
+                            if !legal_buf.contains(&aid) {
+                                backtrack(i, "discard: action not legal");
+                                return None;
+                            }
+                            actions.push(aid);
+                            state.apply_action(aid);
                         }
                     }
                 }
             }
 
-            // -- Robber flow (with backtracking) ---------------------------
             GameEvent::MoveRobber { player } => {
                 if player_of_color(ctx.color_map, *player).is_some()
                     && matches!(state.phase, Phase::MoveRobber)
                 {
-                    // If this is the last MoveRobber in the events, the DOM
-                    // robber position is authoritative — use it directly.
+                    legal_set(&state, &mut legal_buf);
+                    let robber_actions: Vec<usize> = legal_buf
+                        .iter()
+                        .filter(|&&a| {
+                            a >= action::ROBBER_START as usize && a < action::ROBBER_END as usize
+                        })
+                        .copied()
+                        .collect();
+
                     let is_last_robber_move = !events[i + 1..]
                         .iter()
                         .any(|e| matches!(e, GameEvent::MoveRobber { .. }));
+
                     if is_last_robber_move {
                         if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
-                            if tile != state.robber {
-                                actions.push(action::robber_id(tile).0 as usize);
-                                state.apply_action(action::robber_id(tile).0 as usize);
-                            } else {
-                                // Same tile (shouldn't happen in standard rules).
-                                state.phase = if state.pre_roll {
-                                    Phase::PreRoll
-                                } else {
-                                    Phase::Main
-                                };
+                            let aid = action::robber_id(tile).0 as usize;
+                            if robber_actions.contains(&aid) {
+                                actions.push(aid);
+                                state.apply_action(aid);
+                                i += 1;
+                                continue;
                             }
-                            // Skip the search — handled by DOM.
-                            i += 1;
-                            continue;
                         }
                     }
 
-                    let mut candidates = all_robber_candidates(&state);
+                    let mut candidates = robber_actions;
                     let opp = state.current_player.opponent();
 
-                    // Filter by TileBlocked: if a subsequent roll shows
-                    // "resource (N) blocked by robber", the robber must be
-                    // on a tile with that terrain and dice number.
                     for e in &events[i + 1..] {
                         match e {
                             GameEvent::TileBlocked {
                                 dice_number,
                                 resource: Some(resource),
                             } => {
-                                candidates.retain(|&tile| {
+                                candidates.retain(|&aid| {
+                                    let tile = TileId((aid - action::ROBBER_START as usize) as u8);
                                     let t = &state.topology.tiles[tile.0 as usize];
                                     t.terrain.resource() == Some(*resource)
                                         && state.topology.dice_to_tiles[*dice_number as usize]
@@ -996,65 +1055,31 @@ fn try_replay(
                         }
                     }
 
-                    // Inverse constraint: if a roll after this MoveRobber
-                    // produces resources from a tile, the robber is NOT on
-                    // that tile. Scan all rolls until next MoveRobber.
-                    for e in &events[i + 1..] {
-                        match e {
-                            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => break,
-                            GameEvent::Roll { d1, d2, .. } => {
-                                let total = d1 + d2;
-                                if total != 7 {
-                                    // Any tile with this number that has buildings
-                                    // and produced resources is NOT the robber tile.
-                                    for &tid in &state.topology.dice_to_tiles[total as usize] {
-                                        let tile = &state.topology.tiles[tid.0 as usize];
-                                        if tile.terrain.resource().is_some() {
-                                            let mask =
-                                                state.topology.adj.tile_nodes[tid.0 as usize];
-                                            let all_buildings = state.player_buildings(Player::One)
-                                                | state.player_buildings(Player::Two);
-                                            if mask & all_buildings != 0 {
-                                                candidates.retain(|&c| c != tid);
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                            _ => {}
-                        }
-                    }
-
-                    // Peek for steal outcome: constrains whether the tile
-                    // has opponent buildings.
                     let steal_outcome = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::Stole { .. } => Some(true),
                         GameEvent::StoleNothing { .. } => Some(false),
-                        GameEvent::Roll { .. }
-                        | GameEvent::PlayedKnight { .. }
-                        | GameEvent::MoveRobber { .. } => None,
                         _ => None,
                     });
                     let opp_buildings = state.player_buildings(opp);
                     let opp_has_cards = state.players[opp].hand.total() > 0;
                     let friendly =
                         state.players[opp].building_vps < crate::game::FRIENDLY_ROBBER_VP;
-                    candidates.retain(|&tile| {
+                    candidates.retain(|&aid| {
+                        let tile = TileId((aid - action::ROBBER_START as usize) as u8);
                         let tile_mask = state.topology.adj.tile_nodes[tile.0 as usize];
                         let on_tile = (tile_mask & opp_buildings) != 0;
                         let can_steal = on_tile && opp_has_cards && !friendly;
                         match steal_outcome {
-                            Some(true) => can_steal,   // stole → must be stealable
-                            Some(false) => !can_steal, // stole nothing → not stealable
+                            Some(true) => can_steal,
+                            Some(false) => !can_steal,
                             None => true,
                         }
                     });
 
-                    // Pre-filter: check all non-7 rolls until the next event
-                    // that changes the board or robber position.
                     let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
                     if !check_rolls.is_empty() {
-                        candidates.retain(|&tile| {
+                        candidates.retain(|&aid| {
+                            let tile = TileId((aid - action::ROBBER_START as usize) as u8);
                             let mut trial = state.clone();
                             trial.robber = tile;
                             check_rolls
@@ -1064,77 +1089,53 @@ fn try_replay(
                     }
 
                     if candidates.len() == 1 {
-                        let aid = action::robber_id(candidates[0]).0 as usize;
-                        actions.push(aid);
-                        state.apply_action(aid);
+                        actions.push(candidates[0]);
+                        state.apply_action(candidates[0]);
                     } else if candidates.is_empty() {
-                        // No valid tile — an earlier robber placement was wrong.
-                        // Backtrack to try a different assignment.
+                        backtrack(i, "robber: 0 candidates");
                         return None;
                     } else {
-                        // Multiple candidates survive — branch and backtrack.
-                        for &tile in &candidates {
+                        for &aid in &candidates {
                             let mut trial = state.clone();
-                            trial.apply_action(action::robber_id(tile).0 as usize);
+                            trial.apply_action(aid);
                             let trial_tl = timeline.clone();
+                            let mut trial_actions = actions.clone();
+                            trial_actions.push(aid);
                             if let Some(result) =
-                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
+                                try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
                             {
                                 return Some(result);
                             }
                         }
-                        return None; // all robber branches failed
+                        backtrack(i, "robber: all branches failed");
+                        return None;
                     }
                 }
             }
 
-            GameEvent::Stole {
-                player,
-                victim,
-                resources,
-            } => {
+            GameEvent::Stole { resources, .. } => {
                 if matches!(state.phase, Phase::StealResolve) {
                     if let Some(idx) = ALL_RESOURCES.iter().position(|&r| resources[r] > 0) {
                         actions.push(idx);
                         state.apply_action(idx);
                     }
-                } else if ctx.known_steal_indices.contains(&i) {
-                    // Robber position is known but engine didn't enter
-                    // StealResolve → building placement is wrong. Backtrack.
-                    return None;
                 } else {
-                    // Robber position unknown for this steal. Apply directly
-                    // since we can't validate adjacency.
-                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                        state.players[pid].hand.add(*resources);
-                    }
-                    if let Some(vid) = player_of_color(ctx.color_map, *victim) {
-                        state.players[vid].hand.sub(*resources);
-                    }
-                }
-                // After steal, engine may set Phase::Roll for pre_roll knight.
-                // We want PreRoll so colonist events drive dice resolution.
-                if matches!(state.phase, Phase::Roll) {
-                    state.phase = Phase::PreRoll;
+                    backtrack(i, "Stole without StealResolve");
+                    return None;
                 }
             }
 
             GameEvent::StoleNothing { .. } | GameEvent::StoleUnknown { .. } => {
-                // Engine may have entered StealResolve (it thought opponent
-                // had cards + buildings on the tile). Force out.
                 if matches!(state.phase, Phase::StealResolve) {
-                    state.phase = if state.pre_roll {
-                        Phase::PreRoll
-                    } else {
-                        Phase::Main
-                    };
+                    backtrack(i, "StoleNothing in StealResolve");
+                    return None;
                 }
             }
 
-            // -- Post-setup builds -----------------------------------------
             GameEvent::BuildRoad { player, edge } | GameEvent::PlaceRoad { player, edge } => {
-                ensure_player(&mut state, &mut actions, *player);
-                let pid = player_of_color(ctx.color_map, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
+                legal_set(&state, &mut legal_buf);
+
                 let from_coords = edge
                     .map(|(x, y, z)| ctx.mapper.map_edge(x, y, z))
                     .and_then(|e| ctx.edge_map.get(&e).copied());
@@ -1145,230 +1146,255 @@ fn try_replay(
                     "places"
                 };
 
-                if let Some(eid) = from_coords {
+                let candidates: Vec<usize> = if let Some(eid) = from_coords {
                     let aid = action::road_id(eid).0 as usize;
-                    actions.push(aid);
-                    crate::game::apply_with_chance(&mut state, aid, None);
-                    let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
+                    if legal_buf.contains(&aid) {
+                        vec![aid]
+                    } else {
+                        vec![]
+                    }
+                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    ctx.dom_roads[pid]
+                        .iter()
+                        .map(|&eid| action::road_id(eid).0 as usize)
+                        .filter(|aid| legal_buf.contains(aid))
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                if candidates.len() == 1 {
+                    actions.push(candidates[0]);
+                    state.apply_action(candidates[0]);
                     timeline.push(TimelineEntry {
-                        label,
+                        label: format!("{} {verb} road", player_label(*player, ctx.color_map)),
                         state: state.clone(),
                     });
-                } else if let Some(p) = pid {
-                    let candidates: Vec<EdgeId> = ctx.dom_roads[p]
-                        .iter()
-                        .filter(|&&eid| state.boards[p].road_network.roads & (1u128 << eid.0) == 0)
-                        .copied()
-                        .collect();
-                    if candidates.len() == 1 {
-                        let aid = action::road_id(candidates[0]).0 as usize;
-                        actions.push(aid);
-                        crate::game::apply_with_chance(&mut state, aid, None);
-                        let label = format!("{} {verb} road", player_label(*player, ctx.color_map));
-                        timeline.push(TimelineEntry {
-                            label,
-                            state: state.clone(),
+                } else if candidates.len() > 1 {
+                    for &aid in &candidates {
+                        let mut trial = state.clone();
+                        trial.apply_action(aid);
+                        let mut trial_tl = timeline.clone();
+                        trial_tl.push(TimelineEntry {
+                            label: format!("{} {verb} road", player_label(*player, ctx.color_map)),
+                            state: trial.clone(),
                         });
-                    } else if candidates.is_empty() {
-                        return None;
-                    } else {
-                        for &eid in &candidates {
-                            let mut trial = state.clone();
-                            let aid = action::road_id(eid).0 as usize;
-                            crate::game::apply_with_chance(&mut trial, aid, None);
-                            let mut trial_tl = timeline.clone();
-                            trial_tl.push(TimelineEntry {
-                                label: format!(
-                                    "{} {verb} road",
-                                    player_label(*player, ctx.color_map)
-                                ),
-                                state: trial.clone(),
-                            });
-                            if let Some(result) =
-                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
-                            {
-                                return Some(result);
-                            }
+                        let mut trial_actions = actions.clone();
+                        trial_actions.push(aid);
+                        if let Some(result) =
+                            try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                        {
+                            return Some(result);
                         }
-                        return None;
                     }
+                    backtrack(i, "road: all branches failed");
+                    return None;
+                } else {
+                    backtrack(i, "road: 0 candidates");
+                    return None;
                 }
             }
 
             GameEvent::BuildSettlement { player, corner } => {
-                ensure_player(&mut state, &mut actions, *player);
-                let pid = player_of_color(ctx.color_map, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
+                legal_set(&state, &mut legal_buf);
+
                 let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
                     .and_then(|c| ctx.corner_map.get(&c).copied());
 
-                if let Some(nid) = from_coords {
+                let mut candidates: Vec<usize> = if let Some(nid) = from_coords {
                     let aid = action::settlement_id(nid).0 as usize;
-                    actions.push(aid);
-                    crate::game::apply_with_chance(&mut state, aid, None);
-                    let label =
-                        format!("{} builds settlement", player_label(*player, ctx.color_map));
+                    if legal_buf.contains(&aid) {
+                        vec![aid]
+                    } else {
+                        vec![]
+                    }
+                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    ctx.dom_settlements[pid]
+                        .iter()
+                        .map(|&nid| action::settlement_id(nid).0 as usize)
+                        .filter(|aid| legal_buf.contains(aid))
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                if candidates.len() == 1 {
+                    actions.push(candidates[0]);
+                    state.apply_action(candidates[0]);
                     timeline.push(TimelineEntry {
-                        label,
+                        label: format!(
+                            "{} builds settlement",
+                            player_label(*player, ctx.color_map)
+                        ),
                         state: state.clone(),
                     });
-                } else if let Some(p) = pid {
-                    // No coordinates — branch on unplaced DOM settlements.
-                    let mut candidates: Vec<NodeId> = ctx.dom_settlements[p]
-                        .iter()
-                        .filter(|&&nid| {
-                            state.boards[p].settlements & (1u64 << nid.0) == 0
-                                && state.boards[p].cities & (1u64 << nid.0) == 0
-                        })
-                        .copied()
-                        .collect();
-                    if candidates.len() == 1 {
-                        let aid = action::settlement_id(candidates[0]).0 as usize;
-                        actions.push(aid);
-                        crate::game::apply_with_chance(&mut state, aid, None);
-                        let label =
-                            format!("{} builds settlement", player_label(*player, ctx.color_map));
-                        timeline.push(TimelineEntry {
-                            label,
-                            state: state.clone(),
-                        });
-                    } else if candidates.is_empty() {
-                        return None;
-                    } else {
-                        if let Some(p) = pid {
-                            sort_by_steal_coverage(
-                                &mut candidates,
-                                p,
-                                &state.topology,
-                                &ctx.steal_tiles,
-                            );
-                        }
-                        for &nid in &candidates {
-                            let mut trial = state.clone();
-                            let aid = action::settlement_id(nid).0 as usize;
-                            crate::game::apply_with_chance(&mut trial, aid, None);
-                            let mut trial_tl = timeline.clone();
-                            trial_tl.push(TimelineEntry {
-                                label: format!(
-                                    "{} builds settlement",
-                                    player_label(*player, ctx.color_map)
-                                ),
-                                state: trial.clone(),
-                            });
-                            if let Some(result) =
-                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
-                            {
-                                return Some(result);
-                            }
-                        }
-                        return None;
+                } else if candidates.is_empty() {
+                    backtrack(i, "settle: 0 candidates");
+                    return None;
+                } else {
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        let mut node_candidates: Vec<NodeId> =
+                            candidates.iter().map(|&aid| NodeId(aid as u8)).collect();
+                        sort_by_steal_coverage(
+                            &mut node_candidates,
+                            pid,
+                            &state.topology,
+                            &ctx.steal_tiles,
+                        );
+                        candidates = node_candidates
+                            .iter()
+                            .map(|nid| action::settlement_id(*nid).0 as usize)
+                            .collect();
                     }
+                    for &aid in &candidates {
+                        let mut trial = state.clone();
+                        trial.apply_action(aid);
+                        let mut trial_tl = timeline.clone();
+                        trial_tl.push(TimelineEntry {
+                            label: format!(
+                                "{} builds settlement",
+                                player_label(*player, ctx.color_map)
+                            ),
+                            state: trial.clone(),
+                        });
+                        let mut trial_actions = actions.clone();
+                        trial_actions.push(aid);
+                        if let Some(result) =
+                            try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                        {
+                            return Some(result);
+                        }
+                    }
+                    backtrack(i, "settle: all branches failed");
+                    return None;
                 }
             }
 
             GameEvent::BuildCity { player, corner } => {
-                ensure_player(&mut state, &mut actions, *player);
-                let pid = player_of_color(ctx.color_map, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
+                legal_set(&state, &mut legal_buf);
+
                 let from_coords = corner
                     .map(|(x, y, z)| ctx.mapper.map_corner(x, y, z))
                     .and_then(|c| ctx.corner_map.get(&c).copied());
 
-                if let Some(nid) = from_coords {
+                let mut candidates: Vec<usize> = if let Some(nid) = from_coords {
                     let aid = action::city_id(nid).0 as usize;
-                    actions.push(aid);
-                    crate::game::apply_with_chance(&mut state, aid, None);
-                    let label = format!("{} builds city", player_label(*player, ctx.color_map));
-                    timeline.push(TimelineEntry {
-                        label,
-                        state: state.clone(),
-                    });
-                } else if let Some(p) = pid {
-                    let mut candidates: Vec<NodeId> = ctx
-                        .dom
+                    if legal_buf.contains(&aid) {
+                        vec![aid]
+                    } else {
+                        vec![]
+                    }
+                } else if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    ctx.dom
                         .cities
                         .iter()
                         .filter_map(|&(color, x, y, z)| {
-                            if player_of_color(ctx.color_map, color) != Some(p) {
+                            if player_of_color(ctx.color_map, color) != Some(pid) {
                                 return None;
                             }
                             let mapped = ctx.mapper.map_corner(x, y, z);
                             let &nid = ctx.corner_map.get(&mapped)?;
-                            if state.boards[p].cities & (1u64 << nid.0) == 0 {
-                                Some(nid)
+                            let aid = action::city_id(nid).0 as usize;
+                            if legal_buf.contains(&aid) {
+                                Some(aid)
                             } else {
                                 None
                             }
                         })
-                        .collect();
-                    if candidates.len() == 1 {
-                        let aid = action::city_id(candidates[0]).0 as usize;
-                        actions.push(aid);
-                        crate::game::apply_with_chance(&mut state, aid, None);
-                        let label = format!("{} builds city", player_label(*player, ctx.color_map));
-                        timeline.push(TimelineEntry {
-                            label,
-                            state: state.clone(),
+                        .collect()
+                } else {
+                    vec![]
+                };
+
+                if candidates.len() == 1 {
+                    actions.push(candidates[0]);
+                    state.apply_action(candidates[0]);
+                    timeline.push(TimelineEntry {
+                        label: format!("{} builds city", player_label(*player, ctx.color_map)),
+                        state: state.clone(),
+                    });
+                } else if candidates.is_empty() {
+                    backtrack(i, "city: 0 candidates");
+                    return None;
+                } else {
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        let mut node_candidates: Vec<NodeId> = candidates
+                            .iter()
+                            .map(|&aid| NodeId((aid - action::CITY_START as usize) as u8))
+                            .collect();
+                        sort_by_steal_coverage(
+                            &mut node_candidates,
+                            pid,
+                            &state.topology,
+                            &ctx.steal_tiles,
+                        );
+                        candidates = node_candidates
+                            .iter()
+                            .map(|nid| action::city_id(*nid).0 as usize)
+                            .collect();
+                    }
+                    for &aid in &candidates {
+                        let mut trial = state.clone();
+                        trial.apply_action(aid);
+                        let mut trial_tl = timeline.clone();
+                        trial_tl.push(TimelineEntry {
+                            label: format!("{} builds city", player_label(*player, ctx.color_map)),
+                            state: trial.clone(),
                         });
-                    } else if candidates.is_empty() {
-                        return None;
-                    } else {
-                        if let Some(p) = pid {
-                            sort_by_steal_coverage(
-                                &mut candidates,
-                                p,
-                                &state.topology,
-                                &ctx.steal_tiles,
-                            );
+                        let mut trial_actions = actions.clone();
+                        trial_actions.push(aid);
+                        if let Some(result) =
+                            try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                        {
+                            return Some(result);
                         }
-                        for &nid in &candidates {
-                            let mut trial = state.clone();
-                            let aid = action::city_id(nid).0 as usize;
-                            crate::game::apply_with_chance(&mut trial, aid, None);
-                            let mut trial_tl = timeline.clone();
-                            trial_tl.push(TimelineEntry {
-                                label: format!(
-                                    "{} builds city",
-                                    player_label(*player, ctx.color_map)
-                                ),
-                                state: trial.clone(),
-                            });
-                            if let Some(result) =
-                                try_replay(trial, events, i + 1, ctx, trial_tl, actions.clone())
-                            {
-                                return Some(result);
-                            }
-                        }
-                        return None;
+                    }
+                    backtrack(i, "city: all branches failed");
+                    return None;
+                }
+            }
+
+            GameEvent::BuyDevCard { player } => {
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
+                if player_of_color(ctx.color_map, *player).is_some() {
+                    legal_set(&state, &mut legal_buf);
+                    if legal_buf.contains(&(action::BUY_DEV_CARD as usize)) {
+                        crate::game::apply_hidden_dev_card_buy(&mut state);
                     }
                 }
             }
 
-            // -- Dev cards -------------------------------------------------
-            GameEvent::BuyDevCard { player } => {
-                ensure_player(&mut state, &mut actions, *player);
-                if player_of_color(ctx.color_map, *player).is_some() {
-                    // hidden dev card buy has no single action ID
-                    crate::game::apply_hidden_dev_card_buy(&mut state);
-                }
-            }
             GameEvent::PlayedKnight { player } => {
-                ensure_player(&mut state, &mut actions, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     reveal_hidden_card(&mut state, pid, DevCardKind::Knight);
-                    actions.push(action::PLAY_KNIGHT as usize);
-                    state.apply_action(action::PLAY_KNIGHT as usize);
+                    let aid = action::PLAY_KNIGHT as usize;
+                    legal_set(&state, &mut legal_buf);
+                    if legal_buf.contains(&aid) {
+                        actions.push(aid);
+                        state.apply_action(aid);
+                    }
                 }
             }
+
             GameEvent::PlayedRoadBuilding { player } => {
-                ensure_player(&mut state, &mut actions, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     reveal_hidden_card(&mut state, pid, DevCardKind::RoadBuilding);
-                    actions.push(action::PLAY_ROAD_BUILDING as usize);
-                    state.apply_action(action::PLAY_ROAD_BUILDING as usize);
+                    let aid = action::PLAY_ROAD_BUILDING as usize;
+                    legal_set(&state, &mut legal_buf);
+                    if legal_buf.contains(&aid) {
+                        actions.push(aid);
+                        state.apply_action(aid);
+                    }
                 }
             }
+
             GameEvent::PlayedMonopoly { player } => {
-                ensure_player(&mut state, &mut actions, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     reveal_hidden_card(&mut state, pid, DevCardKind::Monopoly);
                     let resource = events[i + 1..].iter().find_map(|e| match e {
@@ -1376,14 +1402,19 @@ fn try_replay(
                         _ => None,
                     });
                     if let Some(res) = resource {
-                        actions.push(action::monopoly_id(res).0 as usize);
-                        state.apply_action(action::monopoly_id(res).0 as usize);
+                        let aid = action::monopoly_id(res).0 as usize;
+                        legal_set(&state, &mut legal_buf);
+                        if legal_buf.contains(&aid) {
+                            actions.push(aid);
+                            state.apply_action(aid);
+                        }
                     }
                 }
             }
             GameEvent::MonopolyResult { .. } => {}
+
             GameEvent::PlayedYearOfPlenty { player } => {
-                ensure_player(&mut state, &mut actions, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     reveal_hidden_card(&mut state, pid, DevCardKind::YearOfPlenty);
                     let gain = events[i + 1..].iter().find_map(|e| match e {
@@ -1403,8 +1434,12 @@ fn try_replay(
                             }
                         }
                         if let (Some(a), Some(b)) = (r1, r2) {
-                            actions.push(action::yop_id(a, b).0 as usize);
-                            state.apply_action(action::yop_id(a, b).0 as usize);
+                            let aid = action::yop_id(a, b).0 as usize;
+                            legal_set(&state, &mut legal_buf);
+                            if legal_buf.contains(&aid) {
+                                actions.push(aid);
+                                state.apply_action(aid);
+                            }
                         }
                     }
                 }
@@ -1412,18 +1447,13 @@ fn try_replay(
             GameEvent::YearOfPlentyGain { .. } => {}
             GameEvent::PlayedDevCard { .. } => {}
 
-            // -- Trades ----------------------------------------------------
             GameEvent::BankTrade {
                 player,
                 given,
                 received,
             } => {
-                ensure_player(&mut state, &mut actions, *player);
+                advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
                 if player_of_color(ctx.color_map, *player).is_some() {
-                    // Decompose multi-resource trades into individual
-                    // maritime actions. A combined event like "L L L L B B → G G"
-                    // is two trades: 4L→1G + 2B→1G at different ratios.
-                    let hand_before = state.players[state.current_player].hand;
                     let mut remaining = *given;
                     for &recv in &ALL_RESOURCES {
                         for _ in 0..received[recv] {
@@ -1436,29 +1466,18 @@ fn try_replay(
                                 if remaining[give] >= ratio {
                                     remaining[give] -= ratio;
                                     let aid = action::maritime_id(give, recv).0 as usize;
-                                    actions.push(aid);
-                                    crate::game::apply_with_chance(&mut state, aid, None);
+                                    legal_set(&state, &mut legal_buf);
+                                    if legal_buf.contains(&aid) {
+                                        actions.push(aid);
+                                        state.apply_action(aid);
+                                    }
                                     break;
                                 }
                             }
                         }
                     }
-                    // Verify: hand should have decreased by given and
-                    // increased by received.
-                    let mut expected = hand_before;
-                    expected.sub(*given);
-                    expected.add(*received);
-                    if state.players[state.current_player].hand != expected {
-                        eprintln!(
-                            "  bank trade mismatch[{i}]: player={player} \
-                             ratios={:?} expected={expected:?} actual={:?}",
-                            state.players[state.current_player].trade_ratios,
-                            state.players[state.current_player].hand,
-                        );
-                    }
-                    let label = format!("{} bank trade", player_label(*player, ctx.color_map));
                     timeline.push(TimelineEntry {
-                        label,
+                        label: format!("{} bank trade", player_label(*player, ctx.color_map)),
                         state: state.clone(),
                     });
                 }
@@ -1575,14 +1594,6 @@ fn pre_filter_rolls(
         results.push((roll, gains));
     }
     results
-}
-
-/// All legal robber tile candidates (any tile except current robber position).
-fn all_robber_candidates(state: &GameState) -> Vec<TileId> {
-    (0..state.topology.tiles.len() as u8)
-        .map(TileId)
-        .filter(|&t| t != state.robber)
-        .collect()
 }
 
 /// Check if a roll would produce the expected resource gains with the given state.

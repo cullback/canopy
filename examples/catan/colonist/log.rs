@@ -36,8 +36,10 @@ pub(crate) fn card_to_dev(card: u64) -> Option<DevCardKind> {
 fn cards_to_resources(cards: &[serde_json::Value]) -> ResourceArray {
     let mut arr = ResourceArray::default();
     for c in cards {
-        if let Some(r) = c.as_u64().and_then(card_to_resource) {
-            arr[r] += 1;
+        if let Some(val) = c.as_u64() {
+            if let Some(r) = card_to_resource(val) {
+                arr[r] += 1;
+            }
         }
     }
     arr
@@ -267,7 +269,9 @@ fn parse_entry(
 
     match log_type {
         // Separator / system message
-        2 | 44 => None,
+        2 => None,
+
+        44 => None,
 
         // Placement (setup)
         4 => {
@@ -383,7 +387,10 @@ fn parse_entry(
 
         // Resources received
         47 => {
-            let cards = text["cardsToBroadcast"].as_array()?;
+            let cards = text["cardsToBroadcast"].as_array().or_else(|| {
+                eprintln!("  [log] type 47 missing cardsToBroadcast: {}", text);
+                None
+            })?;
             let resources = cards_to_resources(cards);
             let dist = text["distributionType"].as_u64().unwrap_or(1);
             if dist == 0 {
