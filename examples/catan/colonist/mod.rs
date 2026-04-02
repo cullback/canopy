@@ -964,12 +964,26 @@ async fn handle_colonist_socket(
             }
         }
 
-        // --- Run search batch ---
+        // --- Run search batch (interleaved with WebSocket reads) ---
         if sims_budget > 0 && session.can_search() {
             let before = session.root_visits();
             session.set_num_simulations(BATCH_SIZE);
             let mut evals = vec![];
-            while session.search_tick(&mut evals).is_none() {}
+            loop {
+                if session.search_tick(&mut evals).is_some() {
+                    break;
+                }
+                // Between ticks, check for incoming messages so the tree
+                // explorer stays responsive during search.
+                if let Some(Some(Ok(Message::Text(t)))) = socket.recv().now_or_never() {
+                    if let Ok(msg) = serde_json::from_str::<canopy::server::ClientMsg>(&t) {
+                        let msgs = session.handle(msg);
+                        if send_all(&mut socket, &msgs).await.is_err() {
+                            return;
+                        }
+                    }
+                }
+            }
             let after = session.root_visits();
             sims_budget = sims_budget.saturating_sub(after.saturating_sub(before));
             if let Some((snap, labels)) = session.snapshot_with_labels() {
