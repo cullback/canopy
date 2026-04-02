@@ -272,10 +272,22 @@ impl<G: Game> Search<G> {
 
     /// Mutate the root state without clearing the tree.
     ///
-    /// Use for minor corrections (e.g. robber position, turn flags) that
-    /// don't invalidate the search tree's structure.
+    /// If the root node is already expanded, checks that its edges still
+    /// cover all legal actions in the updated state. Resets the tree when
+    /// actions are missing (e.g. dev cards became playable after a turn
+    /// change that was walked but not re-expanded).
     pub fn update_state(&mut self, f: impl FnOnce(&mut G)) {
         f(&mut self.root_state);
+        if let Some(root) = self.root {
+            let edges = self.tree.edges(root);
+            if !edges.is_empty() {
+                let mut legal = Vec::new();
+                self.root_state.legal_actions(&mut legal);
+                if legal.iter().any(|a| !edges.iter().any(|e| e.action == *a)) {
+                    self.reset(self.root_state.clone());
+                }
+            }
+        }
     }
 
     /// Cancel any in-progress search, cleaning up virtual losses.
