@@ -426,7 +426,6 @@ fn format_resources(r: ResourceArray) -> String {
 pub(crate) struct ReplayCtx<'a> {
     pub color_map: &'a [(u8, Player)],
     pub corner_map: &'a HashMap<(i32, i32, u8), NodeId>,
-    pub edge_map: &'a HashMap<(i32, i32, u8), EdgeId>,
     pub mapper: &'a CoordMapper,
     pub dom: board::BuildingData,
     pub dom_settlements: PerPlayer<Vec<NodeId>>,
@@ -465,7 +464,7 @@ impl<'a> ReplayCtx<'a> {
         dom: board::BuildingData,
         color_map: &'a [(u8, Player)],
         corner_map: &'a HashMap<(i32, i32, u8), NodeId>,
-        edge_map: &'a HashMap<(i32, i32, u8), EdgeId>,
+        edge_map: &HashMap<(i32, i32, u8), EdgeId>,
         mapper: &'a CoordMapper,
     ) -> Self {
         let mut dom_settlements: PerPlayer<Vec<NodeId>> = PerPlayer::default();
@@ -500,7 +499,6 @@ impl<'a> ReplayCtx<'a> {
         ReplayCtx {
             color_map,
             corner_map,
-            edge_map,
             mapper,
             dom,
             dom_settlements,
@@ -1603,14 +1601,12 @@ pub fn apply_dev_cards(
 ) {
     let ps = &mut state.players[player];
     // React's card list is authoritative — set dev_cards to match exactly.
-    if !cards.is_empty() {
-        ps.dev_cards = Default::default();
-        for &kind in cards {
-            ps.dev_cards[kind] += 1;
-        }
-        ps.hidden_dev_cards = 0;
-        ps.hidden_dev_cards_bought_this_turn = 0;
+    ps.dev_cards = Default::default();
+    for &kind in cards {
+        ps.dev_cards[kind] += 1;
     }
+    ps.hidden_dev_cards = 0;
+    ps.hidden_dev_cards_bought_this_turn = 0;
     // Always sync bought-this-turn from colonist's authoritative data.
     ps.dev_cards_bought_this_turn = Default::default();
     for &kind in bought_this_turn {
