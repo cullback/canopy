@@ -655,15 +655,11 @@ impl<G: Game> Search<G> {
         self.pending_states.clear();
     }
 
-    /// The current root node. Panics if root is unset (only possible for
-    /// terminal roots returned as Step::Done, or after advance with no child).
-    fn root(&self) -> NodeId {
-        self.root
-            .expect("root accessed before initialization or after terminal")
-    }
-
     fn run_simulations(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
-        let root = self.root();
+        let Some(root) = self.root else {
+            self.search_active = false;
+            return self.begin_search(rng);
+        };
         let network_value = self.root_network_value;
         let gs = self
             .gumbel
@@ -730,7 +726,10 @@ impl<G: Game> Search<G> {
 
     /// Fallback for roots without Gumbel state (chance roots).
     fn run_vanilla_sims(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
-        let root = self.root();
+        let Some(root) = self.root else {
+            self.search_active = false;
+            return self.begin_search(rng);
+        };
         let config = &self.config;
         let mut scratch = std::mem::take(&mut self.bufs.scratch);
         let mut q_bounds = self.vanilla_q_bounds;
