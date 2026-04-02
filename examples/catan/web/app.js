@@ -359,10 +359,12 @@ document.addEventListener('keydown', (e) => {
   if (e.key === 'ArrowLeft' && currentState?.can_undo) {
     e.preventDefault();
     controls.stopAutoplay();
+    controls._disableAutoSearch();
     session.send({ type: 'Undo' });
   } else if (e.key === 'ArrowRight' && currentState?.can_redo) {
     e.preventDefault();
     controls.stopAutoplay();
+    controls._disableAutoSearch();
     session.send({ type: 'Redo' });
   }
 });

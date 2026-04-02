@@ -406,7 +406,12 @@ fn apply_live_state(
 
     // Phase::Roll is an internal chance node for auto-resolving dice.
     // In colonist mode dice come from events, so map back to PreRoll/Main.
-    if matches!(state.phase, Phase::Roll) {
+    // Phase::MoveRobber/StealResolve at end of replay means the game is
+    // mid-action (events not yet arrived). Map to Main so search can proceed.
+    if matches!(
+        state.phase,
+        Phase::Roll | Phase::MoveRobber | Phase::StealResolve
+    ) {
         state.phase = if state.pre_roll {
             Phase::PreRoll
         } else {

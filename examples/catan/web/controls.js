@@ -19,6 +19,12 @@ class Controls {
     this.session.send({ type: 'SetAutoSearch', enabled: this.autoSearch, target });
   }
 
+  _disableAutoSearch() {
+    this.autoSearch = false;
+    document.getElementById('autosearch-toggle').checked = false;
+    this.session.send({ type: 'SetAutoSearch', enabled: false, target: 0 });
+  }
+
   /// Called on every GameState update.
   onStateUpdate(msg) {
     if (this.pendingAutoplay && !msg.is_terminal) {
@@ -58,11 +64,13 @@ class Controls {
 
     document.getElementById('btn-undo').addEventListener('click', () => {
       this.stopAutoplay();
+      this._disableAutoSearch();
       this.session.send({ type: 'Undo' });
     });
 
     document.getElementById('btn-redo').addEventListener('click', () => {
       this.stopAutoplay();
+      this._disableAutoSearch();
       this.session.send({ type: 'Redo' });
     });
 
