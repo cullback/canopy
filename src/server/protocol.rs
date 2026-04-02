@@ -40,6 +40,8 @@ pub enum ClientMsg {
     Undo,
     /// Redo previously undone action.
     Redo,
+    /// Jump to a specific log entry (0-based index into labeled entries).
+    SetLogCursor { index: usize },
     /// Configure per-player settings.
     SetConfig { player: u8, simulations: u32 },
     /// Enable/disable continuous background search with a sim target.

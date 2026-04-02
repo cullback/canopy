@@ -826,6 +826,8 @@ async fn handle_colonist_socket(
                         sims_budget = target.saturating_sub(done);
                     } else {
                         auto_refill = 0;
+                        sims_budget = 0;
+                        session.cancel_search();
                     }
                     eprintln!(
                         "ws: SetAutoSearch enabled={enabled} target={target} budget={sims_budget}"
@@ -913,13 +915,29 @@ async fn handle_colonist_socket(
                 if session.search_tick(&mut evals).is_some() {
                     break;
                 }
-                // Between ticks, check for incoming messages so the tree
-                // explorer stays responsive during search.
+                // Between ticks, check for incoming messages so the UI
+                // stays responsive during search.
                 if let Some(Some(Ok(Message::Text(t)))) = socket.recv().now_or_never() {
                     if let Ok(msg) = serde_json::from_str::<canopy::server::ClientMsg>(&t) {
-                        let msgs = session.handle(msg);
-                        if send_all(&mut socket, &msgs).await.is_err() {
-                            return;
+                        match &msg {
+                            canopy::server::ClientMsg::SetAutoSearch { enabled, target } => {
+                                if *enabled {
+                                    auto_refill = *target;
+                                    let done = session.root_visits();
+                                    sims_budget = target.saturating_sub(done);
+                                } else {
+                                    auto_refill = 0;
+                                    sims_budget = 0;
+                                    session.cancel_search();
+                                    break;
+                                }
+                            }
+                            _ => {
+                                let msgs = session.handle(msg);
+                                if send_all(&mut socket, &msgs).await.is_err() {
+                                    return;
+                                }
+                            }
                         }
                     }
                 }

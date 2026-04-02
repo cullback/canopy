@@ -20,6 +20,7 @@ class Controls {
   }
 
   _disableAutoSearch() {
+    if (!this.autoSearch) return;
     this.autoSearch = false;
     document.getElementById('autosearch-toggle').checked = false;
     this.session.send({ type: 'SetAutoSearch', enabled: false, target: 0 });

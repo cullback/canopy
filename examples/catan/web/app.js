@@ -72,6 +72,7 @@ session.on('GameState', (msg) => {
 
   // Game log
   const logView = document.getElementById('log-view');
+  const wasAtBottom = logView.scrollHeight - logView.scrollTop - logView.clientHeight < 8;
   logView.innerHTML = '';
   if (msg.action_log) {
     for (let i = 0; i < msg.action_log.length; i++) {
@@ -88,6 +89,12 @@ session.on('GameState', (msg) => {
       }
       const parts = text.split('\n');
       line.textContent = `${i + 1}. ${parts[0]}`;
+      line.style.cursor = 'pointer';
+      line.addEventListener('click', () => {
+        controls.stopAutoplay();
+        controls._disableAutoSearch();
+        session.send({ type: 'SetLogCursor', index: i });
+      });
       logView.appendChild(line);
       for (let p = 1; p < parts.length; p++) {
         const sub = document.createElement('div');
@@ -98,7 +105,9 @@ session.on('GameState', (msg) => {
         logView.appendChild(sub);
       }
     }
-    logView.scrollTop = logView.scrollHeight;
+    if (wasAtBottom) {
+      logView.scrollTop = logView.scrollHeight;
+    }
   }
 
   // Undo/Redo button states

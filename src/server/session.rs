@@ -564,6 +564,34 @@ impl<G: Game + 'static> GameSession<G> {
                     }]
                 }
             }
+            ClientMsg::SetLogCursor { index } => {
+                // Map log entry index (labeled entries only) to history cursor.
+                let mut labeled = 0;
+                let mut target_cursor = 0;
+                for (i, entry) in self.history.iter().enumerate() {
+                    if !entry.label.is_empty() {
+                        if labeled == index {
+                            // Set cursor to just after this entry.
+                            target_cursor = i + 1;
+                            break;
+                        }
+                        labeled += 1;
+                    }
+                }
+                if target_cursor <= self.history.len() {
+                    self.cursor = target_cursor;
+                    let state = if target_cursor > 0 {
+                        self.history[target_cursor - 1]
+                            .next_state
+                            .clone()
+                            .unwrap_or_else(|| self.history[target_cursor - 1].state.clone())
+                    } else {
+                        self.history[0].state.clone()
+                    };
+                    self.search.reset(state);
+                }
+                vec![self.state_msg()]
+            }
             ClientMsg::SetAutoSearch { .. } => {
                 // Handled by connection-level loop; respond with current state.
                 vec![self.state_msg()]
