@@ -2337,7 +2337,7 @@ mod tests {
 
     /// PreRoll offers ROLL action plus playable dev cards.
     #[test]
-    fn preroll_offers_dev_cards_and_roll() {
+    fn preroll_offers_knight_and_roll() {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
 
@@ -2355,9 +2355,11 @@ mod tests {
             actions.contains(&ActionId(PLAY_KNIGHT)),
             "PreRoll should offer playable knight"
         );
-        // Monopoly actions are in range 200..205
+        // Monopoly, YoP, and Road Building are suppressed in PreRoll
+        // (dominated by playing after rolling).
         let has_monopoly = actions.iter().any(|a| a.0 >= 200 && a.0 < 205);
-        assert!(has_monopoly, "PreRoll should offer playable monopoly");
+        assert!(!has_monopoly, "PreRoll should not offer monopoly");
+        assert_eq!(actions.len(), 2, "only ROLL and PLAY_KNIGHT");
     }
 
     /// PreRoll with no dev cards still offers ROLL.

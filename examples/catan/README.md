@@ -67,6 +67,19 @@ cities), preserving the settle-then-upgrade-same-turn line of play.
 The ordering activates only inside MCTS simulations (via `determinize`).
 The UI and human play always see the full set of legal actions.
 
+### Dominated action pruning
+
+Some legal actions are strictly dominated and pruned from `legal_actions`
+unconditionally (not just during search):
+
+- **Monopoly/YoP/Road Building in PreRoll**: rolling first gives strictly
+  more information. Resources and roads from these cards can't help until
+  Main phase, and rolling a 7 after YoP increases discard risk. Only
+  Knight remains in PreRoll (blocks opponent production on this roll).
+- **Monopoly on zero-count resource**: if the opponent holds 0 of a
+  resource, Monopoly gains nothing and wastes the one dev card play per
+  turn.
+
 ## Colonist replay
 
 ```
