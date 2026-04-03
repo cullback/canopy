@@ -59,28 +59,6 @@ fn main() {
             ..TrainConfig::default()
         },
     );
-    setup.add_config(
-        "nexus-large",
-        TrainConfig {
-            iterations: 1000,
-            train_samples_per_iter: 100_000,
-            replay_buffer_samples: 350_000,
-            max_actions: 2000,
-            epochs: 2,
-            lr: 0.0005,
-            filter_legal: true,
-            mcts_sims: 1200,
-            train_batch_size: 1024,
-            leaf_batch_size: 8,
-            concurrent_games: 512,
-            gumbel_m: 16,
-            explore_actions: 16,
-            q_weight_ramp_iters: 60,
-            aux_value_horizons: vec![10, 50, 150],
-            ..TrainConfig::default()
-        },
-    );
-
     let matches = setup
         .command()
         .arg(
