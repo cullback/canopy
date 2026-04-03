@@ -361,7 +361,9 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
     let friendly_opp = state.players[opp].building_vps < super::FRIENDLY_ROBBER_VP;
     let friendly_me = state.players[me].building_vps < super::FRIENDLY_ROBBER_VP;
 
-    // First pass: collect legal tiles and check if any touch opponent.
+    // Collect legal tiles, optionally filtering tiles without opponent
+    // buildings (dominated: no steal, no opponent production blocked).
+    // Disabled during replay since building positions may diverge.
     let mut legal_tiles: Vec<(TileId, bool)> = Vec::new();
     let mut any_touches_opp = false;
     for tile in &topo.tiles {
@@ -382,10 +384,9 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
         legal_tiles.push((tile.id, touches_opp));
     }
 
-    // If any tile touches opponent, suppress tiles that don't (dominated:
-    // no steal and no opponent production blocked).
+    let filter = state.canonical_build_order && any_touches_opp;
     for (tid, touches_opp) in &legal_tiles {
-        if !any_touches_opp || *touches_opp {
+        if !filter || *touches_opp {
             actions.push(robber_id(*tid));
         }
     }
@@ -394,16 +395,52 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
 fn populate_preroll(state: &GameState, actions: &mut Vec<ActionId>) {
     actions.push(ActionId(ROLL));
 
-    // Only Knight is strategically useful before rolling (blocks opponent
-    // production on this roll + steal). Monopoly, YoP, and Road Building
-    // are dominated: rolling first gives strictly more information and
-    // the resources/roads can't help until Main phase.
     let player = state.current();
     if !player.has_played_dev_card_this_turn {
         let playable_knights = player.dev_cards[DevCardKind::Knight]
             .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Knight]);
         if playable_knights > 0 {
             actions.push(ActionId(PLAY_KNIGHT));
+        }
+
+        // Monopoly, YoP, and Road Building are dominated in PreRoll:
+        // rolling first gives strictly more information and the
+        // resources/roads can't help until Main phase. Disabled during
+        // replay (canonical_build_order=false) since real games may
+        // play these from PreRoll.
+        if !state.canonical_build_order {
+            let playable_rb = player.dev_cards[DevCardKind::RoadBuilding]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding]);
+            if playable_rb > 0 && player.roads_left > 0 {
+                actions.push(ActionId(PLAY_ROAD_BUILDING));
+            }
+
+            let playable_yop = player.dev_cards[DevCardKind::YearOfPlenty]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty]);
+            if playable_yop > 0 {
+                for (i, &r1) in ALL_RESOURCES.iter().enumerate() {
+                    if state.bank[r1] == 0 {
+                        continue;
+                    }
+                    for &r2 in &ALL_RESOURCES[i..] {
+                        if r1 == r2 && state.bank[r1] < 2 {
+                            continue;
+                        }
+                        if state.bank[r2] == 0 {
+                            continue;
+                        }
+                        actions.push(yop_id(r1, r2));
+                    }
+                }
+            }
+
+            let playable_mono = player.dev_cards[DevCardKind::Monopoly]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Monopoly]);
+            if playable_mono > 0 {
+                for &r in &ALL_RESOURCES {
+                    actions.push(monopoly_id(r));
+                }
+            }
         }
     }
 }
@@ -533,9 +570,12 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
         let playable_mono = player.dev_cards[DevCardKind::Monopoly]
             .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Monopoly]);
         if playable_mono > 0 {
+            // Suppress Monopoly for resources the opponent has 0 of
+            // (dominated: gains nothing, wastes dev card play). Disabled
+            // during replay since tracked resources may diverge.
             let opp_hand = &state.players[pid.opponent()].hand;
             for &r in &ALL_RESOURCES {
-                if opp_hand[r] > 0 {
+                if !state.canonical_build_order || opp_hand[r] > 0 {
                     actions.push(monopoly_id(r));
                 }
             }
