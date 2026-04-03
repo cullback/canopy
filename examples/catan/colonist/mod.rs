@@ -411,15 +411,12 @@ fn apply_live_state(
         }
     }
 
-    // Phase::Roll is an internal chance node for auto-resolving dice.
-    // In colonist mode dice come from events, so map back to PreRoll/Main.
-    //
     // MoveRobber/StealResolve are valid when the player is actively placing
     // the robber (actionState=24). Otherwise the robber action has resolved
     // and the phase is stale — map back so the search can proceed.
     let stale_robber =
         matches!(state.phase, Phase::MoveRobber | Phase::StealResolve) && data.action_state != 24;
-    if matches!(state.phase, Phase::Roll) || stale_robber {
+    if stale_robber {
         state.phase = if state.pre_roll {
             Phase::PreRoll
         } else {
@@ -427,6 +424,10 @@ fn apply_live_state(
         };
         changed = true;
     }
+    // Phase::Roll is a chance node awaiting the dice outcome. Don't remap
+    // it — the next poll's event processing will supply the outcome and
+    // advance to Main. Remapping to PreRoll would cause a loop (walk ROLL
+    // → Phase::Roll → remap PreRoll → walk ROLL again).
 
     changed
 }
@@ -683,11 +684,6 @@ impl ColonistPollState {
                     eprintln!("poll: proactive END_TURN → {live_pid:?} (colonist turnState=1)");
                     self.committed_state.apply_action(END_TURN as usize);
                     actions_to_walk.push(END_TURN as usize);
-                    // Engine sets Phase::Roll for auto-dice; colonist resolves
-                    // dice via events, so map back to PreRoll.
-                    if matches!(self.committed_state.phase, Phase::Roll) {
-                        self.committed_state.phase = Phase::PreRoll;
-                    }
                 }
             }
         }
