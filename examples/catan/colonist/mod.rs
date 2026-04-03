@@ -658,7 +658,7 @@ impl ColonistPollState {
 
         let has_event_updates =
             needs_rollback || !entries_to_extend.is_empty() || committed_new_events;
-        apply_live_state(
+        let live_state_changed = apply_live_state(
             &mut self.committed_state,
             &poll,
             &self.color_map,
@@ -716,6 +716,13 @@ impl ColonistPollState {
                     actions_to_walk.len(),
                     pre_visits,
                     post_visits
+                );
+                need_reset = true;
+            } else if live_state_changed {
+                eprintln!(
+                    "poll: walk_tree {:?} — visits {} → {} \
+                     (live state changed, tree will reset)",
+                    actions_to_walk, pre_visits, post_visits
                 );
                 need_reset = true;
             } else {
