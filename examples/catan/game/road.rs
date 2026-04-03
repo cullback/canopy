@@ -138,6 +138,142 @@ impl RoadNetwork {
     pub fn longest_road(&self) -> u8 {
         self.longest_len
     }
+
+    /// Bitmask of nodes that lie on the current longest road path.
+    pub fn longest_road_nodes(&self, adj: &AdjacencyBitboards, opp_buildings: u64) -> u64 {
+        if self.roads.count_ones() < 5 {
+            return 0;
+        }
+        compute_longest_road_nodes(self.roads, adj, opp_buildings)
+    }
+}
+
+/// Compute longest road length AND return the node bitmask of the best path.
+fn compute_longest_road_nodes(
+    player_roads: u128,
+    adj: &AdjacencyBitboards,
+    opp_buildings: u64,
+) -> u64 {
+    if player_roads == 0 {
+        return 0;
+    }
+
+    let mut degree = [0u8; 54];
+    let mut any_vertex = 0usize;
+    let mut remaining = player_roads;
+    while remaining != 0 {
+        let eid = remaining.trailing_zeros() as usize;
+        remaining &= remaining - 1;
+        let mut ep = adj.edge_endpoints[eid];
+        while ep != 0 {
+            let node = ep.trailing_zeros() as usize;
+            ep &= ep - 1;
+            degree[node] += 1;
+            any_vertex = node;
+        }
+    }
+
+    let mut best_len = 0u8;
+    let mut best_nodes = 0u64;
+    let mut found_start = false;
+
+    for node in 0..54usize {
+        if degree[node] != 0 && degree[node] != 2 {
+            found_start = true;
+            let incident = adj.node_adj_edges[node] & player_roads;
+            let mut rem = incident;
+            while rem != 0 {
+                let eid = rem.trailing_zeros() as usize;
+                rem &= rem - 1;
+                let other = (adj.edge_endpoints[eid] & !(1u64 << node)).trailing_zeros() as usize;
+                let mut path_nodes = 0u64;
+                let len = dfs_road_nodes(
+                    other,
+                    1u128 << eid,
+                    player_roads,
+                    adj,
+                    opp_buildings,
+                    &mut path_nodes,
+                ) + 1;
+                // The starting node is always part of the path
+                path_nodes |= 1u64 << node;
+                if len > best_len {
+                    best_len = len;
+                    best_nodes = path_nodes;
+                }
+            }
+        }
+    }
+
+    // Pure cycle fallback
+    if !found_start {
+        let incident = adj.node_adj_edges[any_vertex] & player_roads;
+        let mut rem = incident;
+        while rem != 0 {
+            let eid = rem.trailing_zeros() as usize;
+            rem &= rem - 1;
+            let other = (adj.edge_endpoints[eid] & !(1u64 << any_vertex)).trailing_zeros() as usize;
+            let mut path_nodes = 0u64;
+            let len = dfs_road_nodes(
+                other,
+                1u128 << eid,
+                player_roads,
+                adj,
+                opp_buildings,
+                &mut path_nodes,
+            ) + 1;
+            path_nodes |= 1u64 << any_vertex;
+            if len > best_len {
+                best_len = len;
+                best_nodes = path_nodes;
+            }
+        }
+    }
+
+    best_nodes
+}
+
+/// DFS that also tracks the best path's node set.
+/// Returns the length, and writes the best path's node bitmask into `best_path_nodes`.
+fn dfs_road_nodes(
+    node: usize,
+    visited: u128,
+    player_roads: u128,
+    adj: &AdjacencyBitboards,
+    opp_buildings: u64,
+    best_path_nodes: &mut u64,
+) -> u8 {
+    if opp_buildings & (1u64 << node) != 0 {
+        return 0;
+    }
+    let reachable = adj.node_adj_edges[node] & player_roads & !visited;
+    if reachable == 0 {
+        // Leaf: this node is on the path
+        *best_path_nodes = 1u64 << node;
+        return 0;
+    }
+    let mut best = 0u8;
+    *best_path_nodes = 1u64 << node;
+    let mut rem = reachable;
+    while rem != 0 {
+        let eid = rem.trailing_zeros() as usize;
+        rem &= rem - 1;
+        let next = (adj.edge_endpoints[eid] & !(1u64 << node)).trailing_zeros() as usize;
+        let mut child_nodes = 0u64;
+        let len = dfs_road_nodes(
+            next,
+            visited | (1u128 << eid),
+            player_roads,
+            adj,
+            opp_buildings,
+            &mut child_nodes,
+        ) + 1;
+        if len > best {
+            best = len;
+            *best_path_nodes = (1u64 << node) | child_nodes;
+        }
+    }
+    best
 }
 
 fn compute_longest_road(player_roads: u128, adj: &AdjacencyBitboards, opp_buildings: u64) -> u8 {

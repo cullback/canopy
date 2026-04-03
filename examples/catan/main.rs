@@ -34,10 +34,7 @@ fn main() {
 
     // Models
     setup.add_model("nexus", |device, cfg| {
-        init_nexus::<_, 256, 96, 4>(device, cfg.aux_value_horizons.len())
-    });
-    setup.add_model("nexus-large", |device, cfg| {
-        init_nexus::<_, 384, 128, 4>(device, cfg.aux_value_horizons.len())
+        init_nexus(device, cfg.aux_value_horizons.len())
     });
 
     // Configs
@@ -50,6 +47,27 @@ fn main() {
             max_actions: 2000,
             epochs: 2,
             lr: 0.0002,
+            filter_legal: true,
+            mcts_sims: 1200,
+            train_batch_size: 1024,
+            leaf_batch_size: 8,
+            concurrent_games: 512,
+            gumbel_m: 16,
+            explore_actions: 16,
+            q_weight_ramp_iters: 60,
+            aux_value_horizons: vec![10, 50, 150],
+            ..TrainConfig::default()
+        },
+    );
+    setup.add_config(
+        "nexus-large",
+        TrainConfig {
+            iterations: 1000,
+            train_samples_per_iter: 100_000,
+            replay_buffer_samples: 350_000,
+            max_actions: 2000,
+            epochs: 2,
+            lr: 0.0005,
             filter_legal: true,
             mcts_sims: 1200,
             train_batch_size: 1024,

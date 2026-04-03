@@ -1,6 +1,6 @@
-//! # NexusEncoder (1445 features)
+//! # NexusEncoder (1949 features)
 //!
-//! Heterogeneous encoder that keeps tiles and nodes as separate entity streams.
+//! Heterogeneous encoder that keeps tiles, nodes, and edges as separate entity streams.
 //!
 //! ## Global (121 = 7 + 51×2 + 12)
 //!
@@ -43,7 +43,7 @@
 //! | cur_building_weight  |     1 | /6      |
 //! | opp_building_weight  |     1 | /6      |
 //!
-//! ## Nodes (54 × 21 = 1134)
+//! ## Nodes (54 × 25 = 1350)
 //!
 //! | Feature              | Count | Norm    |
 //! |----------------------|-------|---------|
@@ -56,6 +56,19 @@
 //! | opp_road_count       |     1 | /3      |
 //! | cur_network_dist     |     1 | /6      |
 //! | opp_network_dist     |     1 | /6      |
+//! | cur_settle_legal     |     1 | binary  |
+//! | opp_settle_legal     |     1 | binary  |
+//! | cur_on_longest_road  |     1 | binary  |
+//! | opp_on_longest_road  |     1 | binary  |
+//!
+//! ## Edges (72 × 4 = 288)
+//!
+//! | Feature              | Count | Norm    |
+//! |----------------------|-------|---------|
+//! | cur_road             |     1 | binary  |
+//! | opp_road             |     1 | binary  |
+//! | cur_frontier         |     1 | binary  |
+//! | opp_frontier         |     1 | binary  |
 
 use canopy::nn::StateEncoder;
 
@@ -72,10 +85,11 @@ pub struct NexusEncoder;
 
 #[allow(dead_code)]
 impl NexusEncoder {
-    pub const FEATURE_SIZE: usize = 1445;
+    pub const FEATURE_SIZE: usize = 1949;
     pub const GLOBAL_LEN: usize = 121;
     pub const TILES_F: usize = 10;
-    pub const NODES_F: usize = 21;
+    pub const NODES_F: usize = 25;
+    pub const EDGES_F: usize = 4;
 }
 
 /// Push 51 per-player features grouped by category.
@@ -238,12 +252,61 @@ impl StateEncoder<GameState> for NexusEncoder {
             encode_tile_building_weights(tile, cur_boards, opp_boards, out);
         }
 
-        // === Nodes (54 × 21 = 1134) ===
+        // === Nodes (54 × 25 = 1350) ===
         let cur_dist = compute_network_distances(&topo.adj, cur_boards);
         let opp_dist = compute_network_distances(&topo.adj, opp_boards);
 
+        // Precompute settlement legality bitmasks
+        let occupied = state.occupied_nodes();
+        let mut neighbor_blocked = 0u64;
+        {
+            let mut bits = occupied;
+            while bits != 0 {
+                let node = bits.trailing_zeros() as usize;
+                bits &= bits - 1;
+                neighbor_blocked |= topo.adj.node_adj_nodes[node];
+            }
+        }
+        let node_mask: u64 = (1u64 << 54) - 1;
+        let base_legal = !occupied & !neighbor_blocked & node_mask;
+
+        // cur_settle_legal: on current player's road network
+        let mut cur_on_road = 0u64;
+        {
+            let mut roads = cur_boards.road_network.roads;
+            while roads != 0 {
+                let eid = roads.trailing_zeros() as usize;
+                roads &= roads - 1;
+                cur_on_road |= topo.adj.edge_endpoints[eid];
+            }
+        }
+        let cur_settle_legal = base_legal & cur_on_road;
+
+        // opp_settle_legal: on opponent's road network
+        let mut opp_on_road = 0u64;
+        {
+            let mut roads = opp_boards.road_network.roads;
+            while roads != 0 {
+                let eid = roads.trailing_zeros() as usize;
+                roads &= roads - 1;
+                opp_on_road |= topo.adj.edge_endpoints[eid];
+            }
+        }
+        let opp_settle_legal = base_legal & opp_on_road;
+
+        // Precompute longest road node bitmasks
+        let opp_buildings = opp_boards.settlements | opp_boards.cities;
+        let cur_buildings = cur_boards.settlements | cur_boards.cities;
+        let cur_lr_nodes = cur_boards
+            .road_network
+            .longest_road_nodes(&topo.adj, opp_buildings);
+        let opp_lr_nodes = opp_boards
+            .road_network
+            .longest_road_nodes(&topo.adj, cur_buildings);
+
         for i in 0..54u8 {
             let node = &topo.nodes[i as usize];
+            let bit = 1u64 << i;
 
             // cur_building, opp_building (2)
             out.push(node_value(cur_boards, i));
@@ -266,6 +329,28 @@ impl StateEncoder<GameState> for NexusEncoder {
             // cur_network_dist, opp_network_dist (2)
             out.push(cur_dist[i as usize]);
             out.push(opp_dist[i as usize]);
+
+            // cur_settle_legal, opp_settle_legal (2)
+            out.push(f32::from(cur_settle_legal & bit != 0));
+            out.push(f32::from(opp_settle_legal & bit != 0));
+
+            // cur_on_longest_road, opp_on_longest_road (2)
+            out.push(f32::from(cur_lr_nodes & bit != 0));
+            out.push(f32::from(opp_lr_nodes & bit != 0));
+        }
+
+        // === Edges (72 × 4 = 288) ===
+        let cur_roads = cur_boards.road_network.roads;
+        let opp_roads = opp_boards.road_network.roads;
+        let cur_frontier = cur_boards.road_network.reachable_edges();
+        let opp_frontier = opp_boards.road_network.reachable_edges();
+
+        for e in 0..72u8 {
+            let edge_bit = 1u128 << e;
+            out.push(f32::from(cur_roads & edge_bit != 0));
+            out.push(f32::from(opp_roads & edge_bit != 0));
+            out.push(f32::from(cur_frontier & edge_bit != 0));
+            out.push(f32::from(opp_frontier & edge_bit != 0));
         }
 
         debug_assert_eq!(
@@ -371,7 +456,7 @@ mod tests {
     }
 
     fn node_feat(n: usize, f: usize) -> usize {
-        GLOBAL_OFF + 19 * 10 + n * 21 + f
+        GLOBAL_OFF + 19 * 10 + n * 25 + f
     }
 
     fn make_main_state() -> GameState {
