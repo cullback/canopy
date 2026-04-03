@@ -71,8 +71,10 @@ event log may use non-canonical orderings.
 
 ### Dominated action pruning
 
-Some legal actions are strictly dominated and pruned from `legal_actions`
-unconditionally (not just during search):
+Some legal actions are strictly dominated and pruned from
+`legal_actions`. Like the canonical ordering, disabled during colonist
+replay (`canonical_build_order=false`) since real games may include
+suboptimal plays and tracked state can diverge.
 
 - **Monopoly/YoP/Road Building in PreRoll**: rolling first gives strictly
   more information. Resources and roads from these cards can't help until
