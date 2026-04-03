@@ -462,6 +462,16 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
         while bits != 0 {
             let nid = bits.trailing_zeros() as u8;
             bits &= bits - 1;
+            // Canonical ordering: non-port settlements are ordered (priority 2).
+            // Port settlements are unordered (always offered).
+            if state.canonical_build_order {
+                let bit = 1u64 << nid;
+                let is_port =
+                    adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0;
+                if !is_port && state.min_build_type >= 2 && nid <= state.min_settle_node {
+                    continue;
+                }
+            }
             actions.push(settlement_id(NodeId(nid)));
         }
     }
@@ -472,6 +482,19 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
         while bits != 0 {
             let nid = bits.trailing_zeros() as u8;
             bits &= bits - 1;
+            // Canonical ordering: cities on pre-existing settlements are
+            // ordered (priority 1). Cities on same-turn settlements are
+            // unordered (always offered) to preserve settle-then-upgrade.
+            if state.canonical_build_order {
+                let bit = 1u64 << nid;
+                let pre_existing = state.settlements_at_turn_start & bit != 0;
+                if pre_existing
+                    && (state.min_build_type > 1
+                        || (state.min_build_type == 1 && nid <= state.min_city_node))
+                {
+                    continue;
+                }
+            }
             actions.push(city_id(NodeId(nid)));
         }
     }
@@ -480,7 +503,8 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
     // dev_cards_played inflation can make the pool empty while dev_deck.total > 0.
     if player.hand.contains(DEV_CARD_COST) && !state.dev_deck.is_empty() {
         let pool_total: u8 = state.unknown_dev_pool().iter().sum();
-        if pool_total > 0 {
+        // Canonical ordering: dev buy is priority 0 (suppressed by city or settle).
+        if pool_total > 0 && (!state.canonical_build_order || state.min_build_type < 1) {
             actions.push(ActionId(BUY_DEV_CARD));
         }
     }

@@ -187,6 +187,10 @@ impl Game for GameState {
     }
 
     fn determinize(&mut self, rng: &mut fastrand::Rng) {
+        // Enable canonical build ordering for search simulations.
+        // The root state keeps it off so the UI shows all legal actions.
+        self.canonical_build_order = true;
+
         // Hide the opponent's dev cards: move their known cards into the
         // hidden pool so the searching player (current_player) cannot see
         // them. In colonist mode opponent cards are already hidden, so
@@ -382,6 +386,7 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
             state.current_player = Player::One;
             state.pre_roll = true;
             state.phase = Phase::PreRoll;
+            state.settlements_at_turn_start = state.boards[Player::One].settlements;
         }
         _ => unreachable!("setup_count should be 1-4"),
     }
@@ -472,6 +477,12 @@ fn apply_end_turn(state: &mut GameState) {
     state.current_player = state.current_player.opponent();
     state.pre_roll = true;
     state.phase = Phase::PreRoll;
+
+    // Reset canonical build ordering for the new turn.
+    state.min_build_type = 0;
+    state.min_city_node = 0;
+    state.min_settle_node = 0;
+    state.settlements_at_turn_start = state.boards[state.current_player].settlements;
 }
 
 fn apply_build_road(state: &mut GameState, eid: EdgeId) {
@@ -525,6 +536,18 @@ fn apply_build_settlement(state: &mut GameState, nid: NodeId) {
 
     update_trade_ratios(state, nid, pid);
 
+    // Canonical ordering: advance if this is a non-port settlement.
+    if state.canonical_build_order {
+        let bit = 1u64 << nid.0;
+        let adj = &state.topology.adj;
+        let is_port =
+            adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0;
+        if !is_port {
+            state.min_build_type = state.min_build_type.max(2);
+            state.min_settle_node = nid.0;
+        }
+    }
+
     // Update road networks
     let opp_roads = state.boards[opp].road_network.roads;
     state.boards[pid]
@@ -553,6 +576,13 @@ fn apply_build_city(state: &mut GameState, nid: NodeId) {
     state.current_mut().settlements_left += 1;
     state.current_mut().cities_left -= 1;
     state.current_mut().building_vps += 1;
+
+    // Canonical ordering: only advance if this is an ordered city
+    // (pre-existing settlement, not same-turn).
+    if state.canonical_build_order && state.settlements_at_turn_start & bit != 0 {
+        state.min_build_type = state.min_build_type.max(1);
+        state.min_city_node = nid.0;
+    }
 }
 
 fn apply_buy_dev_card(state: &mut GameState) {

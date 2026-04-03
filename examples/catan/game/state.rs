@@ -138,6 +138,23 @@ pub struct GameState {
     /// The node of the most recently placed setup settlement. Used by
     /// `populate_place_road` to determine which settlement needs a road.
     pub last_setup_node: Option<NodeId>,
+
+    // ── Canonical build ordering (transposition elimination) ─────────
+    /// Minimum ordered action type still allowed this turn.
+    /// 0 = all (dev buy, city, settle), 1 = city+settle, 2 = settle only.
+    pub min_build_type: u8,
+    /// Ordered cities must target nodes > this value.
+    pub min_city_node: u8,
+    /// Ordered (non-port) settlements must target nodes > this value.
+    pub min_settle_node: u8,
+    /// Snapshot of current player's settlement bitmask at turn start.
+    /// Cities on nodes in this mask are "ordered"; others are "unordered"
+    /// (same-turn settlements that must precede their city upgrade).
+    pub settlements_at_turn_start: u64,
+    /// When false, `legal_actions` skips canonical ordering filters and
+    /// apply functions skip updating ordering fields. Used during colonist
+    /// replay where the event log may use non-canonical action orderings.
+    pub canonical_build_order: bool,
 }
 
 impl fmt::Debug for GameState {
@@ -193,6 +210,11 @@ impl GameState {
             vp_limit: 15,
             discard_threshold: 9,
             last_setup_node: None,
+            min_build_type: 0,
+            min_city_node: 0,
+            min_settle_node: 0,
+            settlements_at_turn_start: 0,
+            canonical_build_order: false,
         }
     }
 
