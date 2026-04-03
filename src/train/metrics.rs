@@ -158,6 +158,12 @@ pub(super) struct CsvRow {
     pub time_selfplay_secs: f64,
     #[serde(serialize_with = "round6::f64")]
     pub time_train_secs: f64,
+    /// GPU inference evaluations per second (across all workers).
+    #[serde(serialize_with = "round6::f64")]
+    pub evals_per_sec: f64,
+    /// Average batch size sent to GPU inference.
+    #[serde(serialize_with = "round6::f64")]
+    pub avg_batch_size: f64,
 }
 
 pub(super) struct CsvLogger {

@@ -491,6 +491,8 @@ pub fn run_training<G>(
             replay_buffer_games: replay_buffer.len(),
             time_selfplay_secs: self_play_elapsed.as_secs_f64(),
             time_train_secs: train_elapsed.as_secs_f64(),
+            evals_per_sec,
+            avg_batch_size,
         });
     }
 
