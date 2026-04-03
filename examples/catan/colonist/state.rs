@@ -453,8 +453,12 @@ pub fn replay_events(
     ctx: &ReplayCtx,
 ) -> Option<(Vec<TimelineEntry>, Vec<usize>)> {
     let timeline = Vec::new();
-    let (final_state, entries, walk_actions) =
+    // Disable canonical build ordering during replay: the event log may
+    // use non-canonical action orderings.
+    state.canonical_build_order = false;
+    let (mut final_state, entries, walk_actions) =
         try_replay(state.clone(), events, 0, ctx, timeline, Vec::new())?;
+    final_state.canonical_build_order = true;
     *state = final_state;
     Some((entries, walk_actions))
 }
@@ -623,7 +627,8 @@ fn replay_search(
 ) -> Option<Vec<TimelineEntry>> {
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
-    let state = GameState::new(topology, dev_deck, dice);
+    let mut state = GameState::new(topology, dev_deck, dice);
+    state.canonical_build_order = false;
 
     let mut dom = board::extract_buildings(board, mapper);
     // Override stale board robber with live robber position.

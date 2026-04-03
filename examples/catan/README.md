@@ -64,8 +64,10 @@ and `min_settle_node` (lexicographic bounds within each type). A
 settlements (ordered cities) from same-turn settlements (unordered
 cities), preserving the settle-then-upgrade-same-turn line of play.
 
-The ordering activates only inside MCTS simulations (via `determinize`).
-The UI and human play always see the full set of legal actions.
+The ordering is active by default (including the UI and bot play).
+No reachable end-of-turn state is lost — the pruned orderings all
+reach identical states. Disabled during colonist replay where the
+event log may use non-canonical orderings.
 
 ### Dominated action pruning
 

@@ -214,7 +214,7 @@ impl GameState {
             min_city_node: 0,
             min_settle_node: 0,
             settlements_at_turn_start: 0,
-            canonical_build_order: false,
+            canonical_build_order: true,
         }
     }
 

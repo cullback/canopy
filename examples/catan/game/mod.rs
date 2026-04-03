@@ -187,10 +187,6 @@ impl Game for GameState {
     }
 
     fn determinize(&mut self, rng: &mut fastrand::Rng) {
-        // Enable canonical build ordering for search simulations.
-        // The root state keeps it off so the UI shows all legal actions.
-        self.canonical_build_order = true;
-
         // Hide the opponent's dev cards: move their known cards into the
         // hidden pool so the searching player (current_player) cannot see
         // them. In colonist mode opponent cards are already hidden, so
