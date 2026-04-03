@@ -1407,14 +1407,22 @@ mod tests {
         action::legal_actions(&state, &mut actions);
 
         let current_robber = state.robber;
+        let opp = state.current_player.opponent();
+        let opp_buildings = state.player_buildings(opp);
         for a in &actions {
             let tid = a.robber_tile();
             assert_ne!(tid, current_robber, "robber must move to a different tile");
+            // Every offered tile must touch opponent buildings (dominated
+            // tiles without opponent buildings are suppressed).
+            let tile_mask = state.topology.adj.tile_nodes[tid.0 as usize];
+            assert!(
+                tile_mask & opp_buildings != 0,
+                "robber tile {tid:?} should touch opponent buildings"
+            );
         }
-        assert_eq!(
-            actions.len(),
-            18,
-            "should have 18 legal tiles (19 - current)"
+        assert!(
+            !actions.is_empty(),
+            "should have at least one legal robber tile"
         );
     }
 

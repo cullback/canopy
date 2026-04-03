@@ -361,6 +361,9 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
     let friendly_opp = state.players[opp].building_vps < super::FRIENDLY_ROBBER_VP;
     let friendly_me = state.players[me].building_vps < super::FRIENDLY_ROBBER_VP;
 
+    // First pass: collect legal tiles and check if any touch opponent.
+    let mut legal_tiles: Vec<(TileId, bool)> = Vec::new();
+    let mut any_touches_opp = false;
     for tile in &topo.tiles {
         if tile.id == state.robber {
             continue;
@@ -372,7 +375,19 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
         if friendly_me && tile_mask & my_buildings != 0 {
             continue;
         }
-        actions.push(robber_id(tile.id));
+        let touches_opp = tile_mask & opp_buildings != 0;
+        if touches_opp {
+            any_touches_opp = true;
+        }
+        legal_tiles.push((tile.id, touches_opp));
+    }
+
+    // If any tile touches opponent, suppress tiles that don't (dominated:
+    // no steal and no opponent production blocked).
+    for (tid, touches_opp) in &legal_tiles {
+        if !any_touches_opp || *touches_opp {
+            actions.push(robber_id(*tid));
+        }
     }
 }
 

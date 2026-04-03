@@ -79,6 +79,10 @@ unconditionally (not just during search):
 - **Monopoly on zero-count resource**: if the opponent holds 0 of a
   resource, Monopoly gains nothing and wastes the one dev card play per
   turn.
+- **Robber on empty tiles**: if any legal tile touches opponent
+  buildings, tiles without opponent buildings are suppressed (no steal,
+  no opponent production blocked). When friendly robber forces all
+  opponent tiles off-limits, all remaining tiles stay available.
 
 ## Colonist replay
 
