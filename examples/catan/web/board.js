@@ -179,6 +179,90 @@ class Board {
   clearOverlays() {
     const overlayG = this.svg.querySelector('.overlays');
     if (overlayG) overlayG.innerHTML = '';
+    this.clearSearchHighlights();
+  }
+
+  // Highlight top spatial actions from search on the board.
+  // edges: sorted array of { action, improved_policy, visits, q }
+  showSearchHighlights(edges, board) {
+    this.clearSearchHighlights();
+    if (!board) return;
+    const g = this.svg.querySelector('.overlays');
+    if (!g) return;
+
+    const RANK_COLORS = ['#1b8a2a', '#1a6fc4', '#b82040']; // dark green, dark blue, dark red
+    const nodes = board.nodes;
+    let rank = 0;
+
+    for (const edge of edges) {
+      if (rank >= 3) break;
+      const a = edge.action;
+      const color = RANK_COLORS[rank];
+      const label = `#${rank + 1}: ${edge.label} (${edge.visits} visits)`;
+      let el = null;
+
+      // Settlement
+      if (a < 54) {
+        const [x, y] = nodes[a];
+        el = this._el('circle', {
+          cx: x, cy: y, r: 9,
+          fill: 'none', stroke: color,
+          'stroke-width': 2.5, 'pointer-events': 'none',
+          class: 'search-highlight', opacity: 0.9,
+        });
+      }
+      // Road
+      else if (a >= 54 && a < 126) {
+        const eid = a - 54;
+        const e = board.edges[eid];
+        if (e) {
+          const [x0, y0] = nodes[e[0]];
+          const [x1, y1] = nodes[e[1]];
+          el = this._el('line', {
+            x1: x0, y1: y0, x2: x1, y2: y1,
+            stroke: color, 'stroke-width': 5, 'stroke-linecap': 'round',
+            'pointer-events': 'none', class: 'search-highlight', opacity: 0.8,
+          });
+        }
+      }
+      // City
+      else if (a >= 126 && a < 180) {
+        const nid = a - 126;
+        const [x, y] = nodes[nid];
+        el = this._el('rect', {
+          x: x - 8, y: y - 8, width: 16, height: 16, rx: 2,
+          fill: 'none', stroke: color,
+          'stroke-width': 2.5, 'pointer-events': 'none',
+          class: 'search-highlight', opacity: 0.9,
+        });
+      }
+      // Robber
+      else if (a >= 205 && a < 224) {
+        const tid = a - 205;
+        const tile = board.tiles[tid];
+        if (tile) {
+          el = this._el('circle', {
+            cx: tile.cx, cy: tile.cy, r: 18,
+            fill: 'none', stroke: color,
+            'stroke-width': 4, 'pointer-events': 'none',
+            class: 'search-highlight', opacity: 0.9,
+          });
+        }
+      }
+
+      if (el) {
+        this._attachTooltip(el, label);
+        el.style.pointerEvents = 'auto';
+        g.appendChild(el);
+        rank++;
+      }
+    }
+  }
+
+  clearSearchHighlights() {
+    for (const el of this.svg.querySelectorAll('.search-highlight')) {
+      el.remove();
+    }
   }
 
   // Attach instant tooltip (replaces slow browser-native <title>).
@@ -207,7 +291,7 @@ class Board {
       const [x, y] = nodes[action];
       const el = this._el('circle', {
         cx: x, cy: y, r: 8,
-        fill: 'rgba(255,255,255,0.3)', stroke: '#fff',
+        fill: 'rgba(255,255,255,0.15)', stroke: 'rgba(255,255,255,0.5)',
         'stroke-width': 1.5, cursor: 'pointer', class: 'action-overlay'
       });
       el.dataset.action = action;
@@ -225,7 +309,7 @@ class Board {
       const [x1, y1] = nodes[n1];
       const el = this._el('line', {
         x1: x0, y1: y0, x2: x1, y2: y1,
-        stroke: 'rgba(255,255,255,0.5)', 'stroke-width': 6,
+        stroke: 'rgba(255,255,255,0.4)', 'stroke-width': 5,
         'stroke-linecap': 'round', cursor: 'pointer', class: 'action-overlay'
       });
       el.dataset.action = action;
@@ -239,7 +323,7 @@ class Board {
       const [x, y] = nodes[nid];
       const el = this._el('circle', {
         cx: x, cy: y, r: 10,
-        fill: 'rgba(255,255,100,0.3)', stroke: '#ff0',
+        fill: 'rgba(255,255,255,0.15)', stroke: 'rgba(255,255,255,0.5)',
         'stroke-width': 1.5, cursor: 'pointer', class: 'action-overlay'
       });
       el.dataset.action = action;
@@ -254,8 +338,8 @@ class Board {
       if (!tile) return null;
       const el = this._el('circle', {
         cx: tile.cx, cy: tile.cy, r: 15,
-        fill: 'rgba(233,69,96,0.3)', stroke: '#e94560',
-        'stroke-width': 2, cursor: 'pointer', class: 'action-overlay'
+        fill: 'rgba(255,255,255,0.15)', stroke: 'rgba(255,255,255,0.5)',
+        'stroke-width': 1.5, cursor: 'pointer', class: 'action-overlay'
       });
       el.dataset.action = action;
       el.addEventListener('click', () => this.onActionClick?.(action));

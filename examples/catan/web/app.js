@@ -127,8 +127,24 @@ session.on('GameState', (msg) => {
   controls.onStateUpdate(msg);
 });
 
+function updateSearchHighlights(snapshot, labels) {
+  if (!currentBoard || !snapshot.edges) return;
+  const edges = snapshot.edges.map((e, i) => ({
+    ...e,
+    label: labels[i] || `Action ${e.action}`,
+  }));
+  edges.sort((a, b) => {
+    const ap = a.improved_policy ?? 0;
+    const bp = b.improved_policy ?? 0;
+    if (ap !== bp) return bp - ap;
+    return b.visits - a.visits;
+  });
+  board.showSearchHighlights(edges, currentBoard);
+}
+
 session.on('Snapshot', (msg) => {
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
+  updateSearchHighlights(msg.snapshot, msg.action_labels);
   controls.onSimsDone(msg.snapshot);
 });
 
@@ -139,11 +155,13 @@ session.on('Subtree', (msg) => {
 session.on('SearchProgress', (msg) => {
   mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
   mctsPanel.showProgress(msg.snapshot.total_simulations, msg.sims_total);
+  updateSearchHighlights(msg.snapshot, msg.action_labels);
 });
 
 session.on('BotAction', (msg) => {
   if (msg.snapshot) {
     mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || []);
+    updateSearchHighlights(msg.snapshot, msg.action_labels || []);
   }
   controls.onBotDone();
 });
