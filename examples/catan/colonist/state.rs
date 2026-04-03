@@ -1311,10 +1311,23 @@ fn try_replay(
 
             GameEvent::BuyDevCard { player } => {
                 advance_to_player(&mut state, &mut actions, *player, &mut legal_buf);
-                if player_of_color(ctx.color_map, *player).is_some() {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
                     legal_set(&state, &mut legal_buf);
                     if legal_buf.contains(&(action::BUY_DEV_CARD as usize)) {
                         crate::game::apply_hidden_dev_card_buy(&mut state);
+                        timeline.push(TimelineEntry {
+                            label: format!(
+                                "{} buys dev card",
+                                player_label(*player, ctx.color_map)
+                            ),
+                            state: state.clone(),
+                        });
+                    } else {
+                        eprintln!(
+                            "  try_replay e{i}: BuyDevCard SKIPPED — hand={:?} \
+                             deck_total={} phase={:?}",
+                            state.players[pid].hand, state.dev_deck.total, state.phase
+                        );
                     }
                 }
             }
