@@ -34,7 +34,10 @@ fn main() {
 
     // Models
     setup.add_model("nexus", |device, cfg| {
-        init_nexus(device, cfg.aux_value_horizons.len())
+        init_nexus::<_, 256, 96, 4>(device, cfg.aux_value_horizons.len())
+    });
+    setup.add_model("nexus-large", |device, cfg| {
+        init_nexus::<_, 384, 128, 4>(device, cfg.aux_value_horizons.len())
     });
 
     // Configs
