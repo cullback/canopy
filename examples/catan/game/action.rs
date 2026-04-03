@@ -358,8 +358,8 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
     let opp = me.opponent();
     let my_buildings = state.player_buildings(me);
     let opp_buildings = state.player_buildings(opp);
-    let friendly_opp = state.players[opp].building_vps < super::FRIENDLY_ROBBER_VP;
-    let friendly_me = state.players[me].building_vps < super::FRIENDLY_ROBBER_VP;
+    let friendly_opp = super::friendly_robber_vps(state, opp) < super::FRIENDLY_ROBBER_VP;
+    let friendly_me = super::friendly_robber_vps(state, me) < super::FRIENDLY_ROBBER_VP;
 
     // Collect legal tiles, optionally filtering tiles without opponent
     // buildings (dominated: no steal, no opponent production blocked).

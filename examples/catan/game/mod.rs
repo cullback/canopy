@@ -27,6 +27,18 @@ use state::{GameState, Phase};
 
 pub(crate) const FRIENDLY_ROBBER_VP: u8 = 3;
 
+/// VP count used for the friendly robber check: buildings + longest road,
+/// but NOT largest army or VP dev cards.
+pub(crate) fn friendly_robber_vps(state: &GameState, player: Player) -> u8 {
+    let mut vps = state.players[player].building_vps;
+    if let Some((lr_pid, _)) = state.longest_road {
+        if lr_pid == player {
+            vps += 2;
+        }
+    }
+    vps
+}
+
 pub fn new_game(seed: u64, dice: Dice, vp_limit: u8, discard_threshold: u8) -> GameState {
     let mut state = GameState::from_seed(seed, dice);
     state.vp_limit = vp_limit;
@@ -666,7 +678,7 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
     let opp_buildings = state.player_buildings(opp);
     let has_target = (tile_mask & opp_buildings) != 0 && state.players[opp].hand.total() > 0;
 
-    if has_target && state.players[opp].building_vps >= FRIENDLY_ROBBER_VP {
+    if has_target && friendly_robber_vps(state, opp) >= FRIENDLY_ROBBER_VP {
         state.phase = Phase::StealResolve;
     } else if state.pre_roll {
         state.phase = Phase::Roll;
@@ -1601,6 +1613,37 @@ mod tests {
                 "largest army shouldn't count for friendly robber"
             );
         }
+    }
+
+    /// Opponent has 2 settlements (2 building VP) + longest road (2 more VP = 4 total).
+    /// Friendly robber no longer protects them because building + longest road >= 3.
+    #[test]
+    fn friendly_robber_counts_longest_road() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        // P2 has 2 building VP + longest road = 4 friendly robber VP
+        state.longest_road = Some((Player::Two, 5));
+        assert_eq!(state.players[Player::Two].building_vps, 2);
+        assert_eq!(friendly_robber_vps(&state, Player::Two), 4);
+
+        state.phase = Phase::MoveRobber;
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+
+        // Should allow targeting opponent tiles (friendly robber VP >= 3)
+        let opp_buildings = state.player_buildings(Player::Two);
+        let topo = &state.topology;
+        let targets_opp = actions.iter().any(|a| {
+            let tid = a.robber_tile();
+            let tile_mask = topo.adj.tile_nodes[tid.0 as usize];
+            tile_mask & opp_buildings != 0
+        });
+        assert!(
+            targets_opp,
+            "longest road should count for friendly robber threshold"
+        );
     }
 
     // --- Building tests ---
