@@ -27,18 +27,6 @@ use state::{GameState, Phase};
 
 pub(crate) const FRIENDLY_ROBBER_VP: u8 = 3;
 
-/// VP count used for the friendly robber check: buildings + longest road,
-/// but NOT largest army or VP dev cards.
-pub(crate) fn friendly_robber_vps(state: &GameState, player: Player) -> u8 {
-    let mut vps = state.players[player].building_vps;
-    if let Some((lr_pid, _)) = state.longest_road {
-        if lr_pid == player {
-            vps += 2;
-        }
-    }
-    vps
-}
-
 pub fn new_game(seed: u64, dice: Dice, vp_limit: u8, discard_threshold: u8) -> GameState {
     let mut state = GameState::from_seed(seed, dice);
     state.vp_limit = vp_limit;
@@ -678,7 +666,7 @@ fn apply_move_robber(state: &mut GameState, tid: TileId) {
     let opp_buildings = state.player_buildings(opp);
     let has_target = (tile_mask & opp_buildings) != 0 && state.players[opp].hand.total() > 0;
 
-    if has_target && friendly_robber_vps(state, opp) >= FRIENDLY_ROBBER_VP {
+    if has_target && state.public_vps(opp) >= FRIENDLY_ROBBER_VP {
         state.phase = Phase::StealResolve;
     } else if state.pre_roll {
         state.phase = Phase::Roll;
@@ -1584,55 +1572,52 @@ mod tests {
         }
     }
 
-    /// Opponent has 2 settlements + largest army (4 public VP but only 2 building).
-    /// Friendly robber still protects them because only building VP count.
+    /// Opponent has 2 settlements + largest army (4 public VP).
+    /// Friendly robber uses public VP, so largest army counts — opponent
+    /// is NOT protected (4 >= 3).
     #[test]
-    fn friendly_robber_ignores_largest_army() {
+    fn friendly_robber_counts_largest_army() {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
 
         state.current_player = Player::One;
-        // P2 has 2 building VP from settlements + largest army (2 more public VP)
+        // P2 has 2 building VP + largest army = 4 public VP
         state.largest_army = Some((Player::Two, 3));
         assert_eq!(state.public_vps(Player::Two), 4);
-        assert_eq!(state.players[Player::Two].building_vps, 2);
 
         state.phase = Phase::MoveRobber;
         let mut actions = Vec::new();
         action::legal_actions(&state, &mut actions);
 
-        // Should still block opponent tiles since building VP = 2 < 3
+        // Should allow targeting opponent tiles (public VP >= 3)
         let opp_buildings = state.player_buildings(Player::Two);
         let topo = &state.topology;
-        for a in &actions {
+        let targets_opp = actions.iter().any(|a| {
             let tid = a.robber_tile();
             let tile_mask = topo.adj.tile_nodes[tid.0 as usize];
-            assert_eq!(
-                tile_mask & opp_buildings,
-                0,
-                "largest army shouldn't count for friendly robber"
-            );
-        }
+            tile_mask & opp_buildings != 0
+        });
+        assert!(
+            targets_opp,
+            "largest army should count for friendly robber threshold"
+        );
     }
 
-    /// Opponent has 2 settlements (2 building VP) + longest road (2 more VP = 4 total).
-    /// Friendly robber no longer protects them because building + longest road >= 3.
+    /// Opponent has 2 settlements + longest road (4 public VP).
+    /// Friendly robber uses public VP — opponent is NOT protected (4 >= 3).
     #[test]
     fn friendly_robber_counts_longest_road() {
         let mut state = make_state_with_seed(42);
         play_setup(&mut state);
 
         state.current_player = Player::One;
-        // P2 has 2 building VP + longest road = 4 friendly robber VP
         state.longest_road = Some((Player::Two, 5));
-        assert_eq!(state.players[Player::Two].building_vps, 2);
-        assert_eq!(friendly_robber_vps(&state, Player::Two), 4);
+        assert_eq!(state.public_vps(Player::Two), 4);
 
         state.phase = Phase::MoveRobber;
         let mut actions = Vec::new();
         action::legal_actions(&state, &mut actions);
 
-        // Should allow targeting opponent tiles (friendly robber VP >= 3)
         let opp_buildings = state.player_buildings(Player::Two);
         let topo = &state.topology;
         let targets_opp = actions.iter().any(|a| {
@@ -1644,6 +1629,65 @@ mod tests {
             targets_opp,
             "longest road should count for friendly robber threshold"
         );
+    }
+
+    /// P1 (2 VP) and P2 (3+ VP) share a tile. P1 moves robber.
+    /// Friendly robber protects P1 (< 3 VP), so the shared tile is
+    /// blocked — P1 can't rob themselves.
+    #[test]
+    fn friendly_robber_blocks_shared_tile() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        // P1 has 2 building VP (setup settlements), P2 has 3+
+        assert_eq!(state.players[Player::One].building_vps, 2);
+        state.players[Player::Two].building_vps = FRIENDLY_ROBBER_VP;
+
+        // Find a tile that both players share
+        let topo = &state.topology;
+        let p1_buildings = state.player_buildings(Player::One);
+        let p2_buildings = state.player_buildings(Player::Two);
+        let shared_tile = topo.tiles.iter().find(|t| {
+            let mask = topo.adj.tile_nodes[t.id.0 as usize];
+            mask & p1_buildings != 0 && mask & p2_buildings != 0
+        });
+
+        // If no shared tile exists on this board seed, place P2 on a P1 tile
+        if shared_tile.is_none() {
+            // Find a tile touching P1, get an unoccupied node on it, place P2 there
+            for tile in &topo.tiles {
+                let mask = topo.adj.tile_nodes[tile.id.0 as usize];
+                if mask & p1_buildings != 0 {
+                    let mut nodes = mask & !state.occupied_nodes();
+                    if nodes != 0 {
+                        let nid = nodes.trailing_zeros() as u8;
+                        state.boards[Player::Two].settlements |= 1u64 << nid;
+                        break;
+                    }
+                }
+            }
+        }
+
+        // Move robber off current tile so all others are candidates
+        state.robber = crate::game::board::TileId(0);
+        state.phase = Phase::MoveRobber;
+
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+
+        // The shared tile should be blocked (P1 has < 3 VP, friendly_me)
+        let p1_buildings = state.player_buildings(Player::One);
+        for a in &actions {
+            let tid = a.robber_tile();
+            let tile_mask = topo.adj.tile_nodes[tid.0 as usize];
+            if tile_mask & p1_buildings != 0 {
+                panic!(
+                    "friendly robber should block tile {:?} touching P1 (2 VP < 3)",
+                    tid
+                );
+            }
+        }
     }
 
     // --- Building tests ---
