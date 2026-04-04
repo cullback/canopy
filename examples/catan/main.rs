@@ -43,7 +43,7 @@ fn main() {
         TrainConfig {
             iterations: 1000,
             train_samples_per_iter: 100_000,
-            replay_buffer_samples: 350_000,
+            replay_buffer_samples: 500_000,
             max_actions: 2000,
             epochs: 2,
             lr: 0.0005,
@@ -52,7 +52,7 @@ fn main() {
             inference_batch_size: 2048,
             train_batch_size: 1024,
             leaf_batch_size: 32,
-            concurrent_games: 512,
+            concurrent_games: 768,
             gumbel_m: 16,
             explore_actions: 16,
             q_weight_ramp_iters: 60,
