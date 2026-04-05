@@ -46,7 +46,7 @@ fn main() {
             replay_buffer_samples: 500_000,
             max_actions: 2000,
             epochs: 2,
-            lr: 0.0015,
+            lr: 0.001,
             filter_legal: true,
             mcts_sims: 1200,
             inference_batch_size: 2048,
