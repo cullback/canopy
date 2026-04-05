@@ -80,10 +80,12 @@ pub(crate) fn encode_phase(state: &GameState, out: &mut Vec<f32>) {
         Phase::MoveRobber => (4, 1.0),
         Phase::Main => (5, 1.0),
         Phase::RoadBuilding { .. } => (6, 1.0),
-        // Chance phases: encode as the most likely next decision phase.
-        Phase::Roll => (2, 1.0), // pre-roll → will become Main or MoveRobber
-        Phase::StealResolve => (4, 1.0), // similar to MoveRobber context
-        Phase::DevCardDraw => (5, 1.0), // will return to Main
+        Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => {
+            panic!(
+                "encoder received chance phase {:?} — MCTS should resolve chance nodes before evaluation",
+                state.phase,
+            );
+        }
         Phase::GameOver(_) => unreachable!(),
     };
     for i in 0..7 {

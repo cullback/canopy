@@ -258,6 +258,21 @@ impl Tree {
 
                 bufs.actions.clear();
                 state.legal_actions(&mut bufs.actions);
+
+                // Degenerate state: no chance outcomes AND no legal actions.
+                // Can arise from SO-ISMCTS determinization inconsistencies
+                // (e.g. a chance node whose outcome pool was exhausted by a
+                // different determinization). Treat as terminal draw.
+                if bufs.actions.is_empty() {
+                    let id = self.insert(
+                        state_key,
+                        NodeKind::Terminal,
+                        [0.0, 1.0, 0.0],
+                        std::iter::empty(),
+                    );
+                    return ExpandResult::Leaf(id);
+                }
+
                 ExpandResult::NeedsEval(state.current_sign())
             }
         }
