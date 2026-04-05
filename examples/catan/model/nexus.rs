@@ -28,8 +28,8 @@ const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
 
-const HIDDEN: usize = 384;
-const GLOBAL_HIDDEN: usize = 128;
+const HIDDEN: usize = 256;
+const GLOBAL_HIDDEN: usize = 96;
 const NUM_LAYERS: usize = 4;
 
 // Action layout (must match action.rs ACTION_SPACE = 249):
