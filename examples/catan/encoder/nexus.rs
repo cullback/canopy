@@ -797,4 +797,80 @@ mod tests {
         assert!(cur_frontier > 0, "cur should have frontier edges");
         assert!(opp_frontier > 0, "opp should have frontier edges");
     }
+
+    #[test]
+    fn features_activate_midgame() {
+        // Play a full game via random actions and verify features activate.
+        let mut state = make_state();
+        let mut rng = fastrand::Rng::with_seed(99);
+        let mut actions = Vec::new();
+
+        // Play until game over or 500 actions
+        for _ in 0..500 {
+            if state.status() != canopy::game::Status::Ongoing {
+                break;
+            }
+            let mut chances = Vec::new();
+            state.chance_outcomes(&mut chances);
+            if !chances.is_empty() {
+                let outcome = state.sample_chance(&mut rng).unwrap();
+                state.apply_action(outcome);
+                continue;
+            }
+            state.legal_actions(&mut actions);
+            if actions.is_empty() {
+                break;
+            }
+            let action = actions[rng.usize(..actions.len())];
+            state.apply_action(action);
+        }
+
+        // Encode mid-game state
+        let mut features = Vec::new();
+        if matches!(
+            state.phase,
+            Phase::Main | Phase::PreRoll | Phase::MoveRobber | Phase::RoadBuilding { .. }
+        ) {
+            NexusEncoder.encode(&state, &mut features);
+            assert_eq!(features.len(), NexusEncoder::FEATURE_SIZE);
+
+            // Check edge features have some roads placed
+            let total_roads: usize = (0..72)
+                .map(|e| {
+                    (features[edge_feat(e, 0)] as usize) + (features[edge_feat(e, 1)] as usize)
+                })
+                .sum();
+            assert!(
+                total_roads >= 4,
+                "should have roads placed mid-game: {total_roads}"
+            );
+
+            // Check longest road nodes activate if either player has 5+ roads
+            let cur = state.current_player;
+            let opp = cur.opponent();
+            if state.boards[cur].road_network.roads.count_ones() >= 5 {
+                let lr_count: usize = (0..54)
+                    .filter(|&n| features[node_feat(n, 23)] > 0.0)
+                    .count();
+                assert!(
+                    lr_count >= 5,
+                    "cur has 5+ roads but longest_road_nodes has only {lr_count} nodes"
+                );
+            }
+            if state.boards[opp].road_network.roads.count_ones() >= 5 {
+                let lr_count: usize = (0..54)
+                    .filter(|&n| features[node_feat(n, 24)] > 0.0)
+                    .count();
+                assert!(
+                    lr_count >= 5,
+                    "opp has 5+ roads but longest_road_nodes has only {lr_count} nodes"
+                );
+            }
+
+            // All features in range
+            for (i, &v) in features.iter().enumerate() {
+                assert!((0.0..=1.0).contains(&v), "feature {i} out of range: {v}");
+            }
+        }
+    }
 }
