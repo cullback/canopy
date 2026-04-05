@@ -42,11 +42,11 @@ fn main() {
         "nexus",
         TrainConfig {
             iterations: 1000,
-            train_samples_per_iter: 100_000,
+            train_samples_per_iter: 150_000,
             replay_buffer_samples: 500_000,
             max_actions: 2000,
             epochs: 2,
-            lr: 0.0005,
+            lr: 0.0015,
             filter_legal: true,
             mcts_sims: 1200,
             inference_batch_size: 2048,
