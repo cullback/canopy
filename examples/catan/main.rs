@@ -52,7 +52,7 @@ fn main() {
             inference_batch_size: 2048,
             train_batch_size: 1024,
             leaf_batch_size: 32,
-            concurrent_games: 768,
+            concurrent_games: 1024,
             gumbel_m: 16,
             explore_actions: 16,
             q_weight_ramp_iters: 60,
