@@ -697,4 +697,104 @@ mod tests {
             assert_eq!(features[opp_trade + i], 0.0, "opp all 4:1 → 0.0");
         }
     }
+
+    fn edge_feat(e: usize, f: usize) -> usize {
+        GLOBAL_OFF + 19 * 10 + 54 * 25 + e * 4 + f
+    }
+
+    #[test]
+    fn new_node_features_after_setup() {
+        let mut state = make_state();
+        play_setup(&mut state);
+
+        let mut features = Vec::new();
+        NexusEncoder.encode(&state, &mut features);
+
+        // cur_settle_legal (offset 21): right after setup, all road endpoints
+        // are either occupied (settlements) or neighbor-blocked (distance rule).
+        // Feature is correctly all-zero — it only lights up once roads extend
+        // beyond the distance-rule exclusion zone.
+        let cur_legal_count: usize = (0..54)
+            .filter(|&n| features[node_feat(n, 21)] > 0.0)
+            .count();
+        let opp_legal_count: usize = (0..54)
+            .filter(|&n| features[node_feat(n, 22)] > 0.0)
+            .count();
+        assert_eq!(
+            cur_legal_count, 0,
+            "no legal spots right after setup (distance rule)"
+        );
+        assert_eq!(
+            opp_legal_count, 0,
+            "no legal spots right after setup (distance rule)"
+        );
+
+        // cur_on_longest_road (offset 23): all zero with < 5 roads
+        for n in 0..54 {
+            assert_eq!(
+                features[node_feat(n, 23)],
+                0.0,
+                "node {n}: lr should be 0 with < 5 roads"
+            );
+            assert_eq!(
+                features[node_feat(n, 24)],
+                0.0,
+                "node {n}: opp lr should be 0"
+            );
+        }
+    }
+
+    #[test]
+    fn edge_features_after_setup() {
+        let mut state = make_state();
+        play_setup(&mut state);
+
+        let mut features = Vec::new();
+        NexusEncoder.encode(&state, &mut features);
+
+        let mut cur_roads = 0;
+        let mut opp_roads = 0;
+        let mut cur_frontier = 0;
+        let mut opp_frontier = 0;
+
+        for e in 0..72 {
+            let cr = features[edge_feat(e, 0)];
+            let or = features[edge_feat(e, 1)];
+            let cf = features[edge_feat(e, 2)];
+            let of = features[edge_feat(e, 3)];
+
+            assert!(cr == 0.0 || cr == 1.0, "edge {e} cur_road not binary: {cr}");
+            assert!(or == 0.0 || or == 1.0, "edge {e} opp_road not binary: {or}");
+            assert!(
+                cf == 0.0 || cf == 1.0,
+                "edge {e} cur_frontier not binary: {cf}"
+            );
+            assert!(
+                of == 0.0 || of == 1.0,
+                "edge {e} opp_frontier not binary: {of}"
+            );
+
+            // Road and frontier are mutually exclusive per player
+            assert!(!(cr == 1.0 && cf == 1.0), "edge {e}: cur road AND frontier");
+            assert!(!(or == 1.0 && of == 1.0), "edge {e}: opp road AND frontier");
+
+            if cr == 1.0 {
+                cur_roads += 1;
+            }
+            if or == 1.0 {
+                opp_roads += 1;
+            }
+            if cf == 1.0 {
+                cur_frontier += 1;
+            }
+            if of == 1.0 {
+                opp_frontier += 1;
+            }
+        }
+
+        assert_eq!(cur_roads, 2, "cur should have 2 roads after setup");
+        assert_eq!(opp_roads, 2, "opp should have 2 roads after setup");
+        assert!(cur_frontier > 0, "cur should have frontier edges");
+        assert!(opp_frontier > 0, "opp should have frontier edges");
+    }
 }
