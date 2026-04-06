@@ -335,6 +335,8 @@ pub struct GameCli<G: Game> {
     configs: Vec<(String, crate::train::TrainConfig)>,
     /// Encoder used by the loaded nn evaluator (set by `load_nn_evaluator`).
     nn_encoder: Option<std::sync::Arc<dyn crate::nn::StateEncoder<G>>>,
+    /// Encoder used by the loaded nn2 evaluator (set by `load_nn_evaluator_2`).
+    nn2_encoder: Option<std::sync::Arc<dyn crate::nn::StateEncoder<G>>>,
 }
 
 #[cfg(feature = "nn")]
@@ -351,6 +353,7 @@ impl<G: Game + 'static> GameCli<G> {
             models: Vec::new(),
             configs: Vec::new(),
             nn_encoder: None,
+            nn2_encoder: None,
         }
     }
 
@@ -463,6 +466,30 @@ impl<G: Game + 'static> GameCli<G> {
                 "Model architecture for nn evaluator",
                 &model_names,
             );
+
+            // Second nn evaluator (nn2) for head-to-head comparison
+            cmd = cmd.arg(
+                Arg::new("nn-model-2")
+                    .long("nn-model-2")
+                    .help("Path to second neural network checkpoint (for nn2 evaluator)"),
+            );
+
+            let encoder_names_2: Vec<String> =
+                self.encoders.iter().map(|(n, _)| n.clone()).collect();
+            cmd = registry_arg(
+                cmd,
+                "encoder-2",
+                "State encoder for nn2 evaluator",
+                &encoder_names_2,
+            );
+
+            let model_names_2: Vec<String> = self.models.iter().map(|(n, _)| n.clone()).collect();
+            cmd = registry_arg(
+                cmd,
+                "model-2",
+                "Model architecture for nn2 evaluator",
+                &model_names_2,
+            );
         }
 
         cmd = cmd.subcommand(self.train_command());
@@ -533,6 +560,68 @@ impl<G: Game + 'static> GameCli<G> {
         let evaluator = trainable.evaluator(encoder.clone());
         self.evaluators.add_arc("nn", evaluator);
         self.nn_encoder = Some(encoder);
+    }
+
+    /// If `--nn-model-2` was provided, load the checkpoint and register an
+    /// `"nn2"` evaluator. No-op if the flag was not given.
+    pub fn load_nn_evaluator_2(&mut self, matches: &ArgMatches) {
+        let Some(path) = matches.get_one::<String>("nn-model-2") else {
+            return;
+        };
+
+        let checkpoint_path = std::path::Path::new(path.as_str());
+        let stem = checkpoint_path
+            .file_stem()
+            .and_then(|s| s.to_str())
+            .expect("invalid checkpoint path");
+        let iteration = stem
+            .strip_prefix("model_iter_")
+            .expect("checkpoint filename must be model_iter_N")
+            .parse::<usize>()
+            .expect("failed to parse iteration from checkpoint filename");
+        let checkpoint_dir = checkpoint_path.parent().unwrap();
+
+        // Look up encoder (--encoder-2, falls back to --encoder, then first registered)
+        let encoder_name = matches
+            .get_one::<String>("encoder-2")
+            .or_else(|| matches.get_one::<String>("encoder"))
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.encoders[0].0.as_str());
+        let encoder = self
+            .encoders
+            .iter()
+            .find(|(n, _)| n == encoder_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.encoders.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown encoder '{encoder_name}', available: {names:?}");
+            })
+            .1
+            .clone();
+
+        // Look up config (for model shape)
+        let config = &self.configs[0].1;
+
+        // Look up model factory (--model-2, falls back to --model, then first registered)
+        let model_name = matches
+            .get_one::<String>("model-2")
+            .or_else(|| matches.get_one::<String>("model"))
+            .map(|s| s.as_str())
+            .unwrap_or_else(|| self.models[0].0.as_str());
+        let factory = &self
+            .models
+            .iter()
+            .find(|(n, _)| n == model_name)
+            .unwrap_or_else(|| {
+                let names: Vec<&str> = self.models.iter().map(|(n, _)| n.as_str()).collect();
+                panic!("unknown model '{model_name}', available: {names:?}");
+            })
+            .1;
+
+        let mut trainable = factory(config);
+        trainable.load_weights(checkpoint_dir, iteration);
+        let evaluator = trainable.evaluator(encoder.clone());
+        self.evaluators.add_arc("nn2", evaluator);
+        self.nn2_encoder = Some(encoder);
     }
 
     /// Look up the selected `--config`, `--encoder`, `--model`, merge CLI
@@ -607,6 +696,7 @@ impl<G: Game + 'static> GameCli<G> {
             return;
         }
         self.load_nn_evaluator(matches);
+        self.load_nn_evaluator_2(matches);
         self.run_tournament(matches, new_game);
     }
 
@@ -640,35 +730,58 @@ impl<G: Game + 'static> GameCli<G> {
     pub fn run_tournament(&self, matches: &ArgMatches, new_game: impl Fn(u64) -> G + Sync) {
         let opts = parse_tournament(matches);
 
-        // If an nn encoder is loaded, set up batched evaluation for nn players.
-        if let Some(encoder) = &self.nn_encoder {
-            self.run_tournament_batched(&opts, new_game, encoder.clone());
+        let has_nn = self.nn_encoder.is_some();
+        let has_nn2 = self.nn2_encoder.is_some();
+
+        // If any nn encoder is loaded, set up batched evaluation.
+        if has_nn || has_nn2 {
+            self.run_tournament_batched(&opts, new_game);
         } else {
             opts.run(new_game, &self.evaluators);
         }
     }
 
-    /// Run tournament with batched nn evaluation.
+    /// Run tournament with batched nn evaluation (supports both nn and nn2).
     fn run_tournament_batched(
         &self,
         opts: &crate::tournament::TournamentOptions,
         new_game: impl Fn(u64) -> G + Sync,
-        encoder: std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
     ) {
         use crate::tournament::BatchedEvaluator;
         use crate::train::inference::InferencePipeline;
 
-        let nn_eval = self.evaluators.get_arc("nn");
-        let pipeline = InferencePipeline::start::<G>(vec![nn_eval.clone()], 256);
+        // Set up pipeline for "nn" evaluator if loaded.
+        let nn_pipeline = self.nn_encoder.as_ref().map(|_| {
+            let eval = self.evaluators.get_arc("nn");
+            InferencePipeline::start::<G>(vec![eval], 256)
+        });
 
-        // Wrap nn players in BatchedEvaluator; leave others direct.
+        // Set up separate pipeline for "nn2" evaluator if loaded.
+        let nn2_pipeline = self.nn2_encoder.as_ref().map(|_| {
+            let eval = self.evaluators.get_arc("nn2");
+            InferencePipeline::start::<G>(vec![eval], 256)
+        });
+
+        // Wrap nn/nn2 players in BatchedEvaluator; leave others direct.
+        let make_batched = |name: &str| -> Option<BatchedEvaluator<G>> {
+            if name == "nn" {
+                let encoder = self.nn_encoder.as_ref().unwrap().clone();
+                let eval = self.evaluators.get_arc("nn");
+                let sender = nn_pipeline.as_ref().unwrap().sender();
+                Some(BatchedEvaluator::new(eval, encoder, sender))
+            } else if name == "nn2" {
+                let encoder = self.nn2_encoder.as_ref().unwrap().clone();
+                let eval = self.evaluators.get_arc("nn2");
+                let sender = nn2_pipeline.as_ref().unwrap().sender();
+                Some(BatchedEvaluator::new(eval, encoder, sender))
+            } else {
+                None
+            }
+        };
+
         let batched: [Option<BatchedEvaluator<G>>; 2] = [
-            (opts.eval_names[0] == "nn").then(|| {
-                BatchedEvaluator::new(nn_eval.clone(), encoder.clone(), pipeline.sender())
-            }),
-            (opts.eval_names[1] == "nn").then(|| {
-                BatchedEvaluator::new(nn_eval.clone(), encoder.clone(), pipeline.sender())
-            }),
+            make_batched(&opts.eval_names[0]),
+            make_batched(&opts.eval_names[1]),
         ];
 
         let eval_refs: [&(dyn crate::eval::Evaluator<G> + Sync); 2] = [
@@ -691,23 +804,32 @@ impl<G: Game + 'static> GameCli<G> {
             opts.num_games,
         );
 
-        let eval_counter = pipeline.stats().evals_counter();
+        // Use the first available pipeline's stats for eval counting.
+        let eval_counter = nn_pipeline
+            .as_ref()
+            .or(nn2_pipeline.as_ref())
+            .map(|p| p.stats().evals_counter());
         let logs = crate::tournament::tournament_with_stats(
             new_game,
             &eval_refs,
             &opts.configs,
             opts.num_games,
             &mut rng,
-            Some(eval_counter),
+            eval_counter,
         );
 
         if let Some(dir) = &opts.log_dir {
             crate::tournament::save_game_logs(&logs, dir);
         }
 
-        // Drop batched evaluators (their cloned senders) before joining pipeline.
+        // Drop batched evaluators (their cloned senders) before joining pipelines.
         drop(batched);
-        pipeline.join();
+        if let Some(p) = nn_pipeline {
+            p.join();
+        }
+        if let Some(p) = nn2_pipeline {
+            p.join();
+        }
     }
 }
 

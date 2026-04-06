@@ -58,8 +58,10 @@ use crate::game::state::{GameState, Phase, PlayerBoards};
 use crate::game::topology::Topology;
 
 mod nexus;
+mod nexus_v1;
 
 pub use nexus::NexusEncoder;
+pub use nexus_v1::NexusEncoderV1;
 
 /// Number of pips (dots on the number token) for each dice sum.
 /// pips[n] = 6 - |7 - n| for n in 2..=12, 0 otherwise.
