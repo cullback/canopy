@@ -1,10 +1,7 @@
-//! V1 heterogeneous GNN model for Catan.
+//! Heterogeneous GNN model for Catan.
 //!
-//! Same architecture as current nexus but with:
-//! - NF=21 (no settle_legal, no longest_road_nodes)
-//! - No edge features (EF=0)
-//! - 4 GNN layers instead of 5
-//! - Road policy head takes HIDDEN*2 (no edge features concatenated)
+//! Nodes and tiles are first-class entities with cross-messaging, giving the
+//! robber head direct per-tile embeddings and simplifying the node encoder.
 
 use std::sync::OnceLock;
 
@@ -29,13 +26,24 @@ const NF: usize = 21;
 const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;
+/// Small model: 256 hidden, 96 global, 4 GNN layers (~2.4M params).
+#[allow(dead_code)]
+pub type CatanNexusSmallV1<B> = CatanNexusModelV1<B, 256, 96, 4>;
+/// Large model: 384 hidden, 128 global, 4 GNN layers (~5.5M params).
+#[allow(dead_code)]
+pub type CatanNexusLargeV1<B> = CatanNexusModelV1<B, 384, 128, 4>;
 
-const HIDDEN: usize = 256;
-const GLOBAL_HIDDEN: usize = 96;
-const NUM_LAYERS: usize = 4;
-
-// Action layout (same as current, 249 total):
+// Action layout (must match action.rs ACTION_SPACE = 249):
 //   [settlement 0..54 | road 54..126 | city 126..180 | other_pre 180..205 | robber 205..224 | other_post 224..249]
+//
+// other_pre (25): Roll(180), EndTurn(181), BuyDevCard(182), PlayKnight(183),
+//                 PlayRoadBuilding(184), YearOfPlenty(185..200), Monopoly(200..205)
+// robber    (19): MoveRobber(205..224)
+// other_post(25): Discard(224..229), MaritimeTrade(229..249)
+//
+// The "other" MLP produces 50 logits split at index 25 to interleave robber
+// logits from the per-tile head. If actions are added or reordered, these
+// constants and the concat order in forward() must be updated together.
 const NUM_OTHER_PRE: usize = 25;
 const NUM_OTHER_POST: usize = 25;
 const NUM_OTHER: usize = NUM_OTHER_PRE + NUM_OTHER_POST;
@@ -43,10 +51,17 @@ const NUM_OTHER: usize = NUM_OTHER_PRE + NUM_OTHER_POST;
 // ── Static graph topology ────────────────────────────────────────────
 
 struct NexusV1GraphData {
+    /// Row-normalized node-to-node adjacency [54×54], flattened.
     node_adj_flat: Vec<f32>,
+    /// Row-normalized tile-to-node adjacency [54×19], flattened.
+    /// node i receives from its 2-3 adjacent tiles.
     tile_to_node_adj_flat: Vec<f32>,
+    /// Row-normalized node-to-tile adjacency [19×54], flattened.
+    /// tile j receives from its 6 corner nodes (each = 1/6).
     node_to_tile_adj_flat: Vec<f32>,
+    /// Source node index for each edge.
     edge_src: [usize; NUM_EDGES],
+    /// Destination node index for each edge.
     edge_dst: [usize; NUM_EDGES],
 }
 
@@ -56,6 +71,7 @@ fn nexus_v1_graph_data() -> &'static NexusV1GraphData {
     NEXUS_V1_GRAPH_DATA.get_or_init(|| {
         let topo = Topology::from_seed(0);
 
+        // Node-to-node adjacency (row-normalized, no self-loops)
         let mut node_adj_flat = vec![0.0f32; NUM_NODES * NUM_NODES];
         for i in 0..NUM_NODES {
             let neighbors = &topo.nodes[i].adjacent_nodes;
@@ -65,6 +81,7 @@ fn nexus_v1_graph_data() -> &'static NexusV1GraphData {
             }
         }
 
+        // Tile-to-node adjacency [54×19]: node i ← tiles adjacent to i
         let mut tile_to_node_adj_flat = vec![0.0f32; NUM_NODES * NUM_TILES];
         for i in 0..NUM_NODES {
             let adj_tiles = &topo.nodes[i].adjacent_tiles;
@@ -74,6 +91,7 @@ fn nexus_v1_graph_data() -> &'static NexusV1GraphData {
             }
         }
 
+        // Node-to-tile adjacency [19×54]: tile j ← 6 corner nodes
         let mut node_to_tile_adj_flat = vec![0.0f32; NUM_TILES * NUM_NODES];
         for (j, tile) in topo.tiles.iter().enumerate() {
             for &nid in &tile.nodes {
@@ -81,6 +99,7 @@ fn nexus_v1_graph_data() -> &'static NexusV1GraphData {
             }
         }
 
+        // Edge endpoints
         let mut edge_src = [0usize; NUM_EDGES];
         let mut edge_dst = [0usize; NUM_EDGES];
         for e in 0..NUM_EDGES {
@@ -104,7 +123,7 @@ fn nexus_v1_graph_data() -> &'static NexusV1GraphData {
 // ── Heterogeneous GNN Layer ──────────────────────────────────────────
 
 #[derive(Module, Debug)]
-struct HeteroGnnLayerV1<B: Backend> {
+struct HeteroGnnLayerV1<B: Backend, const H: usize> {
     node_norm: LayerNorm<B>,
     tile_norm: LayerNorm<B>,
     linear_node_self: Linear<B>,
@@ -114,19 +133,26 @@ struct HeteroGnnLayerV1<B: Backend> {
     linear_nt: Linear<B>,
 }
 
-fn hetero_gnn_layer_v1<B: Backend>(device: &B::Device) -> HeteroGnnLayerV1<B> {
+fn hetero_gnn_layer_v1<B: Backend, const H: usize>(device: &B::Device) -> HeteroGnnLayerV1<B, H> {
     HeteroGnnLayerV1 {
-        node_norm: LayerNormConfig::new(HIDDEN).init(device),
-        tile_norm: LayerNormConfig::new(HIDDEN).init(device),
-        linear_node_self: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-        linear_nn: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-        linear_tn: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-        linear_tile_self: LinearConfig::new(HIDDEN, HIDDEN).init(device),
-        linear_nt: LinearConfig::new(HIDDEN, HIDDEN).init(device),
+        node_norm: LayerNormConfig::new(H).init(device),
+        tile_norm: LayerNormConfig::new(H).init(device),
+        linear_node_self: LinearConfig::new(H, H).init(device),
+        linear_nn: LinearConfig::new(H, H).init(device),
+        linear_tn: LinearConfig::new(H, H).init(device),
+        linear_tile_self: LinearConfig::new(H, H).init(device),
+        linear_nt: LinearConfig::new(H, H).init(device),
     }
 }
 
-impl<B: Backend> HeteroGnnLayerV1<B> {
+impl<B: Backend, const H: usize> HeteroGnnLayerV1<B, H> {
+    /// Pre-norm residual heterogeneous GNN layer.
+    ///
+    /// ```text
+    /// node_norm = LN(node);  tile_norm = LN(tile)
+    /// node = node + ReLU(Linear_self(node_norm) + node_adj @ Linear_nn(node_norm) + tile_to_node_adj @ Linear_tn(tile_norm))
+    /// tile = tile + ReLU(Linear_tile_self(tile_norm) + node_to_tile_adj @ Linear_nt(node_norm))
+    /// ```
     fn forward(
         &self,
         node: Tensor<B, 3>,
@@ -138,6 +164,7 @@ impl<B: Backend> HeteroGnnLayerV1<B> {
         let [batch, num_nodes, hidden] = node.dims();
         let [_, num_tiles, _] = tile.dims();
 
+        // Pre-norm
         let node_norm = self
             .node_norm
             .forward(node.clone().reshape([batch * num_nodes, hidden]))
@@ -147,6 +174,7 @@ impl<B: Backend> HeteroGnnLayerV1<B> {
             .forward(tile.clone().reshape([batch * num_tiles, hidden]))
             .reshape([batch, num_tiles, hidden]);
 
+        // Node update: self + node-to-node messages + tile-to-node messages
         let node_self = self
             .linear_node_self
             .forward(node_norm.clone().reshape([batch * num_nodes, hidden]))
@@ -163,6 +191,7 @@ impl<B: Backend> HeteroGnnLayerV1<B> {
         let tn_agg = tile_to_node_adj.matmul(tn_msg);
         let node_out = node + relu(node_self + nn_agg + tn_agg);
 
+        // Tile update: self + node-to-tile messages
         let tile_self = self
             .linear_tile_self
             .forward(tile_norm.reshape([batch * num_tiles, hidden]))
@@ -178,10 +207,10 @@ impl<B: Backend> HeteroGnnLayerV1<B> {
     }
 }
 
-// ── Nexus V1 Model ──────────────────────────────────────────────────
+// ── Nexus Model ──────────────────────────────────────────────────────
 
 #[derive(Module, Debug)]
-pub struct CatanNexusModelV1<B: Backend> {
+pub struct CatanNexusModelV1<B: Backend, const H: usize, const GH: usize, const L: usize> {
     // Input projections
     global_proj: Linear<B>,
     tile_proj: Linear<B>,
@@ -194,7 +223,7 @@ pub struct CatanNexusModelV1<B: Backend> {
     tile_inject_norm: LayerNorm<B>,
 
     // GNN trunk
-    gnn_layers: Vec<HeteroGnnLayerV1<B>>,
+    gnn_layers: Vec<HeteroGnnLayerV1<B, H>>,
 
     // Constant graph tensors
     node_adj: Tensor<B, 3>,
@@ -203,24 +232,35 @@ pub struct CatanNexusModelV1<B: Backend> {
     edge_src: Tensor<B, 1, Int>,
     edge_dst: Tensor<B, 1, Int>,
 
-    // Policy heads (2-layer each)
-    policy_settlement: [Linear<B>; 2],
-    policy_road: [Linear<B>; 2],
-    policy_city: [Linear<B>; 2],
-    policy_other: [Linear<B>; 2],
-    policy_robber: [Linear<B>; 2],
+    // Policy heads
+    policy_settlement1: Linear<B>,
+    policy_settlement2: Linear<B>,
+    policy_road1: Linear<B>,
+    policy_road2: Linear<B>,
+    policy_city1: Linear<B>,
+    policy_city2: Linear<B>,
+    policy_other1: Linear<B>,
+    policy_other2: Linear<B>,
+    policy_robber1: Linear<B>,
+    policy_robber2: Linear<B>,
 
-    // Value head (3-layer)
-    value: [Linear<B>; 3],
+    // Value head
+    value1: Linear<B>,
+    value2: Linear<B>,
+    value3: Linear<B>,
 
-    // Auxiliary short-term value heads
+    // Auxiliary short-term value heads (None if num_aux_heads == 0)
     aux_value_hidden: Option<Linear<B>>,
     aux_value_out: Option<Linear<B>>,
 }
 
-pub fn init_nexus_v1<B: Backend>(device: &B::Device, num_aux_heads: usize) -> CatanNexusModelV1<B> {
+pub fn init_nexus_v1<B: Backend, const H: usize, const GH: usize, const L: usize>(
+    device: &B::Device,
+    num_aux_heads: usize,
+) -> CatanNexusModelV1<B, H, GH, L> {
     let graph = nexus_v1_graph_data();
 
+    // Build constant graph tensors
     let node_adj = Tensor::<B, 2>::from_data(
         burn::tensor::TensorData::new(graph.node_adj_flat.clone(), [NUM_NODES, NUM_NODES]),
         device,
@@ -250,21 +290,19 @@ pub fn init_nexus_v1<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Ca
         device,
     );
 
-    let pool_dim = HIDDEN + HIDDEN + GLOBAL_HIDDEN;
+    let pool_dim = H + H + GH;
 
     CatanNexusModelV1 {
-        global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
-        tile_proj: LinearConfig::new(TF, HIDDEN).init(device),
-        node_proj: LinearConfig::new(NF, HIDDEN).init(device),
+        global_proj: LinearConfig::new(GL, GH).init(device),
+        tile_proj: LinearConfig::new(TF, H).init(device),
+        node_proj: LinearConfig::new(NF, H).init(device),
 
-        node_inject_proj: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
-        node_inject_norm: LayerNormConfig::new(HIDDEN).init(device),
-        tile_inject_proj: LinearConfig::new(HIDDEN + GLOBAL_HIDDEN, HIDDEN).init(device),
-        tile_inject_norm: LayerNormConfig::new(HIDDEN).init(device),
+        node_inject_proj: LinearConfig::new(H + GH, H).init(device),
+        node_inject_norm: LayerNormConfig::new(H).init(device),
+        tile_inject_proj: LinearConfig::new(H + GH, H).init(device),
+        tile_inject_norm: LayerNormConfig::new(H).init(device),
 
-        gnn_layers: (0..NUM_LAYERS)
-            .map(|_| hetero_gnn_layer_v1(device))
-            .collect(),
+        gnn_layers: (0..L).map(|_| hetero_gnn_layer_v1(device)).collect(),
 
         node_adj,
         tile_to_node_adj,
@@ -272,53 +310,41 @@ pub fn init_nexus_v1<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Ca
         edge_src,
         edge_dst,
 
-        // 2-layer policy heads
-        policy_settlement: [
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, 1).init(device),
-        ],
-        policy_road: [
-            LinearConfig::new(HIDDEN * 2, HIDDEN).init(device), // no EF
-            LinearConfig::new(HIDDEN, 1).init(device),
-        ],
-        policy_city: [
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, 1).init(device),
-        ],
-        policy_other: [
-            LinearConfig::new(pool_dim, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
-        ],
-        policy_robber: [
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, 1).init(device),
-        ],
+        policy_settlement1: LinearConfig::new(H, H).init(device),
+        policy_settlement2: LinearConfig::new(H, 1).init(device),
+        policy_road1: LinearConfig::new(H * 2, H).init(device),
+        policy_road2: LinearConfig::new(H, 1).init(device),
+        policy_city1: LinearConfig::new(H, H).init(device),
+        policy_city2: LinearConfig::new(H, 1).init(device),
+        policy_other1: LinearConfig::new(pool_dim, H).init(device),
+        policy_other2: LinearConfig::new(H, NUM_OTHER).init(device),
+        policy_robber1: LinearConfig::new(H, H).init(device),
+        policy_robber2: LinearConfig::new(H, 1).init(device),
 
-        // 3-layer value head
-        value: [
-            LinearConfig::new(pool_dim, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, 3).init(device),
-        ],
+        value1: LinearConfig::new(pool_dim, H).init(device),
+        value2: LinearConfig::new(H, H).init(device),
+        value3: LinearConfig::new(H, 3).init(device),
 
         aux_value_hidden: if num_aux_heads > 0 {
-            Some(LinearConfig::new(pool_dim, HIDDEN).init(device))
+            Some(LinearConfig::new(pool_dim, H).init(device))
         } else {
             None
         },
         aux_value_out: if num_aux_heads > 0 {
-            Some(LinearConfig::new(HIDDEN, num_aux_heads).init(device))
+            Some(LinearConfig::new(H, num_aux_heads).init(device))
         } else {
             None
         },
     }
 }
 
-impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV1<B> {
+impl<B: Backend, const H: usize, const GH: usize, const L: usize> PolicyValueNet<B>
+    for CatanNexusModelV1<B, H, GH, L>
+{
     fn forward(&self, input: Tensor<B, 2>) -> ForwardOutput<B> {
         let [batch, _] = input.dims();
 
-        // ── Split input: [global | tiles | nodes] (no edges) ────────
+        // ── Split input: [global | tiles | nodes] ────────────────────
         let global_raw = input.clone().narrow(1, 0, GL);
         let tiles_raw = input
             .clone()
@@ -336,42 +362,42 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV1<B> {
             self.tile_proj
                 .forward(tiles_raw.reshape([batch * NUM_TILES, TF])),
         )
-        .reshape([batch, NUM_TILES, HIDDEN]);
+        .reshape([batch, NUM_TILES, H]);
 
         // ── Project nodes ──────────────────────────────────────────
         let nodes = relu(
             self.node_proj
                 .forward(nodes_raw.reshape([batch * NUM_NODES, NF])),
         )
-        .reshape([batch, NUM_NODES, HIDDEN]);
+        .reshape([batch, NUM_NODES, H]);
 
         // ── Inject global into nodes ─────────────────────────────────
         let global_for_nodes = global
             .clone()
-            .reshape([batch, 1, GLOBAL_HIDDEN])
+            .reshape([batch, 1, GH])
             .repeat_dim(1, NUM_NODES);
         let node_combined = Tensor::cat(vec![nodes, global_for_nodes], 2);
         let mut h_node = relu(
             self.node_inject_norm.forward(
                 self.node_inject_proj
-                    .forward(node_combined.reshape([batch * NUM_NODES, HIDDEN + GLOBAL_HIDDEN])),
+                    .forward(node_combined.reshape([batch * NUM_NODES, H + GH])),
             ),
         )
-        .reshape([batch, NUM_NODES, HIDDEN]);
+        .reshape([batch, NUM_NODES, H]);
 
         // ── Inject global into tiles ─────────────────────────────────
         let global_for_tiles = global
             .clone()
-            .reshape([batch, 1, GLOBAL_HIDDEN])
+            .reshape([batch, 1, GH])
             .repeat_dim(1, NUM_TILES);
         let tile_combined = Tensor::cat(vec![tiles, global_for_tiles], 2);
         let mut h_tile = relu(
             self.tile_inject_norm.forward(
                 self.tile_inject_proj
-                    .forward(tile_combined.reshape([batch * NUM_TILES, HIDDEN + GLOBAL_HIDDEN])),
+                    .forward(tile_combined.reshape([batch * NUM_TILES, H + GH])),
             ),
         )
-        .reshape([batch, NUM_TILES, HIDDEN]);
+        .reshape([batch, NUM_TILES, H]);
 
         // ── GNN trunk ─────────────────────────────────────────────────
         for layer in &self.gnn_layers {
@@ -385,51 +411,66 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV1<B> {
             h_node = n;
             h_tile = t;
         }
+        // h_node: [batch, 54, H], h_tile: [batch, 19, H]
 
         // ── Policy: Settlement (actions 0-53) ────────────────────────
-        let s = relu(
-            self.policy_settlement[0].forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN])),
+        let settlement_hidden = relu(
+            self.policy_settlement1
+                .forward(h_node.clone().reshape([batch * NUM_NODES, H])),
         );
-        let settlement_logits = self.policy_settlement[1]
-            .forward(s)
+        let settlement_logits = self
+            .policy_settlement2
+            .forward(settlement_hidden)
             .reshape([batch, NUM_NODES]);
 
         // ── Policy: Road (actions 54-125) ────────────────────────────
-        // No edge features — just use node pair embeddings
         let h_src = h_node.clone().select(1, self.edge_src.clone());
         let h_dst = h_node.clone().select(1, self.edge_dst.clone());
         let edge_sum = h_src.clone() + h_dst.clone();
         let edge_diff = (h_src - h_dst).abs();
         let edge_feats = Tensor::cat(vec![edge_sum, edge_diff], 2);
-        let r =
-            relu(self.policy_road[0].forward(edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2])));
-        let road_logits = self.policy_road[1].forward(r).reshape([batch, NUM_EDGES]);
+        let edge_feats_hidden = relu(
+            self.policy_road1
+                .forward(edge_feats.reshape([batch * NUM_EDGES, H * 2])),
+        );
+        let road_logits = self
+            .policy_road2
+            .forward(edge_feats_hidden)
+            .reshape([batch, NUM_EDGES]);
 
         // ── Policy: City (actions 126-179) ───────────────────────────
-        let c =
-            relu(self.policy_city[0].forward(h_node.clone().reshape([batch * NUM_NODES, HIDDEN])));
-        let city_logits = self.policy_city[1].forward(c).reshape([batch, NUM_NODES]);
+        let city_hidden = relu(
+            self.policy_city1
+                .forward(h_node.clone().reshape([batch * NUM_NODES, H])),
+        );
+        let city_logits = self
+            .policy_city2
+            .forward(city_hidden)
+            .reshape([batch, NUM_NODES]);
 
-        // ── Pooled features ─────────────────────────────────────────
-        let node_pool = h_node.clone().mean_dim(1).reshape([batch, HIDDEN]);
-        let tile_pool = h_tile.clone().mean_dim(1).reshape([batch, HIDDEN]);
+        // ── Pooled features (shared by other-policy and value heads) ─
+        let node_pool = h_node.clone().mean_dim(1).reshape([batch, H]);
+        let tile_pool = h_tile.clone().mean_dim(1).reshape([batch, H]);
         let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1);
 
         // ── Policy: Other (50 non-robber actions) ────────────────────
-        let o = relu(self.policy_other[0].forward(pooled.clone()));
-        let other_logits = self.policy_other[1].forward(o);
+        let other_hidden = relu(self.policy_other1.forward(pooled.clone()));
+        let other_logits = self.policy_other2.forward(other_hidden);
+        // Split into pre-robber [25] and post-robber [25]
         let other_pre = other_logits.clone().narrow(1, 0, NUM_OTHER_PRE);
         let other_post = other_logits.narrow(1, NUM_OTHER_PRE, NUM_OTHER_POST);
 
         // ── Policy: Robber (actions 205-223) ─────────────────────────
-        let rb = relu(
-            self.policy_robber[0].forward(h_tile.clone().reshape([batch * NUM_TILES, HIDDEN])),
+        let robber_hidden = relu(
+            self.policy_robber1
+                .forward(h_tile.clone().reshape([batch * NUM_TILES, H])),
         );
-        let robber_logits = self.policy_robber[1]
-            .forward(rb)
+        let robber_logits = self
+            .policy_robber2
+            .forward(robber_hidden)
             .reshape([batch, NUM_TILES]);
 
-        // ── Concatenate policy logits ────────────────────────────────
+        // ── Concatenate: [settlement(54)|road(72)|city(54)|other_pre(25)|robber(19)|other_post(25)]
         let policy = Tensor::cat(
             vec![
                 settlement_logits,
@@ -442,19 +483,17 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV1<B> {
             1,
         );
 
-        // ── Value head (3 layers) ───────────────────────────────────
-        let mut v = pooled.clone();
-        for layer in &self.value[..2] {
-            v = relu(layer.forward(v));
-        }
-        let value = self.value[2].forward(v);
+        // ── Value head ───────────────────────────────────────────────
+        let v = relu(self.value1.forward(pooled.clone()));
+        let v = relu(self.value2.forward(v));
+        let value = self.value3.forward(v);
 
         // ── Auxiliary value heads ────────────────────────────────────
         let aux_values = if let (Some(aux_hidden), Some(aux_out)) =
             (&self.aux_value_hidden, &self.aux_value_out)
         {
             let h = relu(aux_hidden.forward(pooled));
-            Some(tanh(aux_out.forward(h)))
+            Some(tanh(aux_out.forward(h))) // [batch, num_aux]
         } else {
             None
         };

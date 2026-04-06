@@ -38,7 +38,7 @@ fn main() {
         init_nexus(device, cfg.aux_value_horizons.len())
     });
     setup.add_model("nexus-v1", |device, cfg| {
-        init_nexus_v1(device, cfg.aux_value_horizons.len())
+        init_nexus_v1::<_, 256, 96, 4>(device, cfg.aux_value_horizons.len())
     });
 
     // Configs
