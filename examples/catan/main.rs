@@ -52,7 +52,7 @@ fn main() {
             epochs: 2,
             lr: 0.0005,
             filter_legal: true,
-            mcts_sims: 1200,
+            mcts_sims: 3200,
             inference_batch_size: 2048,
             train_batch_size: 1024,
             leaf_batch_size: 32,
