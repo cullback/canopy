@@ -459,6 +459,7 @@ impl<G: Game + 'static> GameCli<G> {
     pub fn load_checkpoint(
         &self,
         path: &str,
+        model_override: Option<&str>,
     ) -> (
         std::sync::Arc<dyn crate::eval::Evaluator<G> + Sync>,
         std::sync::Arc<dyn crate::nn::StateEncoder<G>>,
@@ -481,10 +482,9 @@ impl<G: Game + 'static> GameCli<G> {
             .ok()
             .and_then(|bytes| serde_json::from_slice(&bytes).ok());
 
-        // Resolve encoder
-        let encoder_name = meta
-            .as_ref()
-            .and_then(|m| m.encoder.as_deref())
+        // Resolve encoder: override > metadata > first registered
+        let encoder_name = model_override
+            .or_else(|| meta.as_ref().and_then(|m| m.encoder.as_deref()))
             .unwrap_or_else(|| self.encoders[0].0.as_str());
         let encoder = self
             .encoders
@@ -497,10 +497,9 @@ impl<G: Game + 'static> GameCli<G> {
             .1
             .clone();
 
-        // Resolve model
-        let model_name = meta
-            .as_ref()
-            .and_then(|m| m.model.as_deref())
+        // Resolve model: override > metadata > first registered
+        let model_name = model_override
+            .or_else(|| meta.as_ref().and_then(|m| m.model.as_deref()))
             .unwrap_or_else(|| self.models[0].0.as_str());
         let factory = &self
             .models
@@ -519,17 +518,29 @@ impl<G: Game + 'static> GameCli<G> {
         (evaluator, encoder)
     }
 
-    /// Resolve an eval spec: if it looks like a file path (contains `/` or
-    /// ends with `.mpk`), load the checkpoint and register the evaluator under
-    /// `label`, returning Some(encoder). Otherwise it is a named evaluator and
-    /// returns None.
+    /// Resolve an eval spec. Accepts:
+    /// - Named evaluator: `rollout`, `random`
+    /// - Checkpoint path: `path/to/model_iter_N.mpk`
+    /// - Checkpoint with model override: `path/to/model.mpk:nexus-v1`
     pub fn resolve_eval_spec(
         &mut self,
         spec: &str,
         label: &str,
     ) -> Option<std::sync::Arc<dyn crate::nn::StateEncoder<G>>> {
-        if spec.contains('/') || spec.ends_with(".mpk") {
-            let (evaluator, encoder) = self.load_checkpoint(spec);
+        // Split on last `:` that follows `.mpk` to separate path from model name
+        let (path, model_override) = if let Some(colon) = spec.rfind(':') {
+            let before = &spec[..colon];
+            if before.contains('/') || before.ends_with(".mpk") {
+                (before, Some(&spec[colon + 1..]))
+            } else {
+                (spec, None)
+            }
+        } else {
+            (spec, None)
+        };
+
+        if path.contains('/') || path.ends_with(".mpk") {
+            let (evaluator, encoder) = self.load_checkpoint(path, model_override);
             self.evaluators.add_arc(label, evaluator);
             self.checkpoint_encoders
                 .push((label.to_string(), encoder.clone()));
