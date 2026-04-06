@@ -520,27 +520,18 @@ impl<G: Game + 'static> GameCli<G> {
 
     /// Resolve an eval spec. Accepts:
     /// - Named evaluator: `rollout`, `random`
-    /// - Checkpoint path: `path/to/model_iter_N.mpk`
-    /// - Checkpoint with model override: `path/to/model.mpk:nexus-v1`
+    /// - Model checkpoint: `nexus:path/to/model_iter_N.mpk`
+    ///
+    /// The `name:path` form loads a checkpoint using the named model/encoder.
     pub fn resolve_eval_spec(
         &mut self,
         spec: &str,
         label: &str,
     ) -> Option<std::sync::Arc<dyn crate::nn::StateEncoder<G>>> {
-        // Split on last `:` that follows `.mpk` to separate path from model name
-        let (path, model_override) = if let Some(colon) = spec.rfind(':') {
-            let before = &spec[..colon];
-            if before.contains('/') || before.ends_with(".mpk") {
-                (before, Some(&spec[colon + 1..]))
-            } else {
-                (spec, None)
-            }
-        } else {
-            (spec, None)
-        };
-
-        if path.contains('/') || path.ends_with(".mpk") {
-            let (evaluator, encoder) = self.load_checkpoint(path, model_override);
+        if let Some(colon) = spec.find(':') {
+            let model_name = &spec[..colon];
+            let path = &spec[colon + 1..];
+            let (evaluator, encoder) = self.load_checkpoint(path, Some(model_name));
             self.evaluators.add_arc(label, evaluator);
             self.checkpoint_encoders
                 .push((label.to_string(), encoder.clone()));
