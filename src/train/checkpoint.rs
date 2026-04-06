@@ -85,12 +85,16 @@ pub(super) fn save_checkpoint<G: Game>(
     run_dir: &PathBuf,
     iter_num: usize,
     rng: &mut fastrand::Rng,
+    model_name: Option<&str>,
+    encoder_name: Option<&str>,
 ) {
     model.save(run_dir, iter_num);
 
     let meta = CheckpointMeta {
         iteration: iter_num,
         rng_seed: rng.u64(..),
+        model: model_name.map(|s| s.to_string()),
+        encoder: encoder_name.map(|s| s.to_string()),
     };
     let meta_path = run_dir.join(format!("checkpoint_iter_{iter_num}.json"));
     std::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap())

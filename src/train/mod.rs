@@ -92,6 +92,10 @@ pub struct TrainMetrics {
 pub struct CheckpointMeta {
     pub iteration: usize,
     pub rng_seed: u64,
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub encoder: Option<String>,
 }
 
 // ---------------------------------------------------------------------------
@@ -142,6 +146,8 @@ pub fn run_training<G>(
     model: &mut dyn TrainableModel<G>,
     encoder: Arc<dyn StateEncoder<G>>,
     new_state: impl Fn(u64) -> G + Send + Sync + 'static,
+    model_name: Option<&str>,
+    encoder_name: Option<&str>,
 ) where
     G: Game + 'static,
 {
@@ -390,7 +396,14 @@ pub fn run_training<G>(
         let iter_num = iteration + 1;
         let is_last = iter_num == config.iterations;
         if is_last || iter_num % config.checkpoint_interval == 0 {
-            checkpoint::save_checkpoint(model, &run_dir, iter_num, &mut rng);
+            checkpoint::save_checkpoint(
+                model,
+                &run_dir,
+                iter_num,
+                &mut rng,
+                model_name,
+                encoder_name,
+            );
         }
 
         // Timing / ETA

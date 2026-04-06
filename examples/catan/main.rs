@@ -99,6 +99,12 @@ fn main() {
                         .help("Serve board via web UI on this port"),
                 )
                 .arg(
+                    Arg::new("eval")
+                        .long("eval")
+                        .default_value("rollout")
+                        .help("Evaluator (name or checkpoint path)"),
+                )
+                .arg(
                     Arg::new("leaf-batch")
                         .long("leaf-batch")
                         .default_value("1")
@@ -133,13 +139,14 @@ fn main() {
             .expect("invalid port");
         if let Some(serve_port) = sub.get_one::<String>("serve") {
             let serve_port: u16 = serve_port.parse().expect("invalid serve port");
-            setup.load_nn_evaluator(&matches);
-            let has_nn = matches.get_one::<String>("nn-model").is_some();
-            let (eval_name, evaluator) = if has_nn {
-                ("nn", setup.evaluators().get_arc("nn"))
+            let eval_spec = sub.get_one::<String>("eval").unwrap().clone();
+            setup.resolve_eval_spec(&eval_spec, "colonist-nn");
+            let eval_name = if eval_spec.contains('/') || eval_spec.ends_with(".mpk") {
+                "colonist-nn"
             } else {
-                ("rollout", setup.evaluators().get_arc("rollout"))
+                eval_spec.as_str()
             };
+            let evaluator = setup.evaluators().get_arc(eval_name);
             let leaf_batch: u32 = sub
                 .get_one::<String>("leaf-batch")
                 .unwrap()
@@ -157,7 +164,7 @@ fn main() {
         let static_dir =
             std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("examples/catan/web");
         let presenter = Arc::new(presenter::CatanPresenter::new(static_dir, dice));
-        setup.run_serve(&matches, sub, presenter);
+        setup.run_serve(sub, presenter);
         return;
     }
 
