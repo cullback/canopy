@@ -60,6 +60,10 @@ pub struct Sample {
     pub prior_agrees: bool,
     /// Short-term value targets (length = aux_value_horizons.len()).
     pub aux_targets: Box<[f32]>,
+    /// Average simulation depth for this position's search.
+    pub search_depth_avg: f32,
+    /// Maximum simulation depth for this position's search.
+    pub search_depth_max: u32,
 }
 
 /// Per-iteration config passed to the model's train_step method.
@@ -421,7 +425,7 @@ pub fn run_training<G>(
         };
 
         info!(
-            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} actions) {} samples (buffer: {} samples, {} games) | policy {:.4}/{:.4} wdl {:.4}/{:.4} | {:.0} evals/s, avg batch {:.1} | self-play {}, train {} | total {}, ETA {}",
+            "iter {}/{}: {} games (W:{} L:{} D:{}, avg {} actions) {} samples (buffer: {} samples, {} games) | policy {:.4}/{:.4} wdl {:.4}/{:.4} | depth {:.1}/{} | {:.0} evals/s, avg batch {:.1} | self-play {}, train {} | total {}, ETA {}",
             iters_done,
             config.iterations,
             num_games_total,
@@ -436,6 +440,8 @@ pub fn run_training<G>(
             train_metrics.loss_policy_val,
             train_metrics.loss_wdl_train,
             train_metrics.loss_wdl_val,
+            sp.search_depth_avg,
+            sp.search_depth_max,
             evals_per_sec,
             avg_batch_size,
             HumanDuration(self_play_elapsed),
@@ -506,6 +512,8 @@ pub fn run_training<G>(
             time_train_secs: train_elapsed.as_secs_f64(),
             evals_per_sec,
             avg_batch_size,
+            search_depth_avg: sp.search_depth_avg,
+            search_depth_max: sp.search_depth_max,
         });
     }
 

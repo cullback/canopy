@@ -1,0 +1,2 @@
+- how much do transpositions help in catan? worth the overhead?
+- mask out starting settlements < 8 pips. eliminates 34 nodes? maybe < 7

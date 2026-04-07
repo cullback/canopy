@@ -1,6 +1,6 @@
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 
 use indicatif::ProgressStyle;
 use tracing::info;
@@ -63,15 +63,29 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
     search: &mut Search<G>,
     evaluator: &E,
     rng: &mut fastrand::Rng,
+    counters: &TournamentCounters,
 ) -> SearchResult {
     let mut evals = vec![];
     loop {
         match search.step(&evals, rng) {
             Step::NeedsEval(states) => {
+                counters
+                    .evals
+                    .fetch_add(states.len() as u64, Ordering::Relaxed);
                 let refs: Vec<&G> = states.iter().collect();
                 evals = evaluator.evaluate_batch(&refs, rng);
             }
-            Step::Done(result) => return result,
+            Step::Done(result) => {
+                // Accumulate depth stats using integer encoding (avg_depth * 100)
+                counters
+                    .depth_sum
+                    .fetch_add((result.avg_depth * 100.0) as u64, Ordering::Relaxed);
+                counters
+                    .depth_max
+                    .fetch_max(result.max_depth, Ordering::Relaxed);
+                counters.depth_count.fetch_add(1, Ordering::Relaxed);
+                return result;
+            }
         }
     }
 }
@@ -82,45 +96,89 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
 /// applied (both chance outcomes and player decisions).
 /// When `swap` is true, seat assignments are reversed:
 /// the game's P1 uses `configs[1]` and vice versa.
+/// Shared counters for tournament-wide statistics.
+pub struct TournamentCounters {
+    pub evals: AtomicU64,
+    pub depth_sum: AtomicU64,
+    pub depth_max: AtomicU32,
+    pub depth_count: AtomicU32,
+}
+
 pub fn play_match<G: Game>(
     game: &G,
     evaluators: &[&(dyn Evaluator<G> + Sync); 2],
     configs: &[Config; 2],
     swap: bool,
     rng: &mut fastrand::Rng,
+    counters: &TournamentCounters,
 ) -> (f32, Vec<usize>) {
-    let mut state = game.clone();
     let mut actions = Vec::new();
     let mut action_buf = Vec::new();
 
+    // Persistent search trees — one per seat. Reused across actions so
+    // subtrees explored in earlier searches carry over.
+    let mut searches: [Option<Search<G>>; 2] = [
+        if configs[0].num_simulations > 0 {
+            Some(Search::new(game.clone(), configs[0].clone()))
+        } else {
+            None
+        },
+        if configs[1].num_simulations > 0 {
+            Some(Search::new(game.clone(), configs[1].clone()))
+        } else {
+            None
+        },
+    ];
+
+    // Reference search index — whichever seat has a search tree, use it for
+    // state queries. Falls back to a standalone state if neither uses search.
+    let ref_idx = if searches[0].is_some() { 0 } else { 1 };
+
     loop {
-        match state.status() {
+        // Get state info without holding a borrow across the mutable section.
+        let (status, chance, sign) = {
+            let state = searches[ref_idx].as_ref().unwrap().state();
+            let status = state.status();
+            let chance = if matches!(status, Status::Ongoing) {
+                state.sample_chance(rng)
+            } else {
+                None
+            };
+            let sign = state.current_sign();
+            (status, chance, sign)
+        };
+
+        match status {
             Status::Terminal(reward) => return (reward, actions),
             Status::Ongoing => {}
         };
 
-        if let Some(action) = state.sample_chance(rng) {
+        if let Some(action) = chance {
             actions.push(action);
-            state.apply_action(action);
+            for search in searches.iter_mut().flatten() {
+                search.apply_action(action);
+            }
         } else {
             // sign-to-index: 1.0 → 0, -1.0 → 1
-            let idx = ((1.0 - state.current_sign()) / 2.0) as usize;
+            let idx = ((1.0 - sign) / 2.0) as usize;
             let seat = idx ^ (swap as usize);
             let eval = evaluators[seat];
 
-            let action = if configs[seat].num_simulations == 0 {
-                let eval_result = eval.evaluate(&state, rng);
+            let action = if let Some(search) = &mut searches[seat] {
+                let result = run_to_completion(search, eval, rng, counters);
+                result.selected_action
+            } else {
+                let state = searches[ref_idx].as_ref().unwrap().state();
+                let eval_result = eval.evaluate(state, rng);
                 action_buf.clear();
                 state.legal_actions(&mut action_buf);
                 crate::utils::sample_policy(&eval_result.policy_logits, &action_buf, rng)
-            } else {
-                let config = configs[seat].clone();
-                let result = run_to_completion(&mut Search::new(state.clone(), config), eval, rng);
-                result.selected_action
             };
 
             actions.push(action);
-            state.apply_action(action);
+            for search in searches.iter_mut().flatten() {
+                search.apply_action(action);
+            }
         }
     }
 }
@@ -137,17 +195,6 @@ pub fn tournament<G: Game>(
     configs: &[Config; 2],
     num_games: u32,
     rng: &mut fastrand::Rng,
-) -> Vec<GameLog> {
-    tournament_with_stats(new_game, evaluators, configs, num_games, rng, None)
-}
-
-pub fn tournament_with_stats<G: Game>(
-    new_game: impl Fn(u64) -> G + Sync,
-    evaluators: &[&(dyn Evaluator<G> + Sync); 2],
-    configs: &[Config; 2],
-    num_games: u32,
-    rng: &mut fastrand::Rng,
-    eval_counter: Option<Arc<AtomicU64>>,
 ) -> Vec<GameLog> {
     let n = num_games as usize;
 
@@ -171,6 +218,12 @@ pub fn tournament_with_stats<G: Game>(
     let next_game = AtomicUsize::new(0);
     let wins = [AtomicUsize::new(0), AtomicUsize::new(0)];
     let draw_count = AtomicUsize::new(0);
+    let counters = TournamentCounters {
+        evals: AtomicU64::new(0),
+        depth_sum: AtomicU64::new(0),
+        depth_max: AtomicU32::new(0),
+        depth_count: AtomicU32::new(0),
+    };
     let results: Mutex<Vec<Option<GameLog>>> = Mutex::new((0..n).map(|_| None).collect());
 
     let num_workers = std::thread::available_parallelism()
@@ -181,24 +234,21 @@ pub fn tournament_with_stats<G: Game>(
 
     std::thread::scope(|s| {
         // Ticker thread: refresh progress bar message every second.
-        if eval_counter.is_some() {
-            s.spawn(|| {
-                let ctr = eval_counter.as_ref().unwrap();
-                loop {
-                    std::thread::sleep(std::time::Duration::from_secs(1));
-                    if done.load(Ordering::Relaxed) >= n {
-                        break;
-                    }
-                    let w0 = wins[0].load(Ordering::Relaxed);
-                    let w1 = wins[1].load(Ordering::Relaxed);
-                    let d = draw_count.load(Ordering::Relaxed);
-                    let evals = ctr.load(Ordering::Relaxed);
-                    let secs = start.elapsed().as_secs_f64();
-                    let eps = if secs > 0.0 { evals as f64 / secs } else { 0.0 };
-                    span.pb_set_message(&format!("{w0}-{w1}-{d} | {eps:.0} evals/s"));
+        s.spawn(|| {
+            loop {
+                std::thread::sleep(std::time::Duration::from_secs(1));
+                if done.load(Ordering::Relaxed) >= n {
+                    break;
                 }
-            });
-        }
+                let w0 = wins[0].load(Ordering::Relaxed);
+                let w1 = wins[1].load(Ordering::Relaxed);
+                let d = draw_count.load(Ordering::Relaxed);
+                let evals = counters.evals.load(Ordering::Relaxed);
+                let secs = start.elapsed().as_secs_f64();
+                let eps = if secs > 0.0 { evals as f64 / secs } else { 0.0 };
+                span.pb_set_message(&format!("{w0}-{w1}-{d} | {eps:.0} evals/s"));
+            }
+        });
 
         for _ in 0..num_workers {
             s.spawn(|| {
@@ -212,7 +262,7 @@ pub fn tournament_with_stats<G: Game>(
                     let mut thread_rng = fastrand::Rng::with_seed(seed);
                     let game = new_game(seed);
                     let (reward, actions) =
-                        play_match(&game, evaluators, configs, swap, &mut thread_rng);
+                        play_match(&game, evaluators, configs, swap, &mut thread_rng, &counters);
 
                     results.lock().unwrap()[i] = Some(GameLog { seed, actions });
 
@@ -251,8 +301,16 @@ pub fn tournament_with_stats<G: Game>(
     let elapsed = crate::utils::HumanDuration(span.pb_elapsed());
     drop(span);
 
+    let dc = counters.depth_count.load(Ordering::Relaxed);
+    let avg_depth = if dc > 0 {
+        counters.depth_sum.load(Ordering::Relaxed) as f64 / dc as f64 / 100.0
+    } else {
+        0.0
+    };
+    let max_depth = counters.depth_max.load(Ordering::Relaxed);
+
     info!(
-        "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%) | {elapsed}",
+        "W {}/{} ({:.1}%) | L {}/{} ({:.1}%) | D {}/{} ({:.1}%) | depth {:.1}/{} | {elapsed}",
         w0,
         total,
         w0 as f32 / total as f32 * 100.0,
@@ -262,6 +320,8 @@ pub fn tournament_with_stats<G: Game>(
         d,
         total,
         d as f32 / total as f32 * 100.0,
+        avg_depth,
+        max_depth,
     );
 
     game_logs

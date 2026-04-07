@@ -25,6 +25,8 @@ pub(super) struct IterGameResults {
     pub min_game_length: Option<u32>,
     pub max_game_length: u32,
     pub game_length_stddev: f64,
+    pub search_depth_avg: f32,
+    pub search_depth_max: u32,
 }
 
 impl IterGameResults {
@@ -36,6 +38,10 @@ impl IterGameResults {
         let mut sum_actions_sq = 0u64;
         let mut min_game_length: Option<u32> = None;
         let mut max_game_length = 0u32;
+
+        let mut depth_sum = 0.0f64;
+        let mut depth_max = 0u32;
+        let mut depth_count = 0u32;
 
         for game in games {
             let game_len = game.samples.last().map_or(0, |s| s.game_length);
@@ -50,6 +56,11 @@ impl IterGameResults {
             } else {
                 draws += 1;
             }
+            for s in &game.samples {
+                depth_sum += s.search_depth_avg as f64;
+                depth_max = depth_max.max(s.search_depth_max);
+                depth_count += 1;
+            }
         }
 
         let num_games = wins + losses + draws;
@@ -57,6 +68,12 @@ impl IterGameResults {
             let mean = total_actions as f64 / num_games as f64;
             let var = sum_actions_sq as f64 / num_games as f64 - mean * mean;
             var.max(0.0).sqrt()
+        } else {
+            0.0
+        };
+
+        let search_depth_avg = if depth_count > 0 {
+            (depth_sum / depth_count as f64) as f32
         } else {
             0.0
         };
@@ -69,6 +86,8 @@ impl IterGameResults {
             min_game_length,
             max_game_length,
             game_length_stddev,
+            search_depth_avg,
+            search_depth_max: depth_max,
         }
     }
 }
