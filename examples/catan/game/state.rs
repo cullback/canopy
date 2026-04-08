@@ -45,6 +45,8 @@ pub struct PlayerState {
     pub roads_left: u8,
     /// Whether a dev card has been played this turn (limit one per turn).
     pub has_played_dev_card_this_turn: bool,
+    /// Whether a maritime trade was made this turn.
+    pub has_traded_this_turn: bool,
     /// Cumulative count of each dev card type played (for information tracking).
     pub dev_cards_played: DevCardArray,
     /// Dev cards bought but not yet revealed. In colonist mode, set from
@@ -77,6 +79,7 @@ impl Default for PlayerState {
             cities_left: 4,
             roads_left: 15,
             has_played_dev_card_this_turn: false,
+            has_traded_this_turn: false,
             dev_cards_played: DevCardArray::default(),
             hidden_dev_cards: 0,
             hidden_dev_cards_bought_this_turn: 0,
@@ -164,6 +167,8 @@ pub struct GameState {
     /// Cities on nodes in this mask are "pre-existing" (ordered at step 4);
     /// others are "same-turn" (always available at step 7).
     pub settlements_at_turn_start: u64,
+    /// Snapshot of current player's roads_placed at turn start.
+    pub roads_placed_at_turn_start: u8,
     /// When false, `legal_actions` skips canonical ordering filters and
     /// apply functions skip updating ordering fields. Used during colonist
     /// replay where the event log may use non-canonical action orderings.
@@ -231,6 +236,7 @@ impl GameState {
             min_port_settle_node: 0,
             road_distances: [0; 72],
             settlements_at_turn_start: 0,
+            roads_placed_at_turn_start: 0,
             canonical_build_order: true,
         }
     }

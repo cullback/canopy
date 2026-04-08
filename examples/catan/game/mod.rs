@@ -383,6 +383,7 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
             state.pre_roll = true;
             state.phase = Phase::PreRoll;
             state.settlements_at_turn_start = state.boards[Player::One].settlements;
+            state.roads_placed_at_turn_start = state.players[Player::One].roads_placed;
             if state.canonical_build_order {
                 state.compute_road_distances();
             }
@@ -472,6 +473,7 @@ fn apply_end_turn(state: &mut GameState) {
     }
     player.hidden_dev_cards_bought_this_turn = 0;
     player.has_played_dev_card_this_turn = false;
+    player.has_traded_this_turn = false;
 
     state.current_player = state.current_player.opponent();
     state.pre_roll = true;
@@ -485,6 +487,7 @@ fn apply_end_turn(state: &mut GameState) {
     state.min_settle_node = 0;
     state.min_port_settle_node = 0;
     state.settlements_at_turn_start = state.boards[state.current_player].settlements;
+    state.roads_placed_at_turn_start = state.players[state.current_player].roads_placed;
     if state.canonical_build_order {
         state.compute_road_distances();
     }
@@ -771,6 +774,7 @@ fn apply_maritime_trade(state: &mut GameState, give: Resource, receive: Resource
     state.bank.add(give_array);
     state.current_mut().hand[receive] += 1;
     state.bank[receive] -= 1;
+    state.current_mut().has_traded_this_turn = true;
     if state.canonical_build_order {
         state.min_step = state.min_step.max(2);
         state.min_trade_idx = give as u8 * 5 + receive as u8;

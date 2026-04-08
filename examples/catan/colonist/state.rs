@@ -450,10 +450,8 @@ pub(crate) struct ReplayCtx<'a> {
 /// Used by the live polling path to process incremental events.
 /// Returns `Some(entries)` on success (state updated), `None` on failure
 /// (state unchanged — caller should retry with more events later).
-/// Derive canonical ordering state from the game state itself (not from
-/// walk_actions, which mixes both players' actions). Uses turn-level state
-/// fields to infer what the current player has already done this turn.
-fn derive_canonical_state(state: &mut GameState, _walk_actions: &[usize]) {
+/// Derive canonical ordering state from per-turn tracking fields.
+fn derive_canonical_state(state: &mut GameState) {
     state.min_step = 0;
     state.min_trade_idx = 0;
     state.min_city_node = 0;
@@ -463,8 +461,13 @@ fn derive_canonical_state(state: &mut GameState, _walk_actions: &[usize]) {
 
     let player = &state.players[state.current_player];
 
-    // Dev card played this turn → past step 1
+    // Dev card played → past step 1
     if player.has_played_dev_card_this_turn {
+        state.min_step = state.min_step.max(2);
+    }
+
+    // Traded this turn → past step 1
+    if player.has_traded_this_turn {
         state.min_step = state.min_step.max(2);
     }
 
@@ -474,22 +477,36 @@ fn derive_canonical_state(state: &mut GameState, _walk_actions: &[usize]) {
         state.min_step = state.min_step.max(3);
     }
 
-    // New settlements this turn → past step 6 (at least)
-    let boards = &state.boards[state.current_player];
-    let new_settlements = boards.settlements & !state.settlements_at_turn_start;
-    if new_settlements != 0 {
-        // Could be non-port (step 6) or port (step 8, which resets).
-        // Conservatively don't advance past step 2 — a port settle resets
-        // to step 2, and we can't tell which type from state alone.
-        // The search will handle it correctly from step 2 onward.
-        state.min_step = state.min_step.max(2);
+    // Roads built this turn → past step 5
+    if player.roads_placed > state.roads_placed_at_turn_start {
+        state.min_step = state.min_step.max(5);
     }
 
-    // We can't reliably detect trades or roads built this turn from state
-    // alone (no per-turn tracking). Leave min_step at whatever we've
-    // derived — the search will explore from there. This is conservative:
-    // it may allow some transpositions that a perfect derivation would
-    // eliminate, but it never blocks valid actions.
+    // New settlements this turn
+    let boards = &state.boards[state.current_player];
+    let adj = &state.topology.adj;
+    let new_settlements = boards.settlements & !state.settlements_at_turn_start;
+    if new_settlements != 0 {
+        let any_port = {
+            let mut bits = new_settlements;
+            let mut found = false;
+            while bits != 0 {
+                let nid = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                let bit = 1u64 << nid;
+                if adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0 {
+                    found = true;
+                    break;
+                }
+            }
+            found
+        };
+        if any_port {
+            state.min_step = state.min_step.max(2);
+        } else {
+            state.min_step = state.min_step.max(6);
+        }
+    }
 
     state.compute_road_distances();
 }
@@ -513,7 +530,7 @@ pub fn replay_events(
         min_step = final_state.min_step,
         "replay complete"
     );
-    derive_canonical_state(&mut final_state, &walk_actions);
+    derive_canonical_state(&mut final_state);
     final_state.canonical_build_order = true;
     *state = final_state;
     Some((entries, walk_actions))
