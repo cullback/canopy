@@ -723,6 +723,12 @@ fn replay_search(
         state: state.clone(),
     }];
 
+    // Dump events around the failure area
+    eprintln!("  events around e210-e225:");
+    for j in 200..events.len().min(230) {
+        eprintln!("    e{j}: {:?}", events[j]);
+    }
+
     let result = try_replay(state, events, 0, &ctx, timeline, Vec::new());
     let calls = ctx.call_count.load(std::sync::atomic::Ordering::Relaxed);
     let depth = ctx.max_depth.load(std::sync::atomic::Ordering::Relaxed);
@@ -1213,6 +1219,7 @@ fn try_replay(
                         if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
                             let aid = action::robber_id(tile).0 as usize;
                             if robber_actions.contains(&aid) {
+                                eprintln!("  robber e{i}: LAST → T{} (dom)", tile.0);
                                 actions.push(aid);
                                 state.apply_action(aid);
                                 i += 1;
@@ -1224,6 +1231,10 @@ fn try_replay(
                     let mut candidates = robber_actions;
                     let opp = state.current_player.opponent();
 
+                    // Scan forward for TileBlocked to constrain which tile the
+                    // robber is on. Stop at the NEXT MoveRobber (which changes
+                    // the robber position), but NOT at PlayedKnight (knight leads
+                    // to MoveRobber which we'll see).
                     for e in &events[i + 1..] {
                         match e {
                             GameEvent::TileBlocked {
@@ -1239,7 +1250,7 @@ fn try_replay(
                                 });
                                 break;
                             }
-                            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => break,
+                            GameEvent::MoveRobber { .. } => break,
                             _ => {}
                         }
                     }
@@ -1277,6 +1288,25 @@ fn try_replay(
                                 .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
                         });
                     }
+                    // If pre_filter_rolls stopped early (building event between
+                    // robber and next roll), scan for the next non-7 roll ignoring
+                    // building events. This is a heuristic: the distribution check
+                    // uses the current state (without the new building), so it's
+                    // only accurate for production from EXISTING buildings. But it
+                    // correctly identifies which tile the robber blocks.
+                    if candidates.len() > 1 && candidates.len() == candidates_before_rolls {
+                        let extended = extended_roll_gains(&events[i + 1..], ctx.color_map);
+                        if !extended.is_empty() {
+                            candidates.retain(|&aid| {
+                                let tile = TileId((aid - action::ROBBER_START as usize) as u8);
+                                let mut trial = state.clone();
+                                trial.robber = tile;
+                                extended.iter().all(|(roll, gains)| {
+                                    validate_distribution(&trial, *roll, gains)
+                                })
+                            });
+                        }
+                    }
                     // Only branch if roll constraints actually narrowed
                     // candidates (meaning the choice matters for future rolls).
                     // If all candidates pass the same rolls, they're equivalent.
@@ -1285,7 +1315,14 @@ fn try_replay(
                     if candidates.is_empty() {
                         backtrack(i, "robber: 0 candidates");
                         return None;
-                    } else if candidates.len() == 1 || !rolls_narrowed {
+                    } else if candidates.len() == 1 {
+                        {
+                            let tid = (candidates[0] - action::ROBBER_START as usize) as u8;
+                            eprintln!("  robber e{i}: SINGLE → T{tid}");
+                        }
+                        actions.push(candidates[0]);
+                        state.apply_action(candidates[0]);
+                    } else if !rolls_narrowed {
                         // Candidates are equivalent for nearby rolls. Pick
                         // desert if available (blocks nothing), otherwise the
                         // tile with fewest buildings to minimize future impact.
@@ -1306,7 +1343,7 @@ fn try_replay(
                             {
                                 dom_buildings |= 1u64 << nid.0;
                             }
-                            candidates
+                            let result = candidates
                                 .iter()
                                 .copied()
                                 .min_by_key(|&aid| {
@@ -1314,7 +1351,18 @@ fn try_replay(
                                     let mask = state.topology.adj.tile_nodes[tile.0 as usize];
                                     (mask & dom_buildings).count_ones()
                                 })
-                                .unwrap()
+                                .unwrap();
+                            {
+                                use std::sync::atomic::{AtomicUsize, Ordering as O};
+                                static D: AtomicUsize = AtomicUsize::new(0);
+                                if D.fetch_add(1, O::Relaxed) < 3 {
+                                    let tid = (result - action::ROBBER_START as usize) as u8;
+                                    let mask = state.topology.adj.tile_nodes[tid as usize];
+                                    let bcount = (mask & dom_buildings).count_ones();
+                                    eprintln!("  robber default e{i}: T{tid} dom_adj={bcount} dom_bits={dom_buildings:#018x} candidates={}", candidates.len());
+                                }
+                            }
+                            result
                         });
                         actions.push(best);
                         state.apply_action(best);
@@ -1871,6 +1919,53 @@ fn pre_filter_rolls(
                 let total = d1 + d2;
                 if total != 7 {
                     current_roll = Some(total);
+                }
+            }
+            GameEvent::GotResources { player, resources } if current_roll.is_some() => {
+                if let Some(pid) = player_of_color(color_map, *player) {
+                    gains[pid as usize].add(*resources);
+                }
+            }
+            _ => {}
+        }
+    }
+    if let Some(roll) = current_roll {
+        results.push((roll, gains));
+    }
+    results
+}
+
+/// Like `pre_filter_rolls` but doesn't stop at BuildSettlement/BuildCity.
+/// Scans past building events to find the next roll that can differentiate
+/// robber positions. The distribution check is approximate (doesn't account
+/// for buildings placed between the robber and the roll) but correctly
+/// identifies which tile is blocked for EXISTING buildings.
+fn extended_roll_gains(
+    events: &[GameEvent],
+    color_map: &[(u8, Player)],
+) -> Vec<(u8, [ResourceArray; 2])> {
+    let mut results = Vec::new();
+    let mut current_roll: Option<u8> = None;
+    let mut gains: [ResourceArray; 2] = Default::default();
+
+    for event in events {
+        match event {
+            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => {
+                if let Some(roll) = current_roll.take() {
+                    results.push((roll, gains));
+                }
+                break;
+            }
+            GameEvent::Roll { d1, d2, .. } => {
+                if let Some(roll) = current_roll.take() {
+                    results.push((roll, gains));
+                    gains = Default::default();
+                }
+                let total = d1 + d2;
+                if total != 7 {
+                    current_roll = Some(total);
+                } else {
+                    current_roll = None;
                 }
             }
             GameEvent::GotResources { player, resources } if current_roll.is_some() => {
