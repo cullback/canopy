@@ -1194,6 +1194,7 @@ fn try_replay(
                     });
 
                     let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
+                    let candidates_before_rolls = candidates.len();
                     if !check_rolls.is_empty() {
                         candidates.retain(|&aid| {
                             let tile = TileId((aid - action::ROBBER_START as usize) as u8);
@@ -1204,42 +1205,35 @@ fn try_replay(
                                 .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
                         });
                     }
+                    // Only branch if roll constraints actually narrowed
+                    // candidates (meaning the choice matters for future rolls).
+                    // If all candidates pass the same rolls, they're equivalent.
+                    let rolls_narrowed = candidates.len() < candidates_before_rolls;
 
                     if candidates.is_empty() {
                         backtrack(i, "robber: 0 candidates");
                         return None;
-                    } else if candidates.len() == 1 || !check_rolls.is_empty() {
-                        // Either exactly 1 candidate, or pre_filter_rolls
-                        // narrowed candidates using future roll constraints.
-                        // In the latter case, all surviving candidates are
-                        // consistent with upcoming rolls — branch to find
-                        // the one that works for the full game.
-                        if candidates.len() == 1 {
-                            actions.push(candidates[0]);
-                            state.apply_action(candidates[0]);
-                        } else {
-                            log_branch(i, "robber", candidates.len());
-                            for &aid in &candidates {
-                                let mut trial = state.clone();
-                                trial.apply_action(aid);
-                                let trial_tl = timeline.clone();
-                                let mut trial_actions = actions.clone();
-                                trial_actions.push(aid);
-                                if let Some(result) =
-                                    try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
-                                {
-                                    return Some(result);
-                                }
-                            }
-                            backtrack(i, "robber: all branches failed");
-                            return None;
-                        }
-                    } else {
-                        // No roll constraints differentiate candidates —
-                        // all choices produce equivalent game states until the
-                        // next robber move. Pick the first one without branching.
+                    } else if candidates.len() == 1 || !rolls_narrowed {
+                        // All candidates are equivalent for upcoming rolls.
+                        // Pick the first one without branching.
                         actions.push(candidates[0]);
                         state.apply_action(candidates[0]);
+                    } else {
+                        log_branch(i, "robber", candidates.len());
+                        for &aid in &candidates {
+                            let mut trial = state.clone();
+                            trial.apply_action(aid);
+                            let trial_tl = timeline.clone();
+                            let mut trial_actions = actions.clone();
+                            trial_actions.push(aid);
+                            if let Some(result) =
+                                try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                            {
+                                return Some(result);
+                            }
+                        }
+                        backtrack(i, "robber: all branches failed");
+                        return None;
                     }
                 }
             }
@@ -1273,7 +1267,7 @@ fn try_replay(
                     "places"
                 };
 
-                let candidates: Vec<usize> =
+                let mut candidates: Vec<usize> =
                     if let Some(pid) = player_of_color(ctx.color_map, *player) {
                         ctx.dom_roads[pid]
                             .iter()
@@ -1283,6 +1277,46 @@ fn try_replay(
                     } else {
                         vec![]
                     };
+
+                // Forward-check: prefer roads closer to unbuilt DOM settlements.
+                // A road leading toward a future settlement is more likely correct.
+                if candidates.len() > 1 {
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        let adj = &state.topology.adj;
+                        let occupied = state.occupied_nodes();
+                        let unbuilt_settle: u64 = ctx.dom_settlements[pid]
+                            .iter()
+                            .map(|nid| 1u64 << nid.0)
+                            .fold(0u64, |a, b| a | b)
+                            & !occupied;
+
+                        if unbuilt_settle != 0 {
+                            let toward: Vec<usize> = candidates
+                                .iter()
+                                .filter(|&&aid| {
+                                    let eid = (aid - action::ROAD_START as usize) as u8;
+                                    let endpoints = adj.edge_endpoints[eid as usize];
+                                    let mut nodes = endpoints;
+                                    while nodes != 0 {
+                                        let nid = nodes.trailing_zeros() as usize;
+                                        nodes &= nodes - 1;
+                                        if unbuilt_settle & (1u64 << nid) != 0 {
+                                            return true;
+                                        }
+                                        if adj.node_adj_nodes[nid] & unbuilt_settle != 0 {
+                                            return true;
+                                        }
+                                    }
+                                    false
+                                })
+                                .copied()
+                                .collect();
+                            if !toward.is_empty() {
+                                candidates = toward;
+                            }
+                        }
+                    }
+                }
 
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
@@ -1363,48 +1397,6 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if candidates.is_empty() {
-                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
-                        use std::sync::atomic::{AtomicUsize, Ordering};
-                        static LAST_EVENT: AtomicUsize = AtomicUsize::new(0);
-                        // Only log when we reach a new deepest event
-                        if i >= LAST_EVENT.load(Ordering::Relaxed) {
-                            LAST_EVENT.store(i + 1, Ordering::Relaxed);
-                            let boards = &state.boards[pid];
-                            let adj = &state.topology.adj;
-                            let occupied = state.occupied_nodes();
-                            let mut on_road = 0u64;
-                            let mut roads = boards.road_network.roads;
-                            while roads != 0 {
-                                let eid = roads.trailing_zeros() as usize;
-                                roads &= roads - 1;
-                                on_road |= adj.edge_endpoints[eid];
-                            }
-                            let mut neighbor_blocked = 0u64;
-                            let mut occ = occupied;
-                            while occ != 0 {
-                                let node = occ.trailing_zeros() as usize;
-                                occ &= occ - 1;
-                                neighbor_blocked |= adj.node_adj_nodes[node];
-                            }
-                            eprintln!("=== settle diagnostic e{i} pid={pid:?} ===");
-                            eprintln!("  hand: {:?}", state.players[pid].hand);
-                            eprintln!("  pieces_left: {}", state.players[pid].settlements_left);
-                            eprintln!("  roads: {:b}", boards.road_network.roads);
-                            eprintln!("  road_count: {}", boards.road_network.roads.count_ones());
-                            eprintln!("  settlements: {:b}", boards.settlements);
-                            eprintln!("  cities: {:b}", boards.cities);
-                            for &nid in &ctx.dom_settlements[pid] {
-                                let bit = 1u64 << nid.0;
-                                let on_net = on_road & bit != 0;
-                                let occ = occupied & bit != 0;
-                                let nb = neighbor_blocked & bit != 0;
-                                eprintln!(
-                                    "  dom node {}: on_road={on_net} occupied={occ} neighbor_blocked={nb}",
-                                    nid.0
-                                );
-                            }
-                        }
-                    }
                     backtrack(i, "settle: 0 candidates");
                     return None;
                 } else {
@@ -1475,8 +1467,8 @@ fn try_replay(
                     };
 
                 // Forward-check: try each city candidate against future rolls.
-                // A city doubles production from its tiles — the wrong city
-                // will produce wrong resources on the next roll of that number.
+                // A city doubles production — wrong city produces wrong resources.
+                // Uses pre_filter_rolls (checks rolls before next building/robber).
                 if candidates.len() > 1 {
                     let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
                     if !check_rolls.is_empty() {
