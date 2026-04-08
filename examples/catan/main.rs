@@ -86,7 +86,6 @@ fn main() {
             gumbel_m: 4,
             explore_actions: 24,
             q_weight_ramp_iters: 60,
-            aux_value_horizons: vec![],
             ..TrainConfig::default()
         },
     );
