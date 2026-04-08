@@ -383,6 +383,9 @@ fn apply_place_road(state: &mut GameState, eid: EdgeId) {
             state.pre_roll = true;
             state.phase = Phase::PreRoll;
             state.settlements_at_turn_start = state.boards[Player::One].settlements;
+            if state.canonical_build_order {
+                state.compute_road_distances();
+            }
         }
         _ => unreachable!("setup_count should be 1-4"),
     }
@@ -474,11 +477,17 @@ fn apply_end_turn(state: &mut GameState) {
     state.pre_roll = true;
     state.phase = Phase::PreRoll;
 
-    // Reset canonical build ordering for the new turn.
-    state.min_build_type = 0;
+    // Reset canonical ordering for the new turn.
+    state.min_step = 0;
+    state.min_trade_idx = 0;
     state.min_city_node = 0;
+    state.min_road_key = 0;
     state.min_settle_node = 0;
+    state.min_port_settle_node = 0;
     state.settlements_at_turn_start = state.boards[state.current_player].settlements;
+    if state.canonical_build_order {
+        state.compute_road_distances();
+    }
 }
 
 fn apply_build_road(state: &mut GameState, eid: EdgeId) {
@@ -511,11 +520,20 @@ fn apply_build_road(state: &mut GameState, eid: EdgeId) {
             } else {
                 state.phase = Phase::Main;
             }
+            // Recompute road distances after free roads changed the frontier.
+            if state.canonical_build_order {
+                state.compute_road_distances();
+            }
         } else {
             state.phase = Phase::RoadBuilding {
                 roads_left: remaining,
             };
         }
+    } else if state.canonical_build_order {
+        // Step 5: paid road in Main phase
+        let key = state.road_distances[eid.0 as usize] as u16 * 72 + eid.0 as u16;
+        state.min_step = state.min_step.max(5);
+        state.min_road_key = key;
     }
 
     update_longest_road(state);
@@ -532,14 +550,20 @@ fn apply_build_settlement(state: &mut GameState, nid: NodeId) {
 
     update_trade_ratios(state, nid, pid);
 
-    // Canonical ordering: advance if this is a non-port settlement.
+    // Canonical ordering: advance FSM based on port vs non-port.
     if state.canonical_build_order {
         let bit = 1u64 << nid.0;
         let adj = &state.topology.adj;
         let is_port =
             adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0;
-        if !is_port {
-            state.min_build_type = state.min_build_type.max(2);
+        if is_port {
+            // Step 8: port settle resets to step 2 (trades)
+            state.min_step = 2;
+            state.min_trade_idx = 0;
+            state.min_port_settle_node = 0;
+        } else {
+            // Step 6: non-port settle
+            state.min_step = state.min_step.max(6);
             state.min_settle_node = nid.0;
         }
     }
@@ -573,11 +597,15 @@ fn apply_build_city(state: &mut GameState, nid: NodeId) {
     state.current_mut().cities_left -= 1;
     state.current_mut().building_vps += 1;
 
-    // Canonical ordering: only advance if this is an ordered city
-    // (pre-existing settlement, not same-turn).
-    if state.canonical_build_order && state.settlements_at_turn_start & bit != 0 {
-        state.min_build_type = state.min_build_type.max(1);
-        state.min_city_node = nid.0;
+    // Canonical ordering: pre-existing city (step 4) advances FSM.
+    // Same-turn city (step 7) is a known limitation — does not reset.
+    if state.canonical_build_order {
+        if state.settlements_at_turn_start & bit != 0 {
+            // Step 4: pre-existing city
+            state.min_step = state.min_step.max(4);
+            state.min_city_node = nid.0;
+        }
+        // Step 7: same-turn city — no FSM change (known limitation)
     }
 }
 
@@ -585,6 +613,9 @@ fn apply_buy_dev_card(state: &mut GameState) {
     state.current_mut().hand.sub(DEV_CARD_COST);
     state.bank.add(DEV_CARD_COST);
     state.phase = Phase::DevCardDraw;
+    if state.canonical_build_order {
+        state.min_step = state.min_step.max(3);
+    }
 }
 
 /// Buy a dev card without revealing it (for colonist replay / competition).
@@ -607,6 +638,10 @@ fn apply_play_knight(state: &mut GameState) {
     p.dev_cards_played[DevCardKind::Knight] += 1;
     p.knights_played += 1;
 
+    if state.canonical_build_order {
+        state.min_step = state.min_step.max(2);
+    }
+
     update_largest_army(state);
     state.phase = Phase::MoveRobber;
 }
@@ -617,6 +652,9 @@ fn apply_play_road_building(state: &mut GameState) {
         p.dev_cards[DevCardKind::RoadBuilding].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::RoadBuilding] += 1;
+    if state.canonical_build_order {
+        state.min_step = state.min_step.max(2);
+    }
     state.phase = Phase::RoadBuilding { roads_left: 2 };
 }
 
@@ -636,6 +674,9 @@ fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
         state.current_mut().hand[r2] += 1;
     }
 
+    if state.canonical_build_order {
+        state.min_step = state.min_step.max(2);
+    }
     if state.pre_roll {
         state.phase = Phase::Roll;
     }
@@ -653,6 +694,9 @@ fn apply_monopoly(state: &mut GameState, resource: Resource) {
     state.players[opponent].hand[resource] = 0;
     state.players[current].hand[resource] += stolen;
 
+    if state.canonical_build_order {
+        state.min_step = state.min_step.max(2);
+    }
     if state.pre_roll {
         state.phase = Phase::Roll;
     }
@@ -694,8 +738,10 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                 roller,
                 min_resource: resource as u8,
             };
-        } else if player == roller {
-            // Roller finished discarding — check if opponent also must discard
+        } else {
+            // Current discard player finished — check if the other player
+            // also needs to discard. Handles either discard order (roller-first
+            // or opponent-first, as colonist may use either).
             let other = player.opponent();
             let other_total = state.players[other].hand.total();
             if other_total > state.discard_threshold {
@@ -710,10 +756,6 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
                 state.current_player = roller;
                 state.phase = Phase::MoveRobber;
             }
-        } else {
-            // Opponent finished discarding — proceed to robber
-            state.current_player = roller;
-            state.phase = Phase::MoveRobber;
         }
     }
 }
@@ -729,6 +771,10 @@ fn apply_maritime_trade(state: &mut GameState, give: Resource, receive: Resource
     state.bank.add(give_array);
     state.current_mut().hand[receive] += 1;
     state.bank[receive] -= 1;
+    if state.canonical_build_order {
+        state.min_step = state.min_step.max(2);
+        state.min_trade_idx = give as u8 * 5 + receive as u8;
+    }
 }
 
 fn check_victory(state: &mut GameState) {

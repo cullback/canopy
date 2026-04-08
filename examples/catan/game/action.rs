@@ -277,8 +277,17 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
     }
 }
 
+/// Minimum total pips for a setup settlement spot. Spots below this threshold
+/// are dominated — in 1v1 with 50+ spots available, a < 8 pip spot is never
+/// optimal. Disabled during colonist replay (canonical_build_order = false).
+const MIN_SETUP_PIPS: u8 = 8;
+
+/// Pips per dice number: pips[n] = 6 - |7 - n| for n in 2..=12.
+const PIPS: [u8; 13] = [0, 0, 1, 2, 3, 4, 5, 0, 5, 4, 3, 2, 1];
+
 fn populate_place_settlement(state: &GameState, actions: &mut Vec<ActionId>) {
     let adj = &state.topology.adj;
+    let topo = &state.topology;
     let occupied = state.occupied_nodes();
     // Expand occupied nodes to their neighbors
     let mut neighbor_blocked = 0u64;
@@ -288,11 +297,37 @@ fn populate_place_settlement(state: &GameState, actions: &mut Vec<ActionId>) {
         bits &= bits - 1;
         neighbor_blocked |= adj.node_adj_nodes[node];
     }
+
+    // Precompute tile numbers for pip calculation.
+    let tile_numbers = if state.canonical_build_order {
+        let mut numbers = [0u8; 19];
+        for roll in 2..=12u8 {
+            for &tid in &topo.dice_to_tiles[roll as usize] {
+                numbers[tid.0 as usize] = roll;
+            }
+        }
+        Some(numbers)
+    } else {
+        None
+    };
+
     let legal = !occupied & !neighbor_blocked & NODE_MASK;
     let mut bits = legal;
     while bits != 0 {
         let nid = bits.trailing_zeros() as u8;
         bits &= bits - 1;
+        // Prune low-pip setup spots (dominated in 1v1).
+        if let Some(ref numbers) = tile_numbers {
+            let node = &topo.nodes[nid as usize];
+            let total_pips: u8 = node
+                .adjacent_tiles
+                .iter()
+                .map(|tid| PIPS[numbers[tid.0 as usize] as usize])
+                .sum();
+            if total_pips < MIN_SETUP_PIPS {
+                continue;
+            }
+        }
         actions.push(settlement_id(NodeId(nid)));
     }
 }
@@ -451,151 +486,205 @@ fn populate_main(state: &GameState, actions: &mut Vec<ActionId>) {
     let player = state.current();
     let adj = &state.topology.adj;
     let boards = &state.boards[pid];
+    let canon = state.canonical_build_order;
 
-    // Build road
-    if player.hand.contains(ROAD_COST) && player.roads_left > 0 {
-        let mut legal = boards.road_network.reachable_edges();
-        while legal != 0 {
-            let eid = legal.trailing_zeros() as u8;
-            legal &= legal - 1;
-            actions.push(road_id(EdgeId(eid)));
+    // Step 1: Play dev card
+    if !canon || state.min_step <= 1 {
+        if !player.has_played_dev_card_this_turn {
+            let playable_knights = player.dev_cards[DevCardKind::Knight]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Knight]);
+            if playable_knights > 0 {
+                actions.push(ActionId(PLAY_KNIGHT));
+            }
+
+            let playable_rb = player.dev_cards[DevCardKind::RoadBuilding]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding]);
+            if playable_rb > 0 && player.roads_left > 0 {
+                actions.push(ActionId(PLAY_ROAD_BUILDING));
+            }
+
+            let playable_yop = player.dev_cards[DevCardKind::YearOfPlenty]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty]);
+            if playable_yop > 0 {
+                for (i, &r1) in ALL_RESOURCES.iter().enumerate() {
+                    if state.bank[r1] == 0 {
+                        continue;
+                    }
+                    for &r2 in &ALL_RESOURCES[i..] {
+                        if r1 == r2 && state.bank[r1] < 2 {
+                            continue;
+                        }
+                        if state.bank[r2] == 0 {
+                            continue;
+                        }
+                        actions.push(yop_id(r1, r2));
+                    }
+                }
+            }
+
+            let playable_mono = player.dev_cards[DevCardKind::Monopoly]
+                .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Monopoly]);
+            if playable_mono > 0 {
+                let opp_hand = &state.players[pid.opponent()].hand;
+                for &r in &ALL_RESOURCES {
+                    if !canon || opp_hand[r] > 0 {
+                        actions.push(monopoly_id(r));
+                    }
+                }
+            }
         }
     }
 
-    // Build settlement
-    if player.hand.contains(SETTLEMENT_COST) && player.settlements_left > 0 {
-        let occupied = state.occupied_nodes();
-        let mut neighbor_blocked = 0u64;
-        let mut occ = occupied;
-        while occ != 0 {
-            let node = occ.trailing_zeros() as usize;
-            occ &= occ - 1;
-            neighbor_blocked |= adj.node_adj_nodes[node];
+    // Step 2: Maritime trade
+    if !canon || state.min_step <= 2 {
+        for &give_res in &ALL_RESOURCES {
+            if player.hand[give_res] == 0 {
+                continue;
+            }
+            let ratio = player.trade_ratios[give_res as usize];
+            if player.hand[give_res] >= ratio {
+                for &recv_res in &ALL_RESOURCES {
+                    if recv_res != give_res && state.bank[recv_res] > 0 {
+                        let idx = maritime_trade_idx(give_res, recv_res);
+                        if !canon || idx >= state.min_trade_idx {
+                            actions.push(maritime_id(give_res, recv_res));
+                        }
+                    }
+                }
+            }
         }
-        // Must be on player's road and not occupied or neighbor-blocked
-        let mut on_road = 0u64;
-        let mut roads = boards.road_network.roads;
-        while roads != 0 {
-            let eid = roads.trailing_zeros() as usize;
-            roads &= roads - 1;
-            on_road |= adj.edge_endpoints[eid];
+    }
+
+    // Step 3: Buy dev card
+    if !canon || state.min_step <= 3 {
+        if player.hand.contains(DEV_CARD_COST) && !state.dev_deck.is_empty() {
+            let pool_total: u8 = state.unknown_dev_pool().iter().sum();
+            if pool_total > 0 {
+                actions.push(ActionId(BUY_DEV_CARD));
+            }
         }
-        let legal = !occupied & !neighbor_blocked & on_road & NODE_MASK;
-        let mut bits = legal;
-        while bits != 0 {
-            let nid = bits.trailing_zeros() as u8;
-            bits &= bits - 1;
-            // Canonical ordering: non-port settlements are ordered (priority 2).
-            // Port settlements are unordered (always offered).
-            if state.canonical_build_order {
+    }
+
+    // Step 4: City on pre-existing settlement
+    if !canon || state.min_step <= 4 {
+        if player.hand.contains(CITY_COST) && player.cities_left > 0 {
+            let mut bits = boards.settlements & state.settlements_at_turn_start;
+            while bits != 0 {
+                let nid = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                if !canon || nid >= state.min_city_node {
+                    actions.push(city_id(NodeId(nid)));
+                }
+            }
+        }
+    }
+
+    // Step 5: Build road
+    if !canon || state.min_step <= 5 {
+        if player.hand.contains(ROAD_COST) && player.roads_left > 0 {
+            let mut legal = boards.road_network.reachable_edges();
+            while legal != 0 {
+                let eid = legal.trailing_zeros() as u8;
+                legal &= legal - 1;
+                if canon {
+                    let key = road_key(state.road_distances[eid as usize], eid);
+                    if key < state.min_road_key {
+                        continue;
+                    }
+                }
+                actions.push(road_id(EdgeId(eid)));
+            }
+        }
+    }
+
+    // Step 6: Build settlement on non-port
+    if !canon || state.min_step <= 6 {
+        if player.hand.contains(SETTLEMENT_COST) && player.settlements_left > 0 {
+            let occupied = state.occupied_nodes();
+            let mut neighbor_blocked = 0u64;
+            let mut occ = occupied;
+            while occ != 0 {
+                let node = occ.trailing_zeros() as usize;
+                occ &= occ - 1;
+                neighbor_blocked |= adj.node_adj_nodes[node];
+            }
+            let mut on_road = 0u64;
+            let mut roads = boards.road_network.roads;
+            while roads != 0 {
+                let eid = roads.trailing_zeros() as usize;
+                roads &= roads - 1;
+                on_road |= adj.edge_endpoints[eid];
+            }
+            let legal = !occupied & !neighbor_blocked & on_road & NODE_MASK;
+            let mut bits = legal;
+            while bits != 0 {
+                let nid = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
                 let bit = 1u64 << nid;
                 let is_port =
                     adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0;
-                if !is_port && state.min_build_type >= 2 && nid <= state.min_settle_node {
-                    continue;
+                if is_port {
+                    // Port settlements handled at step 8
+                } else if !canon || nid >= state.min_settle_node {
+                    actions.push(settlement_id(NodeId(nid)));
                 }
             }
-            actions.push(settlement_id(NodeId(nid)));
         }
     }
 
-    // Build city
+    // Step 7: City on same-turn settlement (always available)
     if player.hand.contains(CITY_COST) && player.cities_left > 0 {
-        let mut bits = boards.settlements;
+        let same_turn = boards.settlements & !state.settlements_at_turn_start;
+        let mut bits = same_turn;
         while bits != 0 {
             let nid = bits.trailing_zeros() as u8;
             bits &= bits - 1;
-            // Canonical ordering: cities on pre-existing settlements are
-            // ordered (priority 1). Cities on same-turn settlements are
-            // unordered (always offered) to preserve settle-then-upgrade.
-            if state.canonical_build_order {
-                let bit = 1u64 << nid;
-                let pre_existing = state.settlements_at_turn_start & bit != 0;
-                if pre_existing
-                    && (state.min_build_type > 1
-                        || (state.min_build_type == 1 && nid <= state.min_city_node))
-                {
-                    continue;
-                }
-            }
             actions.push(city_id(NodeId(nid)));
         }
     }
 
-    // Buy dev card — also check the pool has drawable cards, since SO-ISMCTS
-    // dev_cards_played inflation can make the pool empty while dev_deck.total > 0.
-    if player.hand.contains(DEV_CARD_COST) && !state.dev_deck.is_empty() {
-        let pool_total: u8 = state.unknown_dev_pool().iter().sum();
-        // Canonical ordering: dev buy is priority 0 (suppressed by city or settle).
-        if pool_total > 0 && (!state.canonical_build_order || state.min_build_type < 1) {
-            actions.push(ActionId(BUY_DEV_CARD));
-        }
-    }
-
-    // Play dev cards (one per turn, can't play cards bought this turn).
-    // Saturating: during MCTS sims, counts may be inconsistent due to
-    // SO-ISMCTS replaying actions from a different determinization.
-    if !player.has_played_dev_card_this_turn {
-        let playable_knights = player.dev_cards[DevCardKind::Knight]
-            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Knight]);
-        if playable_knights > 0 {
-            actions.push(ActionId(PLAY_KNIGHT));
-        }
-
-        let playable_rb = player.dev_cards[DevCardKind::RoadBuilding]
-            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::RoadBuilding]);
-        if playable_rb > 0 && player.roads_left > 0 {
-            actions.push(ActionId(PLAY_ROAD_BUILDING));
-        }
-
-        let playable_yop = player.dev_cards[DevCardKind::YearOfPlenty]
-            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::YearOfPlenty]);
-        if playable_yop > 0 {
-            for (i, &r1) in ALL_RESOURCES.iter().enumerate() {
-                if state.bank[r1] == 0 {
-                    continue;
-                }
-                for &r2 in &ALL_RESOURCES[i..] {
-                    if r1 == r2 && state.bank[r1] < 2 {
-                        continue;
-                    }
-                    if state.bank[r2] == 0 {
-                        continue;
-                    }
-                    actions.push(yop_id(r1, r2));
-                }
+    // Step 8: Build settlement on port
+    if !canon || state.min_step <= 8 {
+        if player.hand.contains(SETTLEMENT_COST) && player.settlements_left > 0 {
+            let occupied = state.occupied_nodes();
+            let mut neighbor_blocked = 0u64;
+            let mut occ = occupied;
+            while occ != 0 {
+                let node = occ.trailing_zeros() as usize;
+                occ &= occ - 1;
+                neighbor_blocked |= adj.node_adj_nodes[node];
             }
-        }
-
-        let playable_mono = player.dev_cards[DevCardKind::Monopoly]
-            .saturating_sub(player.dev_cards_bought_this_turn[DevCardKind::Monopoly]);
-        if playable_mono > 0 {
-            // Suppress Monopoly for resources the opponent has 0 of
-            // (dominated: gains nothing, wastes dev card play). Disabled
-            // during replay since tracked resources may diverge.
-            let opp_hand = &state.players[pid.opponent()].hand;
-            for &r in &ALL_RESOURCES {
-                if !state.canonical_build_order || opp_hand[r] > 0 {
-                    actions.push(monopoly_id(r));
+            let mut on_road = 0u64;
+            let mut roads = boards.road_network.roads;
+            while roads != 0 {
+                let eid = roads.trailing_zeros() as usize;
+                roads &= roads - 1;
+                on_road |= adj.edge_endpoints[eid];
+            }
+            let legal = !occupied & !neighbor_blocked & on_road & NODE_MASK;
+            let mut bits = legal;
+            while bits != 0 {
+                let nid = bits.trailing_zeros() as u8;
+                bits &= bits - 1;
+                let bit = 1u64 << nid;
+                let is_port =
+                    adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0;
+                if is_port && (!canon || nid >= state.min_port_settle_node) {
+                    actions.push(settlement_id(NodeId(nid)));
                 }
             }
         }
     }
+}
 
-    // Maritime trade
-    for &give_res in &ALL_RESOURCES {
-        if player.hand[give_res] == 0 {
-            continue;
-        }
-        let ratio = player.trade_ratios[give_res as usize];
-        if player.hand[give_res] >= ratio {
-            for &recv_res in &ALL_RESOURCES {
-                if recv_res != give_res && state.bank[recv_res] > 0 {
-                    actions.push(maritime_id(give_res, recv_res));
-                }
-            }
-        }
-    }
+/// Compute road ordering key: distance * 72 + edge_id.
+fn road_key(distance: u8, edge_id: u8) -> u16 {
+    distance as u16 * 72 + edge_id as u16
+}
+
+/// Canonical trade index for within-type ordering.
+fn maritime_trade_idx(give: Resource, recv: Resource) -> u8 {
+    give as u8 * 5 + recv as u8
 }
 
 const NODE_MASK: u64 = (1u64 << 54) - 1;
@@ -753,21 +842,32 @@ mod tests {
         assert_eq!(count, 15);
     }
 
-    /// On an empty board in PlaceSettlement phase, all 54 nodes are legal
-    /// since no distance rule constraints exist yet.
+    /// On an empty board in PlaceSettlement phase, only nodes with >= MIN_SETUP_PIPS
+    /// are legal (canonical ordering prunes low-pip spots).
     #[test]
-    fn place_settlement_all_54_on_empty_board() {
+    fn place_settlement_filters_low_pips() {
         let state = make_state();
         let mut actions = Vec::new();
         legal_actions(&state, &mut actions);
-        assert_eq!(
-            actions.len(),
-            54,
-            "all 54 nodes should be legal on empty board"
+        assert!(actions.len() < 54, "low-pip spots should be filtered out");
+        assert!(
+            actions.len() >= 15,
+            "should still have plenty of spots: got {}",
+            actions.len()
         );
         for a in &actions {
             assert!(a.0 < SETTLEMENT_END);
         }
+
+        // Without canonical ordering, all 54 are legal.
+        let mut state_no_canon = make_state();
+        state_no_canon.canonical_build_order = false;
+        legal_actions(&state_no_canon, &mut actions);
+        assert_eq!(
+            actions.len(),
+            54,
+            "all 54 nodes should be legal without canonical ordering"
+        );
     }
 
     /// The Main phase must always include END_TURN as a legal action,

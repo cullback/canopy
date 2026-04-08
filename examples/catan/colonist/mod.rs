@@ -1005,7 +1005,8 @@ pub fn run_serve(
     }
 
     let mapper = board::CoordMapper::detect(&data.board.tiles);
-    let mut timeline = state::build_timeline(&data.board, &data.events, &mapper, data.robber_hex);
+    let (mut last_state, timeline) =
+        state::build_timeline(&data.board, &data.events, &mapper, data.robber_hex);
     // Derive color → Player mapping from the event log (first to act = P1).
     let mut color_map = state::discover_colors(&data.events);
     // If events haven't arrived yet, use the current turn color as P1
@@ -1029,15 +1030,9 @@ pub fn run_serve(
     }
     let initial_event_count = data.events.len();
 
-    // Apply live state to the final timeline entry.
-    if let Some(last) = timeline.last_mut() {
-        apply_live_state(&mut last.state, &data, &color_map, &mapper);
-    }
-
-    let last_state = timeline
-        .last()
-        .map(|e| e.state.clone())
-        .expect("empty timeline");
+    // Apply live state to the final game state (not timeline — the final
+    // state may be ahead of the last timeline entry).
+    apply_live_state(&mut last_state, &data, &color_map, &mapper);
 
     let timeline_pairs: Vec<(String, crate::game::state::GameState)> =
         timeline.into_iter().map(|e| (e.label, e.state)).collect();

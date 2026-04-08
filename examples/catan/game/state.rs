@@ -139,17 +139,30 @@ pub struct GameState {
     /// `populate_place_road` to determine which settlement needs a road.
     pub last_setup_node: Option<NodeId>,
 
-    // ── Canonical build ordering (transposition elimination) ─────────
-    /// Minimum ordered action type still allowed this turn.
-    /// 0 = all (dev buy, city, settle), 1 = city+settle, 2 = settle only.
-    pub min_build_type: u8,
-    /// Ordered cities must target nodes > this value.
+    // ── Canonical action ordering (transposition elimination) ─────────
+    // See experiments/commutativity.md for design rationale.
+    //
+    // Steps: 1=dev play, 2=trade, 3=buy dev, 4=pre-existing city,
+    //        5=road, 6=non-port settle, 7=same-turn city (always),
+    //        8=port settle (resets to 2)
+    /// Minimum step still allowed this turn (1–8).
+    pub min_step: u8,
+    /// Within trades, only pairs with index >= this.
+    pub min_trade_idx: u8,
+    /// Within pre-existing cities, only nodes >= this.
     pub min_city_node: u8,
-    /// Ordered (non-port) settlements must target nodes > this value.
+    /// Within roads, only keys >= this. Key = distance * 72 + edge_id.
+    pub min_road_key: u16,
+    /// Within non-port settlements, only nodes >= this.
     pub min_settle_node: u8,
+    /// Within port settlements, only nodes >= this.
+    pub min_port_settle_node: u8,
+    /// BFS distance from frontier for each edge, computed at turn start
+    /// and recomputed after Road Building phase.
+    pub road_distances: [u8; 72],
     /// Snapshot of current player's settlement bitmask at turn start.
-    /// Cities on nodes in this mask are "ordered"; others are "unordered"
-    /// (same-turn settlements that must precede their city upgrade).
+    /// Cities on nodes in this mask are "pre-existing" (ordered at step 4);
+    /// others are "same-turn" (always available at step 7).
     pub settlements_at_turn_start: u64,
     /// When false, `legal_actions` skips canonical ordering filters and
     /// apply functions skip updating ordering fields. Used during colonist
@@ -210,9 +223,13 @@ impl GameState {
             vp_limit: 15,
             discard_threshold: 9,
             last_setup_node: None,
-            min_build_type: 0,
+            min_step: 0,
+            min_trade_idx: 0,
             min_city_node: 0,
+            min_road_key: 0,
             min_settle_node: 0,
+            min_port_settle_node: 0,
+            road_distances: [0; 72],
             settlements_at_turn_start: 0,
             canonical_build_order: true,
         }
@@ -259,6 +276,53 @@ impl GameState {
     /// True total VP: buildings + longest road + largest army + VP dev cards.
     pub fn total_vps(&self, pid: Player) -> u8 {
         self.public_vps(pid) + self.players[pid].dev_cards[DevCardKind::VictoryPoint]
+    }
+
+    /// Compute BFS distances from the current player's road frontier.
+    /// Distance 0 = edge is in the frontier (buildable now).
+    /// Distance N = N intermediate roads needed before this edge is reachable.
+    /// Unreachable edges get u8::MAX.
+    pub fn compute_road_distances(&mut self) {
+        let frontier = self.boards[self.current_player]
+            .road_network
+            .reachable_edges();
+        let adj = &self.topology.adj;
+        self.road_distances = [u8::MAX; 72];
+
+        // Seed: all frontier edges at distance 0
+        let mut queue = Vec::new();
+        let mut bits = frontier;
+        while bits != 0 {
+            let eid = bits.trailing_zeros() as u8;
+            bits &= bits - 1;
+            self.road_distances[eid as usize] = 0;
+            queue.push(eid);
+        }
+
+        // BFS: edges adjacent (sharing a node) to current level
+        let mut head = 0;
+        while head < queue.len() {
+            let eid = queue[head];
+            head += 1;
+            let dist = self.road_distances[eid as usize];
+            let next_dist = dist.saturating_add(1);
+            // Find edges sharing a node with eid
+            let endpoints = adj.edge_endpoints[eid as usize];
+            let mut nodes = endpoints;
+            while nodes != 0 {
+                let nid = nodes.trailing_zeros() as usize;
+                nodes &= nodes - 1;
+                let mut neighbor_edges = adj.node_adj_edges[nid];
+                while neighbor_edges != 0 {
+                    let ne = neighbor_edges.trailing_zeros() as u8;
+                    neighbor_edges &= neighbor_edges - 1;
+                    if self.road_distances[ne as usize] > next_dist {
+                        self.road_distances[ne as usize] = next_dist;
+                        queue.push(ne);
+                    }
+                }
+            }
+        }
     }
 
     /// Cards not accounted for by any player's known hand or played pile.

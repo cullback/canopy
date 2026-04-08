@@ -45,12 +45,15 @@ pub struct TimelineEntry {
 /// Uses search-based replay: walks the log event by event, mapping each to
 /// engine actions. The engine handles all side effects (resources, VPs, etc.).
 /// Falls back to the legacy board-snapshot approach on failure.
+/// Returns (final_game_state, timeline_entries). The final state may be
+/// ahead of the last timeline entry (e.g., discard/robber/steal actions
+/// are applied but don't generate their own timeline entries).
 pub fn build_timeline(
     board: &BoardData,
     events: &[GameEvent],
     mapper: &CoordMapper,
     live_robber_hex: (i32, i32),
-) -> Vec<TimelineEntry> {
+) -> (GameState, Vec<TimelineEntry>) {
     let (terrains, numbers, port_resources, port_specs) = board::to_layout(board, mapper);
     let topology = Arc::new(Topology::from_layout_with_ports(
         terrains,
@@ -447,6 +450,50 @@ pub(crate) struct ReplayCtx<'a> {
 /// Used by the live polling path to process incremental events.
 /// Returns `Some(entries)` on success (state updated), `None` on failure
 /// (state unchanged — caller should retry with more events later).
+/// Derive canonical ordering state from the game state itself (not from
+/// walk_actions, which mixes both players' actions). Uses turn-level state
+/// fields to infer what the current player has already done this turn.
+fn derive_canonical_state(state: &mut GameState, _walk_actions: &[usize]) {
+    state.min_step = 0;
+    state.min_trade_idx = 0;
+    state.min_city_node = 0;
+    state.min_road_key = 0;
+    state.min_settle_node = 0;
+    state.min_port_settle_node = 0;
+
+    let player = &state.players[state.current_player];
+
+    // Dev card played this turn → past step 1
+    if player.has_played_dev_card_this_turn {
+        state.min_step = state.min_step.max(2);
+    }
+
+    // Dev card bought this turn → past step 3
+    let bought: u8 = player.dev_cards_bought_this_turn.0.iter().sum();
+    if bought > 0 {
+        state.min_step = state.min_step.max(3);
+    }
+
+    // New settlements this turn → past step 6 (at least)
+    let boards = &state.boards[state.current_player];
+    let new_settlements = boards.settlements & !state.settlements_at_turn_start;
+    if new_settlements != 0 {
+        // Could be non-port (step 6) or port (step 8, which resets).
+        // Conservatively don't advance past step 2 — a port settle resets
+        // to step 2, and we can't tell which type from state alone.
+        // The search will handle it correctly from step 2 onward.
+        state.min_step = state.min_step.max(2);
+    }
+
+    // We can't reliably detect trades or roads built this turn from state
+    // alone (no per-turn tracking). Leave min_step at whatever we've
+    // derived — the search will explore from there. This is conservative:
+    // it may allow some transpositions that a perfect derivation would
+    // eliminate, but it never blocks valid actions.
+
+    state.compute_road_distances();
+}
+
 pub fn replay_events(
     state: &mut GameState,
     events: &[GameEvent],
@@ -458,6 +505,15 @@ pub fn replay_events(
     state.canonical_build_order = false;
     let (mut final_state, entries, walk_actions) =
         try_replay(state.clone(), events, 0, ctx, timeline, Vec::new())?;
+    // Derive canonical ordering state from actions taken this turn,
+    // then enable ordering for search.
+    tracing::info!(
+        phase = ?final_state.phase,
+        player = ?final_state.current_player,
+        min_step = final_state.min_step,
+        "replay complete"
+    );
+    derive_canonical_state(&mut final_state, &walk_actions);
     final_state.canonical_build_order = true;
     *state = final_state;
     Some((entries, walk_actions))
@@ -614,7 +670,7 @@ fn sort_by_steal_coverage(
 /// Replay the game log through the engine's action system, using search to
 /// resolve ambiguous events (placements without coordinates, robber moves).
 ///
-/// Returns `Some(timeline)` on success, `None` if no consistent replay exists.
+/// Returns `Some((final_state, timeline))` on success, `None` if no consistent replay exists.
 fn replay_search(
     topology: Arc<Topology>,
     board: &BoardData,
@@ -624,7 +680,7 @@ fn replay_search(
     edge_map: &HashMap<(i32, i32, u8), EdgeId>,
     mapper: &CoordMapper,
     live_robber_tile: Option<u8>,
-) -> Option<Vec<TimelineEntry>> {
+) -> Option<(GameState, Vec<TimelineEntry>)> {
     let dev_deck = DevCardDeck::new();
     let dice = Dice::Balanced(BalancedDice::new());
     let mut state = GameState::new(topology, dev_deck, dice);
@@ -665,7 +721,7 @@ fn replay_search(
             reason
         ),
     }
-    result.map(|(_, entries, _)| entries)
+    result.map(|(final_state, entries, _)| (final_state, entries))
 }
 
 fn try_replay(
@@ -969,7 +1025,30 @@ fn try_replay(
             | GameEvent::RolledSeven => {}
 
             GameEvent::Discard { player, resources } => {
-                if player_of_color(ctx.color_map, *player).is_some() {
+                if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                    // Colonist may send discards in a different order than our
+                    // game expects (we enforce roller-first, colonist may not).
+                    // If the game expects a different player to discard, swap
+                    // the discard target to match the event.
+                    if let Phase::Discard {
+                        player: ref disc_player,
+                        roller,
+                        ..
+                    } = state.phase
+                    {
+                        if *disc_player != pid {
+                            let hand_total = state.players[pid].hand.total();
+                            if hand_total > state.discard_threshold {
+                                state.current_player = pid;
+                                state.phase = Phase::Discard {
+                                    player: pid,
+                                    remaining: hand_total / 2,
+                                    roller,
+                                    min_resource: 0,
+                                };
+                            }
+                        }
+                    }
                     for &res in &ALL_RESOURCES {
                         for _ in 0..resources[res] {
                             let aid = action::discard_id(res).0 as usize;
