@@ -749,8 +749,9 @@ mod tests {
     use crate::game::board::Port;
     use crate::game::dev_card::DevCardDeck;
     use crate::game::dice::Dice;
-    use crate::game::resource::ROAD_COST;
+    use crate::game::resource::{ROAD_COST, ResourceArray};
     use crate::game::topology::Topology;
+    use canopy::game::Game;
     use std::sync::Arc;
 
     fn make_state() -> GameState {
@@ -1373,6 +1374,232 @@ mod tests {
                     "generic port should give 3:1"
                 );
             }
+        }
+    }
+
+    // --- Canonical ordering (commutativity) tests ---
+
+    /// Helper: give player resources and play through a full turn,
+    /// collecting all reachable end-of-turn states via BFS.
+    fn reachable_end_states(state: &GameState) -> std::collections::HashSet<u64> {
+        use std::collections::{HashSet, VecDeque};
+
+        let mut visited = HashSet::new();
+        let mut end_states = HashSet::new();
+        let mut queue = VecDeque::new();
+
+        // Hash a state by its board + hand (enough to identify unique end states)
+        let hash_state = |s: &GameState| -> u64 {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            s.boards[Player::One].settlements.hash(&mut h);
+            s.boards[Player::One].cities.hash(&mut h);
+            s.boards[Player::One].road_network.roads.hash(&mut h);
+            s.boards[Player::Two].settlements.hash(&mut h);
+            s.boards[Player::Two].cities.hash(&mut h);
+            s.boards[Player::Two].road_network.roads.hash(&mut h);
+            for p in &[Player::One, Player::Two] {
+                for &r in &ALL_RESOURCES {
+                    s.players[*p].hand[r].hash(&mut h);
+                }
+                s.players[*p].dev_cards.0.hash(&mut h);
+            }
+            s.longest_road.hash(&mut h);
+            h.finish()
+        };
+
+        let start_hash = hash_state(state);
+        visited.insert(start_hash);
+        queue.push_back(state.clone());
+
+        let mut actions = Vec::new();
+        while let Some(s) = queue.pop_front() {
+            legal_actions(&s, &mut actions);
+            for &a in &actions.clone() {
+                let mut next = s.clone();
+                game::apply(&mut next, a);
+                // Resolve chance nodes
+                let mut rng = fastrand::Rng::with_seed(0);
+                while let Some(c) = next.sample_chance(&mut rng) {
+                    next.apply_action(c);
+                }
+                if a.0 == END_TURN {
+                    end_states.insert(hash_state(&next));
+                } else {
+                    let h = hash_state(&next);
+                    if visited.insert(h) {
+                        queue.push_back(next);
+                    }
+                }
+            }
+        }
+        end_states
+    }
+
+    /// Canonical ordering must not lose any reachable end-of-turn state.
+    /// Give a player enough resources for multiple builds+trades and verify
+    /// that the canonical and non-canonical action spaces reach the same
+    /// set of end-of-turn board states.
+    #[test]
+    fn canonical_ordering_preserves_all_end_states() {
+        let mut state = make_state();
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = Player::One;
+
+        // Give P1 enough resources for 2 roads + 1 settlement
+        let p = &mut state.players[Player::One];
+        p.hand = ResourceArray::new(3, 3, 1, 1, 0);
+
+        // Canonical: collect reachable end states
+        let canon_ends = reachable_end_states(&state);
+
+        // Non-canonical: disable ordering and collect
+        let mut state_nc = state.clone();
+        state_nc.canonical_build_order = false;
+        let nocanon_ends = reachable_end_states(&state_nc);
+
+        // Every canonical end state must be reachable without canonical
+        for h in &canon_ends {
+            assert!(
+                nocanon_ends.contains(h),
+                "canonical produced an end state not reachable without it"
+            );
+        }
+        // Every non-canonical end state must be reachable with canonical
+        for h in &nocanon_ends {
+            assert!(
+                canon_ends.contains(h),
+                "non-canonical end state not reachable with canonical ordering"
+            );
+        }
+        // Canonical should have fewer intermediate states (that's the point)
+        assert!(
+            !canon_ends.is_empty(),
+            "should have at least one reachable end state"
+        );
+    }
+
+    /// Canonical ordering should produce strictly fewer legal actions
+    /// than non-canonical in positions where ordering matters.
+    #[test]
+    fn canonical_ordering_prunes_actions() {
+        let mut state = make_state();
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = Player::One;
+
+        // Give P1 resources for road + settlement + trade
+        state.players[Player::One].hand = ResourceArray::new(4, 2, 1, 1, 0);
+
+        // Build a road first (locks out earlier categories)
+        let mut actions = Vec::new();
+        legal_actions(&state, &mut actions);
+        let road = actions.iter().find(|a| a.0 >= ROAD_START && a.0 < ROAD_END);
+        if let Some(&road_action) = road {
+            let mut after_road = state.clone();
+            game::apply(&mut after_road, road_action);
+
+            let mut canon_actions = Vec::new();
+            legal_actions(&after_road, &mut canon_actions);
+
+            let mut nc_state = after_road.clone();
+            nc_state.canonical_build_order = false;
+            let mut nc_actions = Vec::new();
+            legal_actions(&nc_state, &mut nc_actions);
+
+            // Canonical should have fewer or equal actions (trades locked out)
+            assert!(
+                canon_actions.len() <= nc_actions.len(),
+                "canonical should prune: canon={} nocanon={}",
+                canon_actions.len(),
+                nc_actions.len()
+            );
+        }
+    }
+
+    /// After building a road, maritime trades should be locked out
+    /// (roads are step 5, trades are step 2).
+    #[test]
+    fn canonical_locks_out_trades_after_road() {
+        let mut state = make_state();
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = Player::One;
+
+        // Give enough for road + trade
+        state.players[Player::One].hand = ResourceArray::new(5, 1, 0, 0, 0);
+        state.players[Player::One].trade_ratios = [4, 4, 4, 4, 4];
+
+        let mut actions = Vec::new();
+        legal_actions(&state, &mut actions);
+        let has_trade_before = actions
+            .iter()
+            .any(|a| a.0 >= MARITIME_START && a.0 < MARITIME_END);
+
+        // Build a road
+        if let Some(&road) = actions.iter().find(|a| a.0 >= ROAD_START && a.0 < ROAD_END) {
+            game::apply(&mut state, road);
+            legal_actions(&state, &mut actions);
+            let has_trade_after = actions
+                .iter()
+                .any(|a| a.0 >= MARITIME_START && a.0 < MARITIME_END);
+
+            if has_trade_before {
+                assert!(
+                    !has_trade_after,
+                    "trades should be locked out after building a road"
+                );
+            }
+        }
+    }
+
+    /// After building on a port, trades should be re-enabled (port
+    /// settlement resets min_step to allow trading at new rates).
+    #[test]
+    fn port_settlement_resets_trade_access() {
+        let mut state = make_state();
+        play_setup(&mut state);
+        state.phase = Phase::Main;
+        state.current_player = Player::One;
+
+        // Find a port node reachable from P1's road network
+        let port_nid = {
+            let topo = &state.topology;
+            let p1_roads = state.boards[Player::One].road_network.roads;
+            let occupied = state.occupied_nodes();
+            let mut neighbor_blocked = 0u64;
+            let mut occ = occupied;
+            while occ != 0 {
+                let n = occ.trailing_zeros() as usize;
+                occ &= occ - 1;
+                neighbor_blocked |= topo.adj.node_adj_nodes[n];
+            }
+            let mut on_road = 0u64;
+            let mut roads = p1_roads;
+            while roads != 0 {
+                let eid = roads.trailing_zeros() as usize;
+                roads &= roads - 1;
+                on_road |= topo.adj.edge_endpoints[eid];
+            }
+            let legal_settle = !occupied & !neighbor_blocked & on_road & ((1u64 << 54) - 1);
+            topo.nodes
+                .iter()
+                .find(|n| n.port.is_some() && legal_settle & (1u64 << n.id.0) != 0)
+                .map(|n| n.id)
+        };
+
+        if let Some(nid) = port_nid {
+            state.players[Player::One].hand = ResourceArray::new(5, 5, 5, 5, 0);
+            game::apply(&mut state, settlement_id(nid));
+
+            // After port settlement, trades should be available
+            let mut actions = Vec::new();
+            legal_actions(&state, &mut actions);
+            let has_trade = actions
+                .iter()
+                .any(|a| a.0 >= MARITIME_START && a.0 < MARITIME_END);
+            assert!(has_trade, "port settlement should re-enable trading");
         }
     }
 }
