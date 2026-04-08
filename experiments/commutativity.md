@@ -66,15 +66,15 @@ Always available.
 
 ## Implementation
 
-State fields (reset each turn):
+No reachable end-of-turn state is lost — the pruned orderings all reach identical states. The ordering is active by default (search, UI, bot play) and disabled during colonist replay (`canonical_build_order = false`) where the event log may use non-canonical orderings.
 
-- `min_action_type: u8` — lowest allowed category (1–8)
-- `min_trade_idx: u8` — within trades, only pairs > this
-- `min_city_node: u8` — within pre-existing cities, only nodes > this
-- `min_road_key: u16` — within roads, only keys > this (`distance * 72 + edge_id`)
-- `min_settle_node: u8` — within non-port settlements, only nodes > this
-- `min_port_settle_node: u8` — within port settlements, only nodes > this
+State fields on `GameState` (reset each turn in `apply_end_turn`):
+
+- `min_step: u8` — lowest allowed category (1–8)
+- `min_trade_idx: u8` — within trades, only pairs >= this
+- `min_city_node: u8` — within pre-existing cities, only nodes >= this
+- `min_road_key: u16` — within roads, only keys >= this (`distance * 72 + edge_id`)
+- `min_settle_node: u8` — within non-port settlements, only nodes >= this
+- `min_port_settle_node: u8` — within port settlements, only nodes >= this
 - `road_distances: [u8; 72]` — BFS from frontier, computed at turn start and after Road Building
 - `settlements_at_turn_start: u64` — bitmask for pre-existing vs same-turn
-
-Colonist replay: `canonical_build_order = false` skips all filtering.

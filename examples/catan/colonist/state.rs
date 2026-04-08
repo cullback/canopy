@@ -723,12 +723,6 @@ fn replay_search(
         state: state.clone(),
     }];
 
-    // Dump events around the failure area
-    eprintln!("  events around e210-e225:");
-    for j in 200..events.len().min(230) {
-        eprintln!("    e{j}: {:?}", events[j]);
-    }
-
     let result = try_replay(state, events, 0, &ctx, timeline, Vec::new());
     let calls = ctx.call_count.load(std::sync::atomic::Ordering::Relaxed);
     let depth = ctx.max_depth.load(std::sync::atomic::Ordering::Relaxed);
@@ -1056,66 +1050,6 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
-                                {
-                                    use std::sync::atomic::{AtomicUsize, Ordering};
-                                    static N: AtomicUsize = AtomicUsize::new(0);
-                                    if N.fetch_add(1, Ordering::Relaxed) < 1 {
-                                        // Print all robber positions from actions
-                                        eprintln!("  robber history:");
-                                        for (ai, &a) in actions.iter().enumerate() {
-                                            if a >= action::ROBBER_START as usize
-                                                && a < action::ROBBER_END as usize
-                                            {
-                                                let tid = a - action::ROBBER_START as usize;
-                                                let t = &state.topology.tiles[tid];
-                                                let res = t
-                                                    .terrain
-                                                    .resource()
-                                                    .map(|r| format!("{r:?}"))
-                                                    .unwrap_or("desert".into());
-                                                eprintln!(
-                                                    "    action[{ai}]: robber → T{tid} ({res})"
-                                                );
-                                            }
-                                        }
-                                        let b = &state.boards[p];
-                                        eprintln!(
-                                            "=== roll {total} mismatch P{} e{i} ===",
-                                            p as usize + 1
-                                        );
-                                        eprintln!(
-                                            "  engine={engine_gain:?} log={:?}",
-                                            log_gains[p as usize]
-                                        );
-                                        eprintln!("  robber=T{}", state.robber.0);
-                                        eprintln!(
-                                            "  P{} settlements={:#018x} cities={:#018x}",
-                                            p as usize + 1,
-                                            b.settlements,
-                                            b.cities
-                                        );
-                                        // Show which tiles fire on this roll
-                                        let topo = &state.topology;
-                                        for &tid in &topo.dice_to_tiles[total as usize] {
-                                            let t = &topo.tiles[tid.0 as usize];
-                                            let res = t
-                                                .terrain
-                                                .resource()
-                                                .map(|r| format!("{r:?}"))
-                                                .unwrap_or("?".into());
-                                            let mask = topo.adj.tile_nodes[tid.0 as usize];
-                                            let blocked = tid == state.robber;
-                                            let s = (b.settlements & mask).count_ones();
-                                            let c = (b.cities & mask).count_ones();
-                                            if s > 0 || c > 0 || blocked {
-                                                eprintln!(
-                                                    "    T{} {res}: s={s} c={c} blocked={blocked}",
-                                                    tid.0
-                                                );
-                                            }
-                                        }
-                                    }
-                                }
                                 backtrack(
                                     i,
                                     &format!("roll {} dist mismatch P{}", total, p as usize + 1),
@@ -1190,14 +1124,10 @@ fn try_replay(
                 if player_of_color(ctx.color_map, *player).is_some()
                     && !matches!(state.phase, Phase::MoveRobber)
                 {
-                    use std::sync::atomic::{AtomicUsize, Ordering as O};
-                    static SK: AtomicUsize = AtomicUsize::new(0);
-                    if SK.fetch_add(1, O::Relaxed) < 5 {
-                        eprintln!(
-                            "  SKIP MoveRobber e{i}: phase={:?} player={:?}",
-                            state.phase, state.current_player
-                        );
-                    }
+                    eprintln!(
+                        "  SKIP MoveRobber e{i}: phase={:?} player={:?}",
+                        state.phase, state.current_player
+                    );
                 }
                 if player_of_color(ctx.color_map, *player).is_some()
                     && matches!(state.phase, Phase::MoveRobber)
@@ -1254,7 +1184,6 @@ fn try_replay(
                             _ => {}
                         }
                     }
-
                     let steal_outcome = events[i + 1..].iter().find_map(|e| match e {
                         GameEvent::Stole { .. } => Some(true),
                         GameEvent::StoleNothing { .. } => Some(false),
@@ -1275,7 +1204,6 @@ fn try_replay(
                             None => true,
                         }
                     });
-
                     let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
                     let candidates_before_rolls = candidates.len();
                     if !check_rolls.is_empty() {
@@ -1288,13 +1216,13 @@ fn try_replay(
                                 .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
                         });
                     }
-                    // If pre_filter_rolls stopped early (building event between
-                    // robber and next roll), scan for the next non-7 roll ignoring
-                    // building events. This is a heuristic: the distribution check
-                    // uses the current state (without the new building), so it's
-                    // only accurate for production from EXISTING buildings. But it
-                    // correctly identifies which tile the robber blocks.
-                    if candidates.len() > 1 && candidates.len() == candidates_before_rolls {
+                    // If pre_filter_rolls had NO rolls at all (building event before
+                    // the first roll), scan past building events to find a
+                    // differentiating roll. Only use this fallback when pre_filter_rolls
+                    // returned empty — if it returned rolls that didn't narrow, those
+                    // rolls after a build event can't be reliably checked against
+                    // the pre-build state.
+                    if candidates.len() > 1 && check_rolls.is_empty() {
                         let extended = extended_roll_gains(&events[i + 1..], ctx.color_map);
                         if !extended.is_empty() {
                             candidates.retain(|&aid| {
@@ -1353,14 +1281,8 @@ fn try_replay(
                                 })
                                 .unwrap();
                             {
-                                use std::sync::atomic::{AtomicUsize, Ordering as O};
-                                static D: AtomicUsize = AtomicUsize::new(0);
-                                if D.fetch_add(1, O::Relaxed) < 3 {
-                                    let tid = (result - action::ROBBER_START as usize) as u8;
-                                    let mask = state.topology.adj.tile_nodes[tid as usize];
-                                    let bcount = (mask & dom_buildings).count_ones();
-                                    eprintln!("  robber default e{i}: T{tid} dom_adj={bcount} dom_bits={dom_buildings:#018x} candidates={}", candidates.len());
-                                }
+                                let tid = (result - action::ROBBER_START as usize) as u8;
+                                eprintln!("  robber default e{i}: T{tid}");
                             }
                             result
                         });

@@ -984,6 +984,148 @@ fn extract_buildings_from(corners: &serde_json::Value, edges: &serde_json::Value
     data
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::game::topology::Topology;
+
+    /// Verify that map_corner round-trips correctly for all 12 D6 orientations.
+    ///
+    /// For each orientation and each tile corner, we compute the "colonist"
+    /// coordinates by applying the inverse hex+corner transform, then run
+    /// map_corner forward and look up the result in build_corner_map. The
+    /// resulting NodeId must match the topology's node for that tile corner.
+    #[test]
+    fn map_corner_all_orientations() {
+        let topo = Topology::from_seed(42);
+        let corner_map = build_corner_map(&topo);
+
+        for reflect in [false, true] {
+            for rotation in 0u8..6 {
+                let mapper = CoordMapper { rotation, reflect };
+
+                // For each land hex and each canonical corner z (0 or 1), compute
+                // colonist coords, map them back, and check the resulting node.
+                for (tile_idx, &canonical_hex) in LAND_HEXES.iter().enumerate() {
+                    let cq = canonical_hex.q as i32;
+                    let cr = canonical_hex.r as i32;
+
+                    // Inverse of map_hex: reverse rotation then reverse reflect
+                    let inv_rotation = (6 - rotation) % 6;
+                    let (mut q, mut r, mut s) = (cq, cr, -cq - cr);
+                    for _ in 0..inv_rotation {
+                        let new_q = -r;
+                        let new_r = -s;
+                        let new_s = -q;
+                        q = new_q;
+                        r = new_r;
+                        s = new_s;
+                    }
+                    if reflect {
+                        std::mem::swap(&mut r, &mut s);
+                    }
+                    let colonist_x = q;
+                    let colonist_y = r;
+
+                    // Verify hex round-trip
+                    let (mx, my) = mapper.map_hex(colonist_x, colonist_y);
+                    assert_eq!(
+                        (mx, my),
+                        (cq, cr),
+                        "hex round-trip failed for R{rotation} reflect={reflect} tile {tile_idx}"
+                    );
+
+                    // Check corners z=0 (corner 0) and z=1 (corner 3)
+                    for (z, corner_idx) in [(0u8, 0usize), (1u8, 3usize)] {
+                        // Inverse corner transform:
+                        // Forward: z→corner, reflect, rotate
+                        // Inverse: un-rotate, un-reflect, corner→z
+                        let mut c = corner_idx as u8;
+                        // Un-rotate: apply inv_rotation
+                        c = (c + 6 - rotation) % 6;
+                        // Un-reflect
+                        if reflect {
+                            c = (8 - c) % 6;
+                        }
+                        // The result must be 0 or 3 to be expressible as z
+                        // If not, we need to find a neighbor hex representation
+                        let colonist_z;
+                        let colonist_corner_x;
+                        let colonist_corner_y;
+
+                        if c == 0 {
+                            colonist_z = 0;
+                            colonist_corner_x = colonist_x;
+                            colonist_corner_y = colonist_y;
+                        } else if c == 3 {
+                            colonist_z = 1;
+                            colonist_corner_x = colonist_x;
+                            colonist_corner_y = colonist_y;
+                        } else {
+                            // Find a neighbor hex where this corner is 0 or 3
+                            let colonist_hex = Hex::new(colonist_x as i8, colonist_y as i8);
+                            let mut found = false;
+                            colonist_z = 0; // placeholder
+                            colonist_corner_x = 0;
+                            colonist_corner_y = 0;
+                            for &(dir, nc) in &SHARED_CORNERS[c as usize] {
+                                if nc == 0 || nc == 3 {
+                                    let nb = colonist_hex.neighbor(dir);
+                                    let cz = if nc == 0 { 0 } else { 1 };
+                                    // Map this through map_corner and check
+                                    let mapped = mapper.map_corner(nb.q as i32, nb.r as i32, cz);
+                                    if let Some(&nid) = corner_map.get(&mapped) {
+                                        let expected = topo.tiles[tile_idx].nodes[corner_idx];
+                                        assert_eq!(
+                                            nid,
+                                            expected,
+                                            "corner mismatch via neighbor: R{rotation} reflect={reflect} \
+                                             tile[{tile_idx}] corner {corner_idx} z={z} \
+                                             colonist=({},{},{cz}) → mapped=({},{},{}) → node {} expected {}",
+                                            nb.q,
+                                            nb.r,
+                                            mapped.0,
+                                            mapped.1,
+                                            mapped.2,
+                                            nid.0,
+                                            expected.0,
+                                        );
+                                    }
+                                    found = true;
+                                    break;
+                                }
+                            }
+                            if !found {
+                                panic!(
+                                    "no neighbor found for corner {c} at R{rotation} reflect={reflect}"
+                                );
+                            }
+                            continue;
+                        };
+
+                        let mapped =
+                            mapper.map_corner(colonist_corner_x, colonist_corner_y, colonist_z);
+                        let expected_nid = topo.tiles[tile_idx].nodes[corner_idx];
+                        let nid = corner_map.get(&mapped);
+                        assert_eq!(
+                            nid,
+                            Some(&expected_nid),
+                            "corner mismatch: R{rotation} reflect={reflect} tile[{tile_idx}] \
+                             corner {corner_idx} z={z} colonist=({colonist_corner_x},{colonist_corner_y},{colonist_z}) \
+                             → mapped=({},{},{}) → node {:?} expected {}",
+                            mapped.0,
+                            mapped.1,
+                            mapped.2,
+                            nid.map(|n| n.0),
+                            expected_nid.0,
+                        );
+                    }
+                }
+            }
+        }
+    }
+}
+
 // -- Display ------------------------------------------------------------------
 
 pub fn print(board: &BoardData) {

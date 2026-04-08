@@ -27,47 +27,9 @@ Phase::Discard { player, remaining, roller, min_resource }
 
 ### Canonical build ordering
 
-During the main phase a player can build settlements, cities, roads,
-buy dev cards, play dev cards, and trade — in any order. Many of these
-action sequences lead to identical end-of-turn states. Building City A
-then City B produces the same state as B then A. Buying a dev card
-then building a city produces the same state as the reverse.
-
-The optimization classifies main-phase actions as **ordered** or
-**unordered** and enforces a canonical priority among ordered actions.
-Resource spending is commutative: if you can afford action A then B,
-you can always afford B then A (same total cost). Actions that only
-spend resources and don't change the board commute unconditionally.
-
-**Ordered** (must respect priority + lexicographic within type):
-
-| Priority | Action                          | Rationale                       |
-| -------- | ------------------------------- | ------------------------------- |
-| 0        | Dev card buy                    | No board change                 |
-| 1        | City on pre-existing settlement | No connectivity or ratio change |
-| 2        | Non-port settlement             | No connectivity or ratio change |
-
-**Unordered** (can happen at any time):
-
-| Action                   | Why unordered                                       |
-| ------------------------ | --------------------------------------------------- |
-| Road                     | Changes connectivity, can unlock new locations      |
-| Port settlement          | Changes trade ratios, can enable new trades         |
-| City on same-turn settle | Causal dependency — settlement must exist first     |
-| Dev card play            | Changes resources (YoP, Monopoly) or triggers phase |
-| Maritime trade           | Changes resources                                   |
-
-Three `u8` fields on `GameState` track the ordering state:
-`min_build_type` (which priorities remain available), `min_city_node`
-and `min_settle_node` (lexicographic bounds within each type). A
-`settlements_at_turn_start` bitmask distinguishes pre-existing
-settlements (ordered cities) from same-turn settlements (unordered
-cities), preserving the settle-then-upgrade-same-turn line of play.
-
-The ordering is active by default (including the UI and bot play).
-No reachable end-of-turn state is lost — the pruned orderings all
-reach identical states. Disabled during colonist replay where the
-event log may use non-canonical orderings.
+See [experiments/commutativity.md](/experiments/commutativity.md) — 8-step FSM
+that enforces a canonical action ordering within each turn, eliminating
+transpositions without losing any reachable end-of-turn state.
 
 ### Dominated action pruning
 
