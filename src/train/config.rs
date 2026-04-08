@@ -106,6 +106,14 @@ pub struct TrainConfig {
     pub aux_value_horizons: Vec<u32>,
     /// Per-head weight for auxiliary value losses. Default 0.5.
     pub aux_value_weight: f32,
+
+    // -- Soft policy --
+    /// Temperature for soft policy target: policy^(1/T), renormalized.
+    /// 0.0 = disabled (no soft policy head). KataGo uses T=4.
+    pub soft_policy_temperature: f32,
+    /// Weight for soft policy loss relative to hard policy loss.
+    /// KataGo uses 8.0 (compensates for smaller gradients from softer target).
+    pub soft_policy_weight: f32,
 }
 
 impl Default for TrainConfig {
@@ -150,6 +158,10 @@ impl Default for TrainConfig {
             // Auxiliary short-term value heads
             aux_value_horizons: vec![],
             aux_value_weight: 0.5,
+
+            // Soft policy
+            soft_policy_temperature: 0.0,
+            soft_policy_weight: 0.0,
         }
     }
 }

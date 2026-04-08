@@ -1,9 +1,10 @@
-//! # NexusEncoderV3 (1607 features)
+//! # NexusEncoderV3 (1612 features)
 //!
 //! Simplified heterogeneous encoder — drops edge features and settle_legal.
 //! Port encoding changed from 5-channel weighted to 6-channel one-hot.
+//! Adds board-wide resource production (5) to global features.
 //!
-//! ## Global (121 = 7 + 51×2 + 12) — same as nexus
+//! ## Global (126 = 7 + 51×2 + 12 + 5)
 //!
 //! ## Tiles (19 × 10 = 190) — same as nexus
 //!
@@ -38,8 +39,8 @@ pub struct NexusEncoderV3;
 
 #[allow(dead_code)]
 impl NexusEncoderV3 {
-    pub const FEATURE_SIZE: usize = 1607;
-    pub const GLOBAL_LEN: usize = 121;
+    pub const FEATURE_SIZE: usize = 1612;
+    pub const GLOBAL_LEN: usize = 126;
     pub const TILES_F: usize = 10;
     pub const NODES_F: usize = 24;
 }
@@ -169,6 +170,21 @@ impl StateEncoder<GameState> for NexusEncoderV3 {
 
         // Dice state (12)
         encode_dice(state, out);
+
+        // Board-wide resource production (5): total pips per resource across
+        // all tiles, regardless of building placement. Captures resource
+        // scarcity/abundance for this board layout.
+        {
+            let mut board_prod = [0u8; 5];
+            for (i, tile) in topo.tiles.iter().enumerate() {
+                if let Some(r) = tile.terrain.resource() {
+                    board_prod[r as usize] += PIPS[tile_numbers[i] as usize];
+                }
+            }
+            for &p in &board_prod {
+                out.push(p as f32 / 15.0);
+            }
+        }
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);
 

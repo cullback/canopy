@@ -765,8 +765,9 @@ impl ColonistPollState {
 /// Poll interval for checking colonist.io state changes.
 const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
 
-/// Sims per search batch — small enough that the loop stays responsive.
-const BATCH_SIZE: u32 = 10;
+/// Sims per search batch — controls how many sims run before checking
+/// WebSocket messages. Small enough that the loop stays responsive.
+const BATCH_SIZE: u32 = 50;
 
 /// Send all messages, returning Err on disconnect.
 async fn send_all(socket: &mut WebSocket, msgs: &[canopy::server::ServerMsg]) -> Result<(), ()> {
@@ -912,8 +913,6 @@ async fn handle_colonist_socket(
             if send_all(&mut socket, &msgs).await.is_err() {
                 return;
             }
-            // New events arrived — refill budget so search explores from
-            // the updated position (keeps existing tree work via reroot).
             if state_changed && auto_refill > 0 {
                 sims_budget = auto_refill;
                 eprintln!("poll: state changed, budget refilled to {auto_refill}");
@@ -923,10 +922,21 @@ async fn handle_colonist_socket(
         // --- Run search batch (interleaved with WebSocket reads) ---
         if sims_budget > 0 && session.can_search() {
             let before = session.root_visits();
-            session.set_num_simulations(BATCH_SIZE);
+            // Set the full budget on the first batch so Gumbel plans its
+            // halving schedule correctly. On subsequent batches the Gumbel
+            // state persists (not reset by cancel_search), so BATCH_SIZE
+            // just controls how many ticks before we yield for UI/polling.
+            if !session.is_searching() {
+                session.set_num_simulations(sims_budget);
+            }
             let mut evals = vec![];
+            let mut ticks = 0u32;
             loop {
                 if session.search_tick(&mut evals).is_some() {
+                    break;
+                }
+                ticks += 1;
+                if ticks >= BATCH_SIZE {
                     break;
                 }
                 // Between ticks, check for incoming messages so the UI
@@ -983,6 +993,7 @@ pub fn run_serve(
     evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync>,
     eval_name: &str,
     leaf_batch_size: u32,
+    gumbel_m: u32,
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
@@ -1050,6 +1061,7 @@ pub fn run_serve(
     let mcts_config = canopy::mcts::Config {
         filter_legal: true,
         leaf_batch_size,
+        num_sampled_actions: gumbel_m,
         ..canopy::mcts::Config::default()
     };
     let mut session = canopy::server::GameSession::with_state(

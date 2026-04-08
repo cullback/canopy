@@ -77,6 +77,10 @@ pub struct TrainStepConfig {
     pub aux_value_weight: f32,
     /// Number of auxiliary value targets per sample.
     pub num_aux_targets: usize,
+    /// Soft policy temperature (0 = disabled).
+    pub soft_policy_temperature: f32,
+    /// Weight for soft policy loss.
+    pub soft_policy_weight: f32,
 }
 
 /// Metrics returned from a training step.
@@ -384,6 +388,8 @@ pub fn run_training<G>(
             q_weight,
             aux_value_weight: config.aux_value_weight,
             num_aux_targets: config.aux_value_horizons.len(),
+            soft_policy_temperature: config.soft_policy_temperature,
+            soft_policy_weight: config.soft_policy_weight,
         };
         let train_metrics = model.train_step(&all_samples, &step_cfg);
 

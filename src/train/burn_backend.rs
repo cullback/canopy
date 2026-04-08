@@ -201,6 +201,28 @@ fn compute_batch_losses<B: Backend>(
 
     let mut total_loss = policy_loss.add(wdl_loss);
 
+    // Soft policy loss: cross-entropy against policy_target^(1/T), renormalized
+    if let Some(soft_logits) = output.soft_policy_logits {
+        if cfg.soft_policy_temperature > 0.0 && cfg.soft_policy_weight > 0.0 {
+            let t_inv = 1.0 / cfg.soft_policy_temperature;
+            // Raise policy targets to power 1/T (element-wise), then renormalize
+            let soft_targets = batch
+                .policy_targets
+                .clone()
+                .clamp_min(1e-8)
+                .powf_scalar(t_inv);
+            let soft_targets_sum = soft_targets.clone().sum_dim(1); // [batch, 1]
+            let soft_targets = soft_targets.div(soft_targets_sum);
+            let log_soft_probs = log_softmax(soft_logits, 1);
+            let per_sample_ce = soft_targets.mul(log_soft_probs).sum_dim(1).neg();
+            let soft_loss = per_sample_ce
+                .mul(batch.mask.clone())
+                .sum()
+                .div_scalar(denom);
+            total_loss = total_loss.add(soft_loss.mul_scalar(cfg.soft_policy_weight));
+        }
+    }
+
     // Auxiliary value loss
     let aux_value_per_horizon = if let (Some(aux_targets), Some(aux_preds)) =
         (&batch.aux_value_targets, output.aux_values)

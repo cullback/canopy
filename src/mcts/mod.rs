@@ -95,7 +95,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             num_simulations: 800,
-            num_sampled_actions: 16,
+            num_sampled_actions: 4,
             c_visit: 50.0,
             c_scale: 1.0,
             leaf_batch_size: 1,
@@ -310,6 +310,11 @@ impl<G: Game> Search<G> {
         self.config.num_simulations = n;
     }
 
+    /// Whether a search is currently active (between first `step` and `Done`).
+    pub fn is_searching(&self) -> bool {
+        self.search_active
+    }
+
     /// Enable or disable SO-ISMCTS legal-action filtering at interior nodes.
     pub fn set_filter_legal(&mut self, enabled: bool) {
         self.config.filter_legal = enabled;
@@ -439,6 +444,7 @@ impl<G: Game> Search<G> {
             self.root = self.tree.child_for_action(root, action);
         }
         self.search_active = false;
+        self.gumbel = None;
     }
 
     /// Walk the tree pointer through a sequence of actions without touching
@@ -516,9 +522,10 @@ impl<G: Game> Search<G> {
     }
 
     /// Start a new search: compact/clear tree, initialize gumbel state.
+    /// If the root hasn't changed and a previous Gumbel state exists,
+    /// resumes the existing search with additional budget.
     fn begin_search(&mut self, rng: &mut fastrand::Rng) -> Step<'_, G> {
         self.search_active = true;
-        self.gumbel = None;
         self.vanilla_budget_remaining = self.config.num_simulations;
         self.vanilla_q_bounds = (0.0, 0.0);
         self.depth_sum = 0;
@@ -528,6 +535,7 @@ impl<G: Game> Search<G> {
         // Terminal root requires no tree logic — immediate result.
         if let Status::Terminal(reward) = self.root_state.status() {
             self.search_active = false;
+            self.gumbel = None;
             return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
                 wdl: wdl_from_scalar(reward),
@@ -549,7 +557,10 @@ impl<G: Game> Search<G> {
             let root_value = self.root_network_value;
             let root_sign = match *self.tree.kind(new_root) {
                 NodeKind::Decision(sign) => sign,
-                _ => return self.run_vanilla_sims(rng),
+                _ => {
+                    self.gumbel = None;
+                    return self.run_vanilla_sims(rng);
+                }
             };
 
             // When filter_legal is on, tree-reused root edges may include
@@ -566,6 +577,7 @@ impl<G: Game> Search<G> {
                 // start fresh rather than panicking on empty candidates.
                 if legal_indices.is_empty() {
                     self.root = None;
+                    self.gumbel = None;
                     return self.begin_search(rng);
                 }
                 Some(legal_indices)
@@ -579,18 +591,24 @@ impl<G: Game> Search<G> {
                 .as_ref()
                 .map_or(self.tree.edges(new_root).len(), |l| l.len());
             if num_legal <= 1 {
+                self.gumbel = None;
                 return self.run_vanilla_sims(rng);
             }
 
-            self.gumbel = Some(init_gumbel(
-                &self.tree,
-                new_root,
-                root_value,
-                root_sign,
-                &self.config,
-                rng,
-                legal,
-            ));
+            // Resume existing Gumbel state if available (same root, same
+            // candidates). This preserves sequential halving progress across
+            // cancel/restart cycles caused by polling.
+            if self.gumbel.is_none() {
+                self.gumbel = Some(init_gumbel(
+                    &self.tree,
+                    new_root,
+                    root_value,
+                    root_sign,
+                    &self.config,
+                    rng,
+                    legal,
+                ));
+            }
 
             self.run_simulations(rng)
         } else {

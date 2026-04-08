@@ -501,6 +501,7 @@ impl<B: Backend, const H: usize, const GH: usize, const L: usize> PolicyValueNet
         ForwardOutput {
             policy_logits: policy,
             value,
+            soft_policy_logits: None,
             aux_values,
         }
     }

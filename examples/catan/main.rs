@@ -68,6 +68,30 @@ fn main() {
             ..TrainConfig::default()
         },
     );
+    setup.add_config(
+        "nexus-v3",
+        TrainConfig {
+            iterations: 1000,
+            train_samples_per_iter: 150_000,
+            replay_buffer_samples: 500_000,
+            max_actions: 2000,
+            epochs: 2,
+            lr: 0.0005,
+            filter_legal: true,
+            mcts_sims: 800,
+            inference_batch_size: 2048,
+            train_batch_size: 1024,
+            leaf_batch_size: 32,
+            concurrent_games: 768,
+            gumbel_m: 4,
+            explore_actions: 24,
+            q_weight_ramp_iters: 60,
+            aux_value_horizons: vec![],
+            soft_policy_temperature: 4.0,
+            soft_policy_weight: 8.0,
+            ..TrainConfig::default()
+        },
+    );
     let matches = setup
         .command()
         .arg(
@@ -113,6 +137,12 @@ fn main() {
                         .long("leaf-batch")
                         .default_value("1")
                         .help("Leaves per GPU batch (higher = better GPU utilization)"),
+                )
+                .arg(
+                    Arg::new("gumbel-m")
+                        .long("gumbel-m")
+                        .default_value("4")
+                        .help("Gumbel-Top-k sampled actions at root"),
                 ),
         )
         .get_matches();
@@ -156,7 +186,14 @@ fn main() {
                 .unwrap()
                 .parse()
                 .expect("invalid leaf-batch");
-            colonist::run_serve(cdp_port, serve_port, evaluator, eval_name, leaf_batch);
+            let gumbel_m: u32 = sub
+                .get_one::<String>("gumbel-m")
+                .unwrap()
+                .parse()
+                .expect("invalid gumbel-m");
+            colonist::run_serve(
+                cdp_port, serve_port, evaluator, eval_name, leaf_batch, gumbel_m,
+            );
         } else {
             colonist::run(cdp_port);
         }

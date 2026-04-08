@@ -826,6 +826,11 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.set_num_simulations(n);
     }
 
+    /// Whether a search is currently active.
+    pub fn is_searching(&self) -> bool {
+        self.search.is_searching()
+    }
+
     /// Total visits on the current root node.
     pub fn root_visits(&self) -> u32 {
         self.search.root_visits()
