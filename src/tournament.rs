@@ -21,7 +21,7 @@ pub struct TournamentOptions {
 
 impl TournamentOptions {
     /// Run a full tournament: print banner, play games, print results, save logs.
-    pub fn run<G: Game>(
+    pub fn run<G: Game + std::fmt::Display>(
         &self,
         new_game: impl Fn(u64) -> G + Sync,
         registry: &Evaluators<G>,
@@ -189,7 +189,7 @@ pub fn play_match<G: Game>(
 /// Even-numbered games use the original seat assignment;
 /// odd-numbered games swap which config plays as P1.
 /// Games run in parallel across available CPU cores.
-pub fn tournament<G: Game>(
+pub fn tournament<G: Game + std::fmt::Display>(
     new_game: impl Fn(u64) -> G + Sync,
     evaluators: &[&(dyn Evaluator<G> + Sync); 2],
     configs: &[Config; 2],
@@ -264,7 +264,10 @@ pub fn tournament<G: Game>(
                     let (reward, actions) =
                         play_match(&game, evaluators, configs, swap, &mut thread_rng, &counters);
 
-                    results.lock().unwrap()[i] = Some(GameLog { seed, actions });
+                    results.lock().unwrap()[i] = Some(GameLog {
+                        initial_state: game.to_string(),
+                        actions,
+                    });
 
                     // Update progress counters.
                     let seat0_reward = if swap { -reward } else { reward };

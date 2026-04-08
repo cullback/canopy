@@ -168,12 +168,14 @@ pub(super) async fn play_game<G, F, Fut>(
     rng: &mut fastrand::Rng,
 ) -> GameRecord
 where
-    G: Game,
+    G: Game + std::fmt::Display,
     F: Fn(Vec<f32>, usize) -> Fut,
     Fut: Future<Output = (Vec<f32>, Vec<f32>)>,
 {
     let feature_size = encoder.feature_size();
+    let initial_state = search.state().to_string();
     let mut samples: Vec<Sample> = Vec::new();
+    let mut action_log: Vec<usize> = Vec::new();
     let mut actions_buf = Vec::new();
     let mut encode_buf = Vec::with_capacity(feature_size);
     let mut action_count: u32 = 0;
@@ -187,12 +189,14 @@ where
             }
             if let Some(action) = search.state().sample_chance(rng) {
                 action_count += 1;
+                action_log.push(action);
                 search.apply_action(action);
             } else {
                 actions_buf.clear();
                 search.state().legal_actions(&mut actions_buf);
                 if actions_buf.len() == 1 {
                     action_count += 1;
+                    action_log.push(actions_buf[0]);
                     search.apply_action(actions_buf[0]);
                 } else {
                     break;
@@ -213,7 +217,12 @@ where
                 action_count,
                 &actor_config.aux_value_horizons,
             );
-            return GameRecord { reward, samples };
+            return GameRecord {
+                reward,
+                samples,
+                initial_state: initial_state.clone(),
+                actions: action_log,
+            };
         }
 
         let sign = search.state().current_sign();
@@ -250,6 +259,7 @@ where
         ));
 
         action_count += 1;
+        action_log.push(chosen);
         search.apply_action(chosen);
     }
 }

@@ -157,7 +157,7 @@ pub fn run_training<G>(
     model_name: Option<&str>,
     encoder_name: Option<&str>,
 ) where
-    G: Game + 'static,
+    G: Game + std::fmt::Display + 'static,
 {
     let new_state: Arc<dyn Fn(u64) -> G + Send + Sync> = Arc::new(new_state);
     crate::init_logging();
@@ -360,6 +360,20 @@ pub fn run_training<G>(
 
         // Compute game stats before pushing to buffer
         let sp = self_play::IterGameResults::aggregate(&collected_games);
+
+        // Save game logs
+        {
+            let iter_num = iteration + 1;
+            let games_dir = run_dir.join(format!("games_iter_{iter_num}"));
+            std::fs::create_dir_all(&games_dir).expect("failed to create games directory");
+            for (i, game) in collected_games.iter().enumerate() {
+                let log = crate::game_log::GameLog {
+                    initial_state: game.initial_state.clone(),
+                    actions: game.actions.clone(),
+                };
+                log.write(&games_dir.join(format!("game_{i}.log")));
+            }
+        }
 
         // Push new games to replay buffer
         replay_buffer.push_games(collected_games);

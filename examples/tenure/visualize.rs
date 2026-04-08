@@ -57,8 +57,10 @@ fn capture_frame(state: &TenureGame, action: &str) -> ReplayFrame {
 
 /// Render a game log into a self-contained HTML replay file.
 pub fn render(log: &GameLog, output: &Path) {
-    let mut rng = fastrand::Rng::with_seed(log.seed);
-    let mut state = TenureGame::random(&mut rng);
+    let mut state: TenureGame = log
+        .initial_state
+        .parse()
+        .expect("failed to parse initial state from game log");
     let initial_value = state.initial_value;
 
     let mut frames = vec![capture_frame(&state, "Game start")];

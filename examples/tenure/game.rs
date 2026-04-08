@@ -25,6 +25,34 @@ pub struct TenureGame {
     pub initial_value: f32,
 }
 
+impl std::fmt::Display for TenureGame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for (i, &v) in self.board.iter().enumerate() {
+            if i > 0 {
+                write!(f, ",")?;
+            }
+            write!(f, "{v}")?;
+        }
+        Ok(())
+    }
+}
+
+impl std::str::FromStr for TenureGame {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let parts: Vec<u8> = s
+            .split(',')
+            .map(|p| p.trim().parse().map_err(|e| format!("invalid value: {e}")))
+            .collect::<Result<_, _>>()?;
+        if parts.len() != K {
+            return Err(format!("expected {K} values, got {}", parts.len()));
+        }
+        let mut board = [0u8; K];
+        board.copy_from_slice(&parts);
+        Ok(Self::with_board(board))
+    }
+}
+
 impl TenureGame {
     /// Create a new game with `n` pieces at the bottom level (K-1).
     pub fn new(n: u8) -> Self {

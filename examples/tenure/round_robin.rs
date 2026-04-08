@@ -107,7 +107,14 @@ pub fn run(dir: &Path, num_games: u32, simulations: u32) {
                 let seed = rng.u64(..);
                 let game_rng = &mut fastrand::Rng::with_seed(seed);
                 let game = TenureGame::random(game_rng);
-                let (reward, _) = play_match(&game, &evaluators, &configs, swap, &mut rng);
+                let counters = canopy::tournament::TournamentCounters {
+                    evals: std::sync::atomic::AtomicU64::new(0),
+                    depth_sum: std::sync::atomic::AtomicU64::new(0),
+                    depth_max: std::sync::atomic::AtomicU32::new(0),
+                    depth_count: std::sync::atomic::AtomicU32::new(0),
+                };
+                let (reward, _) =
+                    play_match(&game, &evaluators, &configs, swap, &mut rng, &counters);
 
                 let seat0_reward = if swap { -reward } else { reward };
                 if seat0_reward > 0.0 {

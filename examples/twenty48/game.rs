@@ -317,6 +317,23 @@ fn spawn_on(tiles: u64, rng: &mut fastrand::Rng) -> u64 {
 #[derive(Clone, Copy, Debug)]
 pub struct Board(pub u64);
 
+impl std::fmt::Display for Board {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.0)
+    }
+}
+
+impl std::str::FromStr for Board {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let v: u64 = s
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid board: {e}"))?;
+        Ok(Board(v))
+    }
+}
+
 impl Board {
     /// Create a new board with two random starting tiles (decision node).
     pub fn new(rng: &mut fastrand::Rng) -> Self {

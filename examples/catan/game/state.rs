@@ -199,6 +199,27 @@ impl fmt::Debug for GameState {
     }
 }
 
+impl fmt::Display for GameState {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{}", self.topology.board_code())
+    }
+}
+
+impl std::str::FromStr for GameState {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let code: u64 = s
+            .trim()
+            .parse()
+            .map_err(|e| format!("invalid board code: {e}"))?;
+        let topology = Arc::new(Topology::from_board_code(code));
+        let dev_deck = DevCardDeck::new();
+        let dice = Dice::Balanced(super::dice::BalancedDice::new());
+        Ok(Self::new(topology, dev_deck, dice))
+    }
+}
+
 impl GameState {
     pub fn from_seed(seed: u64, dice: Dice) -> Self {
         let mut rng = fastrand::Rng::with_seed(seed);

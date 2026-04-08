@@ -338,7 +338,10 @@ pub struct GameCli<G: Game> {
 }
 
 #[cfg(feature = "nn")]
-impl<G: Game + 'static> GameCli<G> {
+impl<G: Game + std::fmt::Display + std::str::FromStr + 'static> GameCli<G>
+where
+    <G as std::str::FromStr>::Err: std::fmt::Debug + std::fmt::Display,
+{
     pub fn new(name: impl Into<String>, about: impl Into<String>) -> Self {
         let mut evaluators = crate::eval::Evaluators::new();
         evaluators.add("random", crate::eval::RandomEvaluator);
@@ -659,9 +662,14 @@ impl<G: Game + 'static> GameCli<G> {
         };
 
         let evaluator = self.evaluators.get_arc(eval_name);
-        let replay = opts
-            .replay
-            .map(|path| crate::game_log::GameLog::read(&path));
+        let replay = opts.replay.map(|path| {
+            let log = crate::game_log::GameLog::read(&path);
+            let state: G = log
+                .initial_state
+                .parse()
+                .expect("failed to parse initial state from game log");
+            (state, log)
+        });
         let rt = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(crate::server::serve(
             opts.port,

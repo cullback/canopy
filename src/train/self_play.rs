@@ -106,7 +106,7 @@ pub(super) enum WorkItem {
 // ---------------------------------------------------------------------------
 
 /// Persistent worker task. Each worker owns its own mpsc receiver.
-pub(super) async fn worker_loop<G: Game + 'static>(
+pub(super) async fn worker_loop<G: Game + std::fmt::Display + 'static>(
     mut work_rx: tokio::sync::mpsc::Receiver<WorkItem>,
     result_tx: tokio::sync::mpsc::UnboundedSender<GameRecord>,
     request_tx: tokio::sync::mpsc::Sender<InferRequest>,

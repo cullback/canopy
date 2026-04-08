@@ -129,15 +129,13 @@ impl<G: Game + 'static> GameSession<G> {
 
     /// Load a recorded game log for replay.
     ///
-    /// Resets the game with the log's seed, replays all actions into history
+    /// Resets the game to `initial_state`, replays all actions into history
     /// (recording labels and chance detection), then rewinds cursor to 0 so
     /// the UI starts at the beginning with full redo available.
-    pub fn load_replay(&mut self, log: &GameLog) {
-        let state = self.presenter.new_game(log.seed);
-        self.search.reset(state);
+    pub fn load_replay(&mut self, initial_state: G, log: &GameLog) {
+        self.search.reset(initial_state.clone());
         self.history.clear();
         self.cursor = 0;
-        self.seed = log.seed;
 
         // Replay all actions into history.
         for &action in &log.actions {
@@ -146,8 +144,7 @@ impl<G: Game + 'static> GameSession<G> {
 
         // Rewind: reset to initial state, keep history for redo.
         self.cursor = 0;
-        let state = self.presenter.new_game(log.seed);
-        self.search.reset(state);
+        self.search.reset(initial_state);
     }
 
     /// Load an externally-built timeline (e.g. from colonist.io replay).

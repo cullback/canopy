@@ -156,6 +156,129 @@ fn port_direction_to_corners(dir: Direction) -> (u8, u8) {
     }
 }
 
+// --- Gödel numbering helpers ---
+
+/// Compute the multinomial coefficient n! / (c0! · c1! · ... · ck!)
+/// where n = sum of counts.
+fn multinomial(counts: &[u8]) -> u64 {
+    let n: u8 = counts.iter().sum();
+    let mut result: u64 = 1;
+    let mut numerator = n as u64;
+    // We compute n! / (c0! · c1! · ...) by iterating:
+    // for each count ci, divide by ci! as we go.
+    // Equivalent to: result = C(n, c0) * C(n-c0, c1) * ...
+    for &c in counts {
+        // Multiply result by C(numerator, c)
+        // C(numerator, c) = numerator! / (c! * (numerator-c)!)
+        // but we do it incrementally to avoid overflow
+        let mut binom: u64 = 1;
+        for j in 0..c as u64 {
+            binom = binom * (numerator - j) / (j + 1);
+        }
+        result *= binom;
+        numerator -= c as u64;
+    }
+    result
+}
+
+/// Rank a multiset permutation using the lehmer code algorithm.
+/// `perm` contains symbol indices (0..num_symbols).
+/// `num_symbols` is the number of distinct symbol types.
+fn rank_multiset_perm(perm: &[u8], num_symbols: usize) -> u64 {
+    let len = perm.len();
+    // Count remaining occurrences of each symbol
+    let mut counts = vec![0u8; num_symbols];
+    for &s in perm {
+        counts[s as usize] += 1;
+    }
+
+    let mut rank: u64 = 0;
+    for i in 0..len {
+        let symbol = perm[i] as usize;
+        // For each symbol smaller than perm[i], count permutations if that
+        // symbol were placed here instead.
+        for s in 0..symbol {
+            if counts[s] > 0 {
+                counts[s] -= 1;
+                rank += multinomial(&counts);
+                counts[s] += 1;
+            }
+        }
+        // "Place" perm[i] and move on
+        counts[symbol] -= 1;
+    }
+    rank
+}
+
+/// Unrank a multiset permutation. Given a rank and initial counts of each
+/// symbol, reconstruct the permutation of length `len`.
+fn unrank_multiset_perm(mut rank: u64, counts: &[u8], num_symbols: usize, len: usize) -> Vec<u8> {
+    let mut counts = counts.to_vec();
+    let mut result = Vec::with_capacity(len);
+
+    for _ in 0..len {
+        // Try each symbol in order; subtract permutation counts until we
+        // find which symbol belongs at this position.
+        for s in 0..num_symbols {
+            if counts[s] == 0 {
+                continue;
+            }
+            counts[s] -= 1;
+            let perms = multinomial(&counts);
+            if rank < perms {
+                result.push(s as u8);
+                break; // counts[s] already decremented
+            }
+            rank -= perms;
+            counts[s] += 1;
+        }
+    }
+    result
+}
+
+// Terrain canonical indices for Gödel encoding
+const TERRAIN_SYMBOLS: usize = 6; // Desert=0, Forest=1, Hills=2, Pasture=3, Fields=4, Mountains=5
+const TERRAIN_COUNTS: [u8; 6] = [1, 4, 3, 4, 4, 3]; // Desert, Forest, Hills, Pasture, Fields, Mountains
+
+// Port type canonical indices for Gödel encoding
+const PORT_SYMBOLS: usize = 6; // Generic=0, Lumber=1, Brick=2, Wool=3, Grain=4, Ore=5
+const PORT_COUNTS: [u8; 6] = [4, 1, 1, 1, 1, 1];
+
+fn terrain_to_symbol(t: Terrain) -> u8 {
+    match t {
+        Terrain::Desert => 0,
+        Terrain::Forest => 1,
+        Terrain::Hills => 2,
+        Terrain::Pasture => 3,
+        Terrain::Fields => 4,
+        Terrain::Mountains => 5,
+    }
+}
+
+fn symbol_to_terrain(s: u8) -> Terrain {
+    match s {
+        0 => Terrain::Desert,
+        1 => Terrain::Forest,
+        2 => Terrain::Hills,
+        3 => Terrain::Pasture,
+        4 => Terrain::Fields,
+        5 => Terrain::Mountains,
+        _ => unreachable!(),
+    }
+}
+
+fn symbol_to_port_resource(s: u8) -> Option<Resource> {
+    match s {
+        0 => None,
+        1 => Some(Resource::Lumber),
+        2 => Some(Resource::Brick),
+        3 => Some(Resource::Wool),
+        4 => Some(Resource::Grain),
+        5 => Some(Resource::Ore),
+        _ => unreachable!(),
+    }
+}
+
 impl Topology {
     pub fn from_seed(seed: u64) -> Self {
         let mut rng = fastrand::Rng::with_seed(seed);
@@ -183,6 +306,127 @@ impl Topology {
             &PORT_SPECS_ALT
         };
         Self::from_layout_with_ports(terrains, numbers, port_resources, port_specs)
+    }
+
+    /// Encode this topology's board layout as a compact u64 Gödel number.
+    ///
+    /// Layout (53 bits total):
+    /// - bits  0..37: terrain permutation index (lehmer code for multiset)
+    /// - bit  38:     port spec set (0 = PORT_SPECS, 1 = PORT_SPECS_ALT)
+    /// - bits 39..52: port type permutation index (lehmer code for multiset)
+    pub fn board_code(&self) -> u64 {
+        // --- Terrain permutation rank ---
+        let terrain_perm: Vec<u8> = self
+            .tiles
+            .iter()
+            .map(|t| terrain_to_symbol(t.terrain))
+            .collect();
+        let terrain_rank = rank_multiset_perm(&terrain_perm, TERRAIN_SYMBOLS);
+
+        // --- Port spec set bit ---
+        // Determine which port spec set is in use by checking which set's
+        // first water hex has a port on its expected land node.
+        // We match by checking the actual port node positions.
+        let port_spec_bit: u64 = if self.matches_port_specs(&PORT_SPECS) {
+            0
+        } else {
+            1
+        };
+
+        // --- Port type permutation rank ---
+        // We need to recover the port_resources array: for each port spec
+        // position, find what port type was assigned.
+        let port_specs = if port_spec_bit == 0 {
+            &PORT_SPECS
+        } else {
+            &PORT_SPECS_ALT
+        };
+        let hex_set: HashMap<Hex, usize> = LAND_HEXES
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| (h, i))
+            .collect();
+
+        let port_perm: Vec<u8> = port_specs
+            .iter()
+            .map(|&(water_hex, dir)| {
+                let land_hex = water_hex.neighbor(dir);
+                let land_idx = hex_set[&land_hex];
+                let (c0, _) = port_direction_to_corners(dir.opposite());
+                let node_id = self.tiles[land_idx].nodes[c0 as usize];
+                match self.nodes[node_id.0 as usize].port {
+                    Some(Port::Generic) => 0,
+                    Some(Port::Specific(r)) => (r as u8) + 1,
+                    None => unreachable!("port spec position has no port"),
+                }
+            })
+            .collect();
+        let port_rank = rank_multiset_perm(&port_perm, PORT_SYMBOLS);
+
+        terrain_rank | (port_spec_bit << 38) | (port_rank << 39)
+    }
+
+    /// Decode a u64 Gödel number back into a `Topology`.
+    pub fn from_board_code(code: u64) -> Self {
+        let terrain_rank = code & ((1u64 << 38) - 1);
+        let port_spec_bit = (code >> 38) & 1;
+        let port_rank = (code >> 39) & ((1u64 << 14) - 1);
+
+        // --- Unrank terrain ---
+        let terrain_symbols =
+            unrank_multiset_perm(terrain_rank, &TERRAIN_COUNTS, TERRAIN_SYMBOLS, 19);
+        let mut terrains = [Terrain::Desert; 19];
+        for (i, &s) in terrain_symbols.iter().enumerate() {
+            terrains[i] = symbol_to_terrain(s);
+        }
+
+        // --- Assign number tokens ---
+        let mut numbers = [None; 19];
+        let mut token_iter = TOKEN_SEQUENCE.iter().copied();
+        for (i, &t) in terrains.iter().enumerate() {
+            if t != Terrain::Desert {
+                numbers[i] = Some(token_iter.next().unwrap());
+            }
+        }
+
+        // --- Unrank port types ---
+        let port_symbols = unrank_multiset_perm(port_rank, &PORT_COUNTS, PORT_SYMBOLS, 9);
+        let mut port_resources = [None; 9];
+        for (i, &s) in port_symbols.iter().enumerate() {
+            port_resources[i] = symbol_to_port_resource(s);
+        }
+
+        // --- Select port spec set ---
+        let port_specs = if port_spec_bit == 0 {
+            &PORT_SPECS
+        } else {
+            &PORT_SPECS_ALT
+        };
+
+        Self::from_layout_with_ports(terrains, numbers, port_resources, port_specs)
+    }
+
+    /// Check whether this topology's port positions match the given port specs.
+    fn matches_port_specs(&self, specs: &[(Hex, Direction); 9]) -> bool {
+        let hex_set: HashMap<Hex, usize> = LAND_HEXES
+            .iter()
+            .enumerate()
+            .map(|(i, &h)| (h, i))
+            .collect();
+
+        for &(water_hex, dir) in specs {
+            let land_hex = water_hex.neighbor(dir);
+            if let Some(&land_idx) = hex_set.get(&land_hex) {
+                let (c0, _) = port_direction_to_corners(dir.opposite());
+                let node_id = self.tiles[land_idx].nodes[c0 as usize];
+                if self.nodes[node_id.0 as usize].port.is_none() {
+                    return false;
+                }
+            } else {
+                return false;
+            }
+        }
+        true
     }
 
     /// Build a topology from an explicit board layout.
@@ -691,5 +935,74 @@ mod tests {
                 "seed {seed}: robber mismatch"
             );
         }
+    }
+
+    #[test]
+    fn multinomial_basic() {
+        // 3!/(1!·1!·1!) = 6
+        assert_eq!(multinomial(&[1, 1, 1]), 6);
+        // 4!/(2!·2!) = 6
+        assert_eq!(multinomial(&[2, 2]), 6);
+        // 19!/(4!·3!·4!·4!·3!·1!) = 244_432_188_000
+        assert_eq!(multinomial(&TERRAIN_COUNTS), 244_432_188_000);
+        // 9!/(4!·1!·1!·1!·1!·1!) = 15120
+        assert_eq!(multinomial(&PORT_COUNTS), 15120);
+    }
+
+    /// Encoding then decoding must produce identical terrain and port layouts.
+    #[test]
+    fn board_code_round_trip() {
+        for seed in [0, 1, 42, 123, 456, 789, 999, 12345, 99999] {
+            let topo = Topology::from_seed(seed);
+            let code = topo.board_code();
+            let decoded = Topology::from_board_code(code);
+
+            // Verify terrains match
+            for (i, (a, b)) in topo.tiles.iter().zip(decoded.tiles.iter()).enumerate() {
+                assert_eq!(
+                    a.terrain, b.terrain,
+                    "seed {seed}, tile {i}: terrain mismatch"
+                );
+            }
+            // Verify ports match
+            for (i, (a, b)) in topo.nodes.iter().zip(decoded.nodes.iter()).enumerate() {
+                assert_eq!(a.port, b.port, "seed {seed}, node {i}: port mismatch");
+            }
+            // Verify robber start matches
+            assert_eq!(
+                topo.robber_start, decoded.robber_start,
+                "seed {seed}: robber start mismatch"
+            );
+            // Verify the code fits in 53 bits
+            assert!(
+                code < (1u64 << 53),
+                "seed {seed}: code {code} exceeds 53 bits"
+            );
+        }
+    }
+
+    /// Same seed must produce the same board code.
+    #[test]
+    fn board_code_deterministic() {
+        for seed in [0, 42, 123, 999] {
+            let code1 = Topology::from_seed(seed).board_code();
+            let code2 = Topology::from_seed(seed).board_code();
+            assert_eq!(code1, code2, "seed {seed}: non-deterministic board code");
+        }
+    }
+
+    /// Different seeds should (usually) produce different board codes.
+    #[test]
+    fn board_code_different_boards() {
+        let codes: Vec<u64> = (0..100)
+            .map(|s| Topology::from_seed(s).board_code())
+            .collect();
+        let unique: std::collections::HashSet<u64> = codes.iter().copied().collect();
+        // With 100 seeds over a space of ~3.7 trillion, collisions are vanishingly unlikely
+        assert!(
+            unique.len() > 90,
+            "too many collisions: {} unique out of 100",
+            unique.len()
+        );
     }
 }

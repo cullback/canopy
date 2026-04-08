@@ -40,6 +40,24 @@ pub struct PigGame {
     target: u32,
 }
 
+impl std::fmt::Display for PigGame {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "pig:{}", self.target)
+    }
+}
+
+impl std::str::FromStr for PigGame {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        let target = s
+            .strip_prefix("pig:")
+            .ok_or("expected pig:<target>")?
+            .parse()
+            .map_err(|e| format!("invalid target: {e}"))?;
+        Ok(Self::new(target))
+    }
+}
+
 impl PigGame {
     pub fn new(target: u32) -> Self {
         Self {

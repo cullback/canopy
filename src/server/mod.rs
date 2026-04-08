@@ -33,14 +33,14 @@ pub async fn serve<G: Game + 'static>(
     eval_name: &str,
     presenter: Arc<dyn GamePresenter<G>>,
     human_players: [bool; 2],
-    replay: Option<GameLog>,
+    replay: Option<(G, GameLog)>,
 ) {
     let static_dir = presenter.static_dir().to_path_buf();
-    let replay = replay.map(Arc::new);
+    let replay = replay.map(|(s, l)| (s, Arc::new(l)));
 
     let mut initial_session = GameSession::new(evaluator, eval_name, presenter, human_players);
-    if let Some(log) = &replay {
-        initial_session.load_replay(log);
+    if let Some((state, log)) = &replay {
+        initial_session.load_replay(state.clone(), log);
     }
     let session = Arc::new(Mutex::new(initial_session));
 

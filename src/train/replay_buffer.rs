@@ -12,6 +12,10 @@ pub struct GameRecord {
     /// Terminal reward (P1 perspective).
     pub reward: f32,
     pub samples: Vec<Sample>,
+    /// Initial state string for game replay.
+    pub initial_state: String,
+    /// Action log (all actions including chance) for game replay.
+    pub actions: Vec<usize>,
 }
 
 /// Sample-capped replay buffer.
