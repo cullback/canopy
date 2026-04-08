@@ -474,7 +474,10 @@ fn derive_canonical_state(state: &mut GameState) {
     }
 
     // Dev card bought this turn → past step 3
-    let bought: u8 = player.dev_cards_bought_this_turn.0.iter().sum();
+    // Check both revealed and hidden buys (hidden_dev_cards_bought_this_turn
+    // is set by apply_hidden_dev_card_buy during colonist replay).
+    let bought: u8 = player.dev_cards_bought_this_turn.0.iter().sum::<u8>()
+        + player.hidden_dev_cards_bought_this_turn;
     if bought > 0 {
         state.min_step = state.min_step.max(3);
     }

@@ -21,9 +21,9 @@ mod model;
 mod presenter;
 mod visualize;
 
-use encoder::{NexusEncoder, NexusEncoderV1};
+use encoder::{NexusEncoder, NexusEncoderV1, NexusEncoderV3};
 use game::dice::Dice;
-use model::{init_nexus, init_nexus_v1};
+use model::{init_nexus, init_nexus_v1, init_nexus_v3};
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
@@ -32,6 +32,7 @@ fn main() {
     // Encoders
     setup.add_encoder("nexus", Arc::new(NexusEncoder));
     setup.add_encoder("nexus-v1", Arc::new(NexusEncoderV1));
+    setup.add_encoder("nexus-v3", Arc::new(NexusEncoderV3));
 
     // Models
     setup.add_model("nexus", |device, cfg| {
@@ -39,6 +40,9 @@ fn main() {
     });
     setup.add_model("nexus-v1", |device, cfg| {
         init_nexus_v1::<_, 256, 96, 4>(device, cfg.aux_value_horizons.len())
+    });
+    setup.add_model("nexus-v3", |device, cfg| {
+        init_nexus_v3(device, cfg.aux_value_horizons.len())
     });
 
     // Configs
