@@ -450,9 +450,7 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV3<B> {
         // ── Policy: Road (actions 54-125) ────────────────────────────
         let h_src = h_node.clone().select(1, self.edge_src.clone());
         let h_dst = h_node.clone().select(1, self.edge_dst.clone());
-        let edge_sum = h_src.clone() + h_dst.clone();
-        let edge_diff = (h_src - h_dst).abs();
-        let edge_feats = Tensor::cat(vec![edge_sum, edge_diff], 2);
+        let edge_feats = Tensor::cat(vec![h_src, h_dst], 2);
         let r = edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2]);
         let r = relu(self.policy_road[0].forward(r));
         let r = relu(self.policy_road[1].forward(r));
