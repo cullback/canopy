@@ -444,6 +444,8 @@ pub(crate) struct ReplayCtx<'a> {
     /// Deepest event index reached before backtracking, and reason.
     pub max_depth: std::sync::Arc<std::sync::atomic::AtomicUsize>,
     pub max_depth_reason: std::sync::Arc<std::sync::Mutex<String>>,
+    /// Backtrack histogram: (event_index, reason) → count.
+    pub backtrack_hist: std::sync::Arc<std::sync::Mutex<HashMap<(usize, String), u64>>>,
 }
 
 /// Replay new events onto an existing state using engine actions.
@@ -586,6 +588,7 @@ impl<'a> ReplayCtx<'a> {
             call_count: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_depth: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             max_depth_reason: std::sync::Arc::new(std::sync::Mutex::new(String::new())),
+            backtrack_hist: std::sync::Arc::new(std::sync::Mutex::new(HashMap::new())),
         }
     }
 }
@@ -713,7 +716,7 @@ fn replay_search(
         precompute_steal_tiles(events, color_map, &state.topology, &ctx);
     ctx.steal_tiles = steal_tiles;
     ctx.known_steal_indices = known_steal_indices;
-    ctx.max_calls = 5_000_000;
+    ctx.max_calls = 2_000_000;
 
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),
@@ -730,13 +733,31 @@ fn replay_search(
             entries.len(),
             calls
         ),
-        None => eprintln!(
-            "replay_search: FAILED after {} calls (max depth e{}/{}: {})",
-            calls,
-            depth,
-            events.len(),
-            reason
-        ),
+        None => {
+            eprintln!(
+                "replay_search: FAILED after {} calls (max depth e{}/{}: {})",
+                calls,
+                depth,
+                events.len(),
+                reason
+            );
+            // Print backtrack histogram sorted by count descending
+            let hist = ctx.backtrack_hist.lock().unwrap();
+            let mut entries: Vec<_> = hist.iter().collect();
+            entries.sort_by(|a, b| b.1.cmp(a.1));
+            eprintln!("  backtrack histogram (top 20):");
+            for ((idx, reason), count) in entries.iter().take(20) {
+                let event_desc = if *idx < events.len() {
+                    format!("{:?}", events[*idx])
+                        .chars()
+                        .take(60)
+                        .collect::<String>()
+                } else {
+                    "past end".to_string()
+                };
+                eprintln!("    e{idx} ×{count}: {reason} | {event_desc}");
+            }
+        }
     }
     result.map(|(final_state, entries, _)| (final_state, entries))
 }
@@ -768,6 +789,22 @@ fn try_replay(
         let prev = ctx.max_depth.fetch_max(event_idx, Ordering::Relaxed);
         if event_idx > prev {
             *ctx.max_depth_reason.lock().unwrap() = reason.to_string();
+        }
+        *ctx.backtrack_hist
+            .lock()
+            .unwrap()
+            .entry((event_idx, reason.to_string()))
+            .or_insert(0) += 1;
+    };
+
+    // One-time logging: print branch points with > 1 candidate
+    let log_branch = |event_idx: usize, kind: &str, count: usize| {
+        if count > 1 {
+            use std::sync::atomic::{AtomicUsize, Ordering};
+            static LOGGED: AtomicUsize = AtomicUsize::new(0);
+            if LOGGED.fetch_add(1, Ordering::Relaxed) < 50 {
+                eprintln!("  branch e{event_idx}: {kind} has {count} candidates");
+            }
         }
     };
 
@@ -869,6 +906,7 @@ fn try_replay(
                             .map(|nid| action::settlement_id(*nid).0 as usize)
                             .collect();
                     }
+                    log_branch(i, "setup settle", candidates.len());
                     for &aid in &candidates {
                         let mut trial = state.clone();
                         trial.apply_action(aid);
@@ -918,6 +956,7 @@ fn try_replay(
                     backtrack(i, "setup road: 0 candidates");
                     return None;
                 } else {
+                    log_branch(i, "setup road", candidates.len());
                     for &aid in &candidates {
                         let mut trial = state.clone();
                         trial.apply_action(aid);
@@ -1166,27 +1205,41 @@ fn try_replay(
                         });
                     }
 
-                    if candidates.len() == 1 {
-                        actions.push(candidates[0]);
-                        state.apply_action(candidates[0]);
-                    } else if candidates.is_empty() {
+                    if candidates.is_empty() {
                         backtrack(i, "robber: 0 candidates");
                         return None;
-                    } else {
-                        for &aid in &candidates {
-                            let mut trial = state.clone();
-                            trial.apply_action(aid);
-                            let trial_tl = timeline.clone();
-                            let mut trial_actions = actions.clone();
-                            trial_actions.push(aid);
-                            if let Some(result) =
-                                try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
-                            {
-                                return Some(result);
+                    } else if candidates.len() == 1 || !check_rolls.is_empty() {
+                        // Either exactly 1 candidate, or pre_filter_rolls
+                        // narrowed candidates using future roll constraints.
+                        // In the latter case, all surviving candidates are
+                        // consistent with upcoming rolls — branch to find
+                        // the one that works for the full game.
+                        if candidates.len() == 1 {
+                            actions.push(candidates[0]);
+                            state.apply_action(candidates[0]);
+                        } else {
+                            log_branch(i, "robber", candidates.len());
+                            for &aid in &candidates {
+                                let mut trial = state.clone();
+                                trial.apply_action(aid);
+                                let trial_tl = timeline.clone();
+                                let mut trial_actions = actions.clone();
+                                trial_actions.push(aid);
+                                if let Some(result) =
+                                    try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                                {
+                                    return Some(result);
+                                }
                             }
+                            backtrack(i, "robber: all branches failed");
+                            return None;
                         }
-                        backtrack(i, "robber: all branches failed");
-                        return None;
+                    } else {
+                        // No roll constraints differentiate candidates —
+                        // all choices produce equivalent game states until the
+                        // next robber move. Pick the first one without branching.
+                        actions.push(candidates[0]);
+                        state.apply_action(candidates[0]);
                     }
                 }
             }
@@ -1239,6 +1292,7 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if candidates.len() > 1 {
+                    log_branch(i, "road", candidates.len());
                     for &aid in &candidates {
                         let mut trial = state.clone();
                         trial.apply_action(aid);
@@ -1278,6 +1332,26 @@ fn try_replay(
                         vec![]
                     };
 
+                // Forward-check: a new settlement produces resources from
+                // adjacent tiles. Check future rolls to eliminate candidates
+                // that would produce wrong resources.
+                if candidates.len() > 1 {
+                    let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
+                    if !check_rolls.is_empty() {
+                        candidates.retain(|&aid| {
+                            let nid = NodeId(aid as u8);
+                            let mut trial = state.clone();
+                            let pid = state.current_player;
+                            trial.boards[pid].settlements |= 1u64 << nid.0;
+                            // Also update road network so the settlement's node
+                            // is recognized for production calculation.
+                            check_rolls
+                                .iter()
+                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
+                        });
+                    }
+                }
+
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
                     state.apply_action(candidates[0]);
@@ -1289,6 +1363,48 @@ fn try_replay(
                         state: state.clone(),
                     });
                 } else if candidates.is_empty() {
+                    if let Some(pid) = player_of_color(ctx.color_map, *player) {
+                        use std::sync::atomic::{AtomicUsize, Ordering};
+                        static LAST_EVENT: AtomicUsize = AtomicUsize::new(0);
+                        // Only log when we reach a new deepest event
+                        if i >= LAST_EVENT.load(Ordering::Relaxed) {
+                            LAST_EVENT.store(i + 1, Ordering::Relaxed);
+                            let boards = &state.boards[pid];
+                            let adj = &state.topology.adj;
+                            let occupied = state.occupied_nodes();
+                            let mut on_road = 0u64;
+                            let mut roads = boards.road_network.roads;
+                            while roads != 0 {
+                                let eid = roads.trailing_zeros() as usize;
+                                roads &= roads - 1;
+                                on_road |= adj.edge_endpoints[eid];
+                            }
+                            let mut neighbor_blocked = 0u64;
+                            let mut occ = occupied;
+                            while occ != 0 {
+                                let node = occ.trailing_zeros() as usize;
+                                occ &= occ - 1;
+                                neighbor_blocked |= adj.node_adj_nodes[node];
+                            }
+                            eprintln!("=== settle diagnostic e{i} pid={pid:?} ===");
+                            eprintln!("  hand: {:?}", state.players[pid].hand);
+                            eprintln!("  pieces_left: {}", state.players[pid].settlements_left);
+                            eprintln!("  roads: {:b}", boards.road_network.roads);
+                            eprintln!("  road_count: {}", boards.road_network.roads.count_ones());
+                            eprintln!("  settlements: {:b}", boards.settlements);
+                            eprintln!("  cities: {:b}", boards.cities);
+                            for &nid in &ctx.dom_settlements[pid] {
+                                let bit = 1u64 << nid.0;
+                                let on_net = on_road & bit != 0;
+                                let occ = occupied & bit != 0;
+                                let nb = neighbor_blocked & bit != 0;
+                                eprintln!(
+                                    "  dom node {}: on_road={on_net} occupied={occ} neighbor_blocked={nb}",
+                                    nid.0
+                                );
+                            }
+                        }
+                    }
                     backtrack(i, "settle: 0 candidates");
                     return None;
                 } else {
@@ -1306,6 +1422,7 @@ fn try_replay(
                             .map(|nid| action::settlement_id(*nid).0 as usize)
                             .collect();
                     }
+                    log_branch(i, "settle", candidates.len());
                     for &aid in &candidates {
                         let mut trial = state.clone();
                         trial.apply_action(aid);
@@ -1357,6 +1474,26 @@ fn try_replay(
                         vec![]
                     };
 
+                // Forward-check: try each city candidate against future rolls.
+                // A city doubles production from its tiles — the wrong city
+                // will produce wrong resources on the next roll of that number.
+                if candidates.len() > 1 {
+                    let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
+                    if !check_rolls.is_empty() {
+                        candidates.retain(|&aid| {
+                            let nid = NodeId((aid - action::CITY_START as usize) as u8);
+                            let mut trial = state.clone();
+                            let bit = 1u64 << nid.0;
+                            let pid = state.current_player;
+                            trial.boards[pid].settlements &= !bit;
+                            trial.boards[pid].cities |= bit;
+                            check_rolls
+                                .iter()
+                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
+                        });
+                    }
+                }
+
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
                     state.apply_action(candidates[0]);
@@ -1384,6 +1521,7 @@ fn try_replay(
                             .map(|nid| action::city_id(*nid).0 as usize)
                             .collect();
                     }
+                    log_branch(i, "city", candidates.len());
                     for &aid in &candidates {
                         let mut trial = state.clone();
                         trial.apply_action(aid);
