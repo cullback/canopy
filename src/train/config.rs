@@ -160,8 +160,8 @@ impl Default for TrainConfig {
             aux_value_weight: 0.5,
 
             // Soft policy
-            soft_policy_temperature: 0.0,
-            soft_policy_weight: 0.0,
+            soft_policy_temperature: 4.0,
+            soft_policy_weight: 8.0,
         }
     }
 }

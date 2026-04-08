@@ -87,8 +87,6 @@ fn main() {
             explore_actions: 24,
             q_weight_ramp_iters: 60,
             aux_value_horizons: vec![],
-            soft_policy_temperature: 4.0,
-            soft_policy_weight: 8.0,
             ..TrainConfig::default()
         },
     );
