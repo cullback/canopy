@@ -22,7 +22,7 @@ const _: () = assert!(
 
 const GL: usize = 121;
 const TF: usize = 10;
-const NF: usize = 23;
+const NF: usize = 24;
 const NUM_TILES: usize = 19;
 const NUM_NODES: usize = 54;
 const NUM_EDGES: usize = 72;

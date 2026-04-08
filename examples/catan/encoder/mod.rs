@@ -330,6 +330,7 @@ pub(crate) fn encode_node_blocked_production(
 }
 
 /// Push port ratio features (5): 0.5 for matching specific resource, 0.25 for generic, 0.0 otherwise.
+/// Used by nexus and nexus-v1 encoders for backward compatibility.
 pub(crate) fn encode_port_ratios(node: &Node, out: &mut Vec<f32>) {
     match node.port {
         Some(Port::Specific(r)) => {
@@ -344,6 +345,29 @@ pub(crate) fn encode_port_ratios(node: &Node, out: &mut Vec<f32>) {
         }
         None => {
             for _ in 0..5 {
+                out.push(0.0);
+            }
+        }
+    }
+}
+
+/// Push port features (6): one-hot over 5 specific resources + 1 generic.
+pub(crate) fn encode_port(node: &Node, out: &mut Vec<f32>) {
+    match node.port {
+        Some(Port::Specific(r)) => {
+            for ri in 0..5 {
+                out.push(f32::from(ri == r as usize));
+            }
+            out.push(0.0);
+        }
+        Some(Port::Generic) => {
+            for _ in 0..5 {
+                out.push(0.0);
+            }
+            out.push(1.0);
+        }
+        None => {
+            for _ in 0..6 {
                 out.push(0.0);
             }
         }

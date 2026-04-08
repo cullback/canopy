@@ -1,55 +1,19 @@
-//! # NexusEncoderV3 (1553 features)
+//! # NexusEncoderV3 (1607 features)
 //!
 //! Simplified heterogeneous encoder — drops edge features and settle_legal.
+//! Port encoding changed from 5-channel weighted to 6-channel one-hot.
 //!
-//! ## Global (121 = 7 + 51×2 + 12)
+//! ## Global (121 = 7 + 51×2 + 12) — same as nexus
 //!
-//! | Block              | Count |
-//! |--------------------|-------|
-//! | phase              |     7 |
-//! | per-player × 2     |   102 |
-//! | dice               |    12 |
+//! ## Tiles (19 × 10 = 190) — same as nexus
 //!
-//! ### Per-player (51) — cur player first
-//!
-//! | Feature              | Count | Norm      |
-//! |----------------------|-------|-----------|
-//! | resource_count       |     5 | /19       |
-//! | trade_ratio          |     5 | /4        |
-//! | resource_prod        |     5 | /35       |
-//! | number_prod          |    11 | /10       |
-//! | settlement_count     |     1 | /5        |
-//! | city_count           |     1 | /4        |
-//! | road_count           |     1 | /15       |
-//! | longest_road_award   |     1 | binary    |
-//! | longest_road_length  |     1 | /15       |
-//! | largest_army_award   |     1 | binary    |
-//! | victory_points       |     1 | /15       |
-//! | vp_remaining         |     1 | /vp_limit |
-//! | cards_over_threshold |     1 | /19 cap 1 |
-//! | dev_playable         |     5 | /deck_max |
-//! | dev_played           |     5 | /deck_max |
-//! | dev_bought_turn      |     5 | /deck_max |
-//! | dev_played_turn      |     1 | binary    |
-//!
-//! ## Tiles (19 × 10 = 190)
-//!
-//! | Feature              | Count | Norm    |
-//! |----------------------|-------|---------|
-//! | resource             |     5 | one-hot |
-//! | pips                 |     1 | /5      |
-//! | roll_prob            |     1 | raw     |
-//! | robber               |     1 | binary  |
-//! | cur_building_weight  |     1 | /6      |
-//! | opp_building_weight  |     1 | /6      |
-//!
-//! ## Nodes (54 × 23 = 1242)
+//! ## Nodes (54 × 24 = 1296)
 //!
 //! | Feature              | Count | Norm    |
 //! |----------------------|-------|---------|
 //! | cur_building         |     1 | 0/½/1   |
 //! | opp_building         |     1 | 0/½/1   |
-//! | port_ratio           |     5 | .5/.25  |
+//! | port                 |     6 | one-hot |
 //! | resource_prod        |     5 | /13     |
 //! | blocked_prod         |     5 | /5      |
 //! | cur_road_count       |     1 | /3      |
@@ -66,7 +30,7 @@ use crate::game::state::GameState;
 use super::{
     ORIGINAL_DECK, PIPS, compute_network_distances, encode_dice, encode_node_blocked_production,
     encode_node_production, encode_per_number_production, encode_per_resource_production,
-    encode_phase, encode_port_ratios, encode_tile_building_weights, node_value,
+    encode_phase, encode_port, encode_tile_building_weights, node_value,
     opponent_expected_dev_cards, roll_probabilities, self_dev_cards_playable, tile_numbers,
 };
 
@@ -74,10 +38,10 @@ pub struct NexusEncoderV3;
 
 #[allow(dead_code)]
 impl NexusEncoderV3 {
-    pub const FEATURE_SIZE: usize = 1553;
+    pub const FEATURE_SIZE: usize = 1607;
     pub const GLOBAL_LEN: usize = 121;
     pub const TILES_F: usize = 10;
-    pub const NODES_F: usize = 23;
+    pub const NODES_F: usize = 24;
 }
 
 /// Push 51 per-player features grouped by category.
@@ -262,8 +226,8 @@ impl StateEncoder<GameState> for NexusEncoderV3 {
             out.push(node_value(cur_boards, i));
             out.push(node_value(opp_boards, i));
 
-            // port_ratio (5)
-            encode_port_ratios(node, out);
+            // port (6): one-hot over 5 specific resources + 1 generic
+            encode_port(node, out);
 
             // resource_prod (5)
             encode_node_production(node, topo, &tile_numbers, state.robber, out);

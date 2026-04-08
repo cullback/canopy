@@ -49,6 +49,8 @@ suboptimal plays and tracked state can diverge.
   buildings, tiles without opponent buildings are suppressed (no steal,
   no opponent production blocked). When friendly robber forces all
   opponent tiles off-limits, all remaining tiles stay available.
+- **Road Building with 0 roads left**: wastes the dev card play.
+- **Setup settlement below 8 pips**: dominated in 1v1 with 50+ spots.
 
 ## Colonist replay
 
