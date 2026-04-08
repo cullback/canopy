@@ -1050,6 +1050,66 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
+                                {
+                                    use std::sync::atomic::{AtomicUsize, Ordering};
+                                    static N: AtomicUsize = AtomicUsize::new(0);
+                                    if N.fetch_add(1, Ordering::Relaxed) < 1 {
+                                        // Print all robber positions from actions
+                                        eprintln!("  robber history:");
+                                        for (ai, &a) in actions.iter().enumerate() {
+                                            if a >= action::ROBBER_START as usize
+                                                && a < action::ROBBER_END as usize
+                                            {
+                                                let tid = a - action::ROBBER_START as usize;
+                                                let t = &state.topology.tiles[tid];
+                                                let res = t
+                                                    .terrain
+                                                    .resource()
+                                                    .map(|r| format!("{r:?}"))
+                                                    .unwrap_or("desert".into());
+                                                eprintln!(
+                                                    "    action[{ai}]: robber → T{tid} ({res})"
+                                                );
+                                            }
+                                        }
+                                        let b = &state.boards[p];
+                                        eprintln!(
+                                            "=== roll {total} mismatch P{} e{i} ===",
+                                            p as usize + 1
+                                        );
+                                        eprintln!(
+                                            "  engine={engine_gain:?} log={:?}",
+                                            log_gains[p as usize]
+                                        );
+                                        eprintln!("  robber=T{}", state.robber.0);
+                                        eprintln!(
+                                            "  P{} settlements={:#018x} cities={:#018x}",
+                                            p as usize + 1,
+                                            b.settlements,
+                                            b.cities
+                                        );
+                                        // Show which tiles fire on this roll
+                                        let topo = &state.topology;
+                                        for &tid in &topo.dice_to_tiles[total as usize] {
+                                            let t = &topo.tiles[tid.0 as usize];
+                                            let res = t
+                                                .terrain
+                                                .resource()
+                                                .map(|r| format!("{r:?}"))
+                                                .unwrap_or("?".into());
+                                            let mask = topo.adj.tile_nodes[tid.0 as usize];
+                                            let blocked = tid == state.robber;
+                                            let s = (b.settlements & mask).count_ones();
+                                            let c = (b.cities & mask).count_ones();
+                                            if s > 0 || c > 0 || blocked {
+                                                eprintln!(
+                                                    "    T{} {res}: s={s} c={c} blocked={blocked}",
+                                                    tid.0
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
                                 backtrack(
                                     i,
                                     &format!("roll {} dist mismatch P{}", total, p as usize + 1),
@@ -1121,6 +1181,18 @@ fn try_replay(
             }
 
             GameEvent::MoveRobber { player } => {
+                if player_of_color(ctx.color_map, *player).is_some()
+                    && !matches!(state.phase, Phase::MoveRobber)
+                {
+                    use std::sync::atomic::{AtomicUsize, Ordering as O};
+                    static SK: AtomicUsize = AtomicUsize::new(0);
+                    if SK.fetch_add(1, O::Relaxed) < 5 {
+                        eprintln!(
+                            "  SKIP MoveRobber e{i}: phase={:?} player={:?}",
+                            state.phase, state.current_player
+                        );
+                    }
+                }
                 if player_of_color(ctx.color_map, *player).is_some()
                     && matches!(state.phase, Phase::MoveRobber)
                 {
@@ -1214,10 +1286,38 @@ fn try_replay(
                         backtrack(i, "robber: 0 candidates");
                         return None;
                     } else if candidates.len() == 1 || !rolls_narrowed {
-                        // All candidates are equivalent for upcoming rolls.
-                        // Pick the first one without branching.
-                        actions.push(candidates[0]);
-                        state.apply_action(candidates[0]);
+                        // Candidates are equivalent for nearby rolls. Pick
+                        // desert if available (blocks nothing), otherwise the
+                        // tile with fewest buildings to minimize future impact.
+                        let desert = candidates.iter().copied().find(|&aid| {
+                            let tile = TileId((aid - action::ROBBER_START as usize) as u8);
+                            state.topology.tiles[tile.0 as usize]
+                                .terrain
+                                .resource()
+                                .is_none()
+                        });
+                        let best = desert.unwrap_or_else(|| {
+                            // Use DOM buildings (final board) to avoid placing
+                            // the robber on tiles that will have buildings later.
+                            let mut dom_buildings = 0u64;
+                            for &nid in ctx.dom_settlements[Player::One]
+                                .iter()
+                                .chain(&ctx.dom_settlements[Player::Two])
+                            {
+                                dom_buildings |= 1u64 << nid.0;
+                            }
+                            candidates
+                                .iter()
+                                .copied()
+                                .min_by_key(|&aid| {
+                                    let tile = TileId((aid - action::ROBBER_START as usize) as u8);
+                                    let mask = state.topology.adj.tile_nodes[tile.0 as usize];
+                                    (mask & dom_buildings).count_ones()
+                                })
+                                .unwrap()
+                        });
+                        actions.push(best);
+                        state.apply_action(best);
                     } else {
                         log_branch(i, "robber", candidates.len());
                         for &aid in &candidates {
