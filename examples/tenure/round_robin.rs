@@ -114,7 +114,7 @@ pub fn run(dir: &Path, num_games: u32, simulations: u32) {
                     depth_count: std::sync::atomic::AtomicU32::new(0),
                 };
                 let (reward, _) =
-                    play_match(&game, &evaluators, &configs, swap, &mut rng, &counters);
+                    play_match(&game, &evaluators, &configs, swap, 0, &mut rng, &counters);
 
                 let seat0_reward = if swap { -reward } else { reward };
                 if seat0_reward > 0.0 {

@@ -17,6 +17,9 @@ pub struct TournamentOptions {
     pub configs: [Config; 2],
     pub log_dir: Option<PathBuf>,
     pub eval_names: [String; 2],
+    /// Maximum actions (including chance) before a game is declared a draw.
+    /// `0` disables the cap.
+    pub max_actions: u32,
 }
 
 impl TournamentOptions {
@@ -47,6 +50,7 @@ impl TournamentOptions {
             &evaluators,
             &self.configs,
             self.num_games,
+            self.max_actions,
             &mut rng,
         );
 
@@ -109,6 +113,7 @@ pub fn play_match<G: Game>(
     evaluators: &[&(dyn Evaluator<G> + Sync); 2],
     configs: &[Config; 2],
     swap: bool,
+    max_actions: u32,
     rng: &mut fastrand::Rng,
     counters: &TournamentCounters,
 ) -> (f32, Vec<usize>) {
@@ -153,6 +158,11 @@ pub fn play_match<G: Game>(
             Status::Ongoing => {}
         };
 
+        // Action cap: declare a draw once the game exceeds max_actions.
+        if max_actions > 0 && actions.len() as u32 >= max_actions {
+            return (0.0, actions);
+        }
+
         if let Some(action) = chance {
             actions.push(action);
             for search in searches.iter_mut().flatten() {
@@ -194,6 +204,7 @@ pub fn tournament<G: Game + std::fmt::Display>(
     evaluators: &[&(dyn Evaluator<G> + Sync); 2],
     configs: &[Config; 2],
     num_games: u32,
+    max_actions: u32,
     rng: &mut fastrand::Rng,
 ) -> Vec<GameLog> {
     let n = num_games as usize;
@@ -261,8 +272,15 @@ pub fn tournament<G: Game + std::fmt::Display>(
                     let seed = seeds[i];
                     let mut thread_rng = fastrand::Rng::with_seed(seed);
                     let game = new_game(seed);
-                    let (reward, actions) =
-                        play_match(&game, evaluators, configs, swap, &mut thread_rng, &counters);
+                    let (reward, actions) = play_match(
+                        &game,
+                        evaluators,
+                        configs,
+                        swap,
+                        max_actions,
+                        &mut thread_rng,
+                        &counters,
+                    );
 
                     results.lock().unwrap()[i] = Some(GameLog {
                         initial_state: game.to_string(),

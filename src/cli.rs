@@ -72,6 +72,10 @@ pub fn tournament_args() -> Vec<Arg> {
             .long("p2-eval")
             .default_value("rollout")
             .help("Evaluator for player 2 (name or checkpoint path)"),
+        Arg::new("max-actions")
+            .long("max-actions")
+            .default_value("0")
+            .help("Declare a draw after this many actions (0 = no cap)"),
     ];
     args.extend(config_args());
     args
@@ -100,6 +104,11 @@ pub fn parse_tournament(matches: &ArgMatches) -> TournamentOptions {
             matches.get_one::<String>("p1-eval").unwrap().clone(),
             matches.get_one::<String>("p2-eval").unwrap().clone(),
         ],
+        max_actions: matches
+            .get_one::<String>("max-actions")
+            .unwrap()
+            .parse()
+            .unwrap(),
     }
 }
 
