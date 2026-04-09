@@ -57,3 +57,13 @@ suboptimal plays and tracked state can diverge.
 ```
 https://colonist.io/api/replay/data-from-game-id?gameId=178911848&playerColor=1
 ```
+
+## Episode 3
+
+- go back to 3 layer GNN, all MLPs 4 layers
+- global resource features
+- remove all road features
+- fix road policy - concatenate node features. helps preserve directionality of roads
+- drop gumbel_m to 8. a top catan player is probably only considering ~4 moves, but 8 leaves headroom for the prior to be wrong
+- add soft policy target from katago
+- way more extensive action commutativity

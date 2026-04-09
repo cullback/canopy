@@ -83,7 +83,7 @@ fn main() {
             train_batch_size: 1024,
             leaf_batch_size: 32,
             concurrent_games: 768,
-            gumbel_m: 4,
+            gumbel_m: 8,
             explore_actions: 24,
             q_weight_ramp_iters: 60,
             ..TrainConfig::default()
