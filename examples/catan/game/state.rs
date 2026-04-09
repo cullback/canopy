@@ -65,6 +65,14 @@ pub struct PlayerState {
     /// Defaults to 4:1; improved to 3:1 by a generic port or 2:1 by a
     /// resource-specific port.
     pub trade_ratios: [u8; 5],
+    /// Count of dev cards in this player's hand that are believed to not be
+    /// knights, based on observed behavior (robber on their tile + held dev
+    /// cards + no knight played). Lower bound: `tested_non_knight <=
+    /// dev_cards_in_hand`. Reset on knight play (evidence was wrong);
+    /// unchanged on dev card buy (new card is not in the tested set).
+    /// Used as an NN feature and to reweight determinization sampling
+    /// against knight-containing hands.
+    pub tested_non_knight: u8,
 }
 
 impl Default for PlayerState {
@@ -85,6 +93,7 @@ impl Default for PlayerState {
             hidden_dev_cards_bought_this_turn: 0,
             building_vps: 0,
             trade_ratios: [4; 5],
+            tested_non_knight: 0,
         }
     }
 }

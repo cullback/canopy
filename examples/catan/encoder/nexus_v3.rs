@@ -1,10 +1,15 @@
-//! # NexusEncoderV3 (1612 features)
+//! # NexusEncoderV3 (1618 features)
 //!
 //! Simplified heterogeneous encoder — drops edge features and settle_legal.
 //! Port encoding changed from 5-channel weighted to 6-channel one-hot.
 //! Adds board-wide resource production (5) to global features.
 //!
-//! ## Global (126 = 7 + 51×2 + 12 + 5)
+//! ## Global (132 = 7 + 51×2 + 12 + 5 + 6)
+//!
+//! Trailing 6 = opponent-only features: blocked_pips_by_resource (5) +
+//! tested_non_knight (1). These are behavioral / hidden-state signals
+//! meaningful only about the opponent; the current player knows their own
+//! hand and sees their own blocked production via node features.
 //!
 //! ## Tiles (19 × 10 = 190) — same as nexus
 //!
@@ -29,18 +34,19 @@ use canopy::nn::StateEncoder;
 use crate::game::state::GameState;
 
 use super::{
-    ORIGINAL_DECK, PIPS, compute_network_distances, encode_dice, encode_node_blocked_production,
-    encode_node_production, encode_per_number_production, encode_per_resource_production,
-    encode_phase, encode_port, encode_tile_building_weights, node_value,
-    opponent_expected_dev_cards, roll_probabilities, self_dev_cards_playable, tile_numbers,
+    ORIGINAL_DECK, PIPS, building_weight, compute_network_distances, encode_dice,
+    encode_node_blocked_production, encode_node_production, encode_per_number_production,
+    encode_per_resource_production, encode_phase, encode_port, encode_tile_building_weights,
+    node_value, opponent_expected_dev_cards, roll_probabilities, self_dev_cards_playable,
+    tile_numbers,
 };
 
 pub struct NexusEncoderV3;
 
 #[allow(dead_code)]
 impl NexusEncoderV3 {
-    pub const FEATURE_SIZE: usize = 1612;
-    pub const GLOBAL_LEN: usize = 126;
+    pub const FEATURE_SIZE: usize = 1618;
+    pub const GLOBAL_LEN: usize = 132;
     pub const TILES_F: usize = 10;
     pub const NODES_F: usize = 24;
 }
@@ -159,7 +165,7 @@ impl StateEncoder<GameState> for NexusEncoderV3 {
 
         let tile_numbers = tile_numbers(topo);
 
-        // === Global features (121) ===
+        // === Global features (132) ===
 
         // Phase one-hot (7)
         encode_phase(state, out);
@@ -184,6 +190,37 @@ impl StateEncoder<GameState> for NexusEncoderV3 {
             for &p in &board_prod {
                 out.push(p as f32 / 15.0);
             }
+        }
+
+        // Opponent-only features (6): blocked_pips_by_resource (5) +
+        // tested_non_knight (1). Behavioral / hidden-state signals.
+        {
+            // Per-resource blocked production against the opponent: pips ×
+            // opp building_weight at the robber tile, one slot per resource.
+            // 0 for all resources if robber is on desert or a tile without
+            // opp buildings. /15 approximates a realistic upper bound
+            // (e.g., 1 settle + 1 city on a 6/8 tile = 15).
+            let mut opp_blocked = [0.0f32; 5];
+            let opp_boards = &state.boards[opp];
+            let robber_tile = &topo.tiles[state.robber.0 as usize];
+            if let Some(r) = robber_tile.terrain.resource() {
+                let number = tile_numbers[state.robber.0 as usize];
+                if number > 0 {
+                    let pips = PIPS[number as usize] as f32;
+                    let mut bw = 0.0f32;
+                    for &nid in &robber_tile.nodes {
+                        bw += building_weight(opp_boards, nid.0);
+                    }
+                    opp_blocked[r as usize] = bw * pips;
+                }
+            }
+            for &v in &opp_blocked {
+                out.push(v / 15.0);
+            }
+
+            // tested_non_knight for opponent, /5 (realistic dev-card hand max).
+            let tested = state.players[opp].tested_non_knight as f32;
+            out.push((tested / 5.0).min(1.0));
         }
 
         debug_assert_eq!(out.len(), Self::GLOBAL_LEN);

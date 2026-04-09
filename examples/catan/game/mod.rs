@@ -205,15 +205,40 @@ impl Game for GameState {
         for pid in [Player::One, Player::Two] {
             let n = self.players[pid].hidden_dev_cards;
             let mut bought = self.players[pid].hidden_dev_cards_bought_this_turn;
+
+            // Behavioral knight reweight: if we've observed pid hold dev
+            // cards while blocked without playing a knight, down-weight
+            // knight-containing hands proportionally to the tested fraction.
+            // Quadratic falloff with a 0.05 floor — max 20× penalty at full
+            // saturation, never zero so bluffs still sample.
+            let knight_weight: f32 = if n > 0 {
+                let tested = self.players[pid].tested_non_knight.min(n) as f32;
+                let ratio = tested / n as f32;
+                ((1.0 - ratio) * (1.0 - ratio)).max(0.05)
+            } else {
+                1.0
+            };
+
             for _ in 0..n {
                 let pool = self.unknown_dev_pool();
-                let total: u8 = pool.iter().sum();
-                if total == 0 {
+                // Weighted sampling: slot 0 (Knight) gets knight_weight,
+                // others get 1.0. Convert to f32 weights.
+                let mut weights = [0.0f32; 5];
+                for (i, &c) in pool.iter().enumerate() {
+                    let w = if i == DevCardKind::Knight as usize {
+                        knight_weight
+                    } else {
+                        1.0
+                    };
+                    weights[i] = c as f32 * w;
+                }
+                let total_w: f32 = weights.iter().sum();
+                if total_w <= 0.0 {
                     break;
                 }
-                let mut pick = rng.u8(..total);
-                for (i, &c) in pool.iter().enumerate() {
-                    if pick < c {
+                let mut pick = rng.f32() * total_w;
+                for (i, &w) in weights.iter().enumerate() {
+                    if pick < w {
                         let kind = DevCardKind::ALL[i];
                         // Don't decrement dev_deck.total — it was already
                         // decremented when the hidden card was bought.
@@ -224,7 +249,7 @@ impl Game for GameState {
                         }
                         break;
                     }
-                    pick -= c;
+                    pick -= w;
                 }
             }
             self.players[pid].hidden_dev_cards = 0;
@@ -465,6 +490,32 @@ fn distribute_resources(state: &mut GameState, roll: u8) {
 }
 
 fn apply_end_turn(state: &mut GameState) {
+    // Update tested_non_knight: if the ending player is still blocked
+    // (robber on their settled tile that produces a resource) and held
+    // eligible old dev cards this turn without playing a knight, mark
+    // those cards as tested non-knight. Checked before field resets so
+    // bought_this_turn counts are still valid. Desert is excluded — the
+    // robber on desert doesn't block any production, so there's no
+    // strategic reason to play knight to move it.
+    {
+        let pid = state.current_player;
+        let robber_tile = &state.topology.tiles[state.robber.0 as usize];
+        let robber_blocks_production = robber_tile.terrain.resource().is_some();
+        let robber_mask = state.topology.adj.tile_nodes[state.robber.0 as usize];
+        let own_buildings = state.player_buildings(pid);
+        if robber_blocks_production && robber_mask & own_buildings != 0 {
+            let player = &state.players[pid];
+            let total_dev: u8 = player.dev_cards.0.iter().sum::<u8>() + player.hidden_dev_cards;
+            let bought_this_turn: u8 = player.dev_cards_bought_this_turn.0.iter().sum::<u8>()
+                + player.hidden_dev_cards_bought_this_turn;
+            let eligible_old = total_dev.saturating_sub(bought_this_turn);
+            if eligible_old > 0 {
+                let cur = player.tested_non_knight;
+                state.players[pid].tested_non_knight = cur.max(eligible_old);
+            }
+        }
+    }
+
     state.turn_number += 1;
 
     let player = &mut state.players[state.current_player];
@@ -640,6 +691,9 @@ fn apply_play_knight(state: &mut GameState) {
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::Knight] += 1;
     p.knights_played += 1;
+    // Evidence that player had no knight is now invalidated — they just
+    // revealed one. Reset the tested count conservatively.
+    p.tested_non_knight = 0;
 
     if state.canonical_build_order {
         state.min_step = state.min_step.max(2);
@@ -655,10 +709,21 @@ fn apply_play_road_building(state: &mut GameState) {
         p.dev_cards[DevCardKind::RoadBuilding].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::RoadBuilding] += 1;
+    clamp_tested_non_knight(p);
     if state.canonical_build_order {
         state.min_step = state.min_step.max(2);
     }
     state.phase = Phase::RoadBuilding { roads_left: 2 };
+}
+
+/// Clamp `tested_non_knight` to current dev-card hand size. Called after a
+/// non-knight dev card is played: hand shrinks by 1, and tested must not
+/// exceed the hand. Conservative — does not decrement tested unless forced.
+fn clamp_tested_non_knight(p: &mut state::PlayerState) {
+    let hand: u8 = p.dev_cards.0.iter().sum::<u8>() + p.hidden_dev_cards;
+    if p.tested_non_knight > hand {
+        p.tested_non_knight = hand;
+    }
 }
 
 fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
@@ -667,6 +732,7 @@ fn apply_year_of_plenty(state: &mut GameState, r1: Resource, r2: Resource) {
         p.dev_cards[DevCardKind::YearOfPlenty].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::YearOfPlenty] += 1;
+    clamp_tested_non_knight(p);
 
     if state.bank[r1] > 0 {
         state.bank[r1] -= 1;
@@ -690,6 +756,7 @@ fn apply_monopoly(state: &mut GameState, resource: Resource) {
     p.dev_cards[DevCardKind::Monopoly] = p.dev_cards[DevCardKind::Monopoly].saturating_sub(1);
     p.has_played_dev_card_this_turn = true;
     p.dev_cards_played[DevCardKind::Monopoly] += 1;
+    clamp_tested_non_knight(p);
 
     let current = state.current_player;
     let opponent = current.opponent();
@@ -2631,5 +2698,237 @@ mod tests {
             "Monopoly from PreRoll should transition to Roll, got {:?}",
             state.phase
         );
+    }
+
+    // ── tested_non_knight transitions ───────────────────────────────────
+
+    /// Find a resource tile adjacent to one of the given player's buildings.
+    fn find_resource_tile_touching(state: &GameState, pid: Player) -> TileId {
+        let buildings = state.player_buildings(pid);
+        for tile in &state.topology.tiles {
+            if tile.terrain.resource().is_none() {
+                continue;
+            }
+            let mask = state.topology.adj.tile_nodes[tile.id.0 as usize];
+            if mask & buildings != 0 {
+                return tile.id;
+            }
+        }
+        panic!("no resource tile found touching player buildings");
+    }
+
+    /// Find a desert tile on the board.
+    fn find_desert_tile(state: &GameState) -> TileId {
+        state
+            .topology
+            .tiles
+            .iter()
+            .find(|t| t.terrain.resource().is_none())
+            .expect("desert tile should exist")
+            .id
+    }
+
+    /// Find a resource tile NOT adjacent to the given player's buildings.
+    fn find_resource_tile_off_player(state: &GameState, pid: Player) -> TileId {
+        let buildings = state.player_buildings(pid);
+        for tile in &state.topology.tiles {
+            if tile.terrain.resource().is_none() {
+                continue;
+            }
+            let mask = state.topology.adj.tile_nodes[tile.id.0 as usize];
+            if mask & buildings == 0 {
+                return tile.id;
+            }
+        }
+        panic!("no off-player resource tile found");
+    }
+
+    /// End-of-turn increment: blocked player with eligible old dev cards
+    /// and no knight played gets `tested_non_knight = eligible_old`.
+    #[test]
+    fn tested_non_knight_increments_when_blocked_with_old_cards() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.robber = find_resource_tile_touching(&state, Player::One);
+        // 2 eligible old dev cards (no bought_this_turn).
+        state.players[Player::One].dev_cards.0[DevCardKind::Monopoly as usize] = 1;
+        state.players[Player::One].dev_cards.0[DevCardKind::YearOfPlenty as usize] = 1;
+        state.players[Player::One].tested_non_knight = 0;
+
+        apply_end_turn(&mut state);
+
+        assert_eq!(state.players[Player::One].tested_non_knight, 2);
+    }
+
+    /// No increment when robber is not on the ending player's tile.
+    #[test]
+    fn tested_non_knight_no_increment_when_unblocked() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.robber = find_resource_tile_off_player(&state, Player::One);
+        state.players[Player::One].dev_cards.0[DevCardKind::Monopoly as usize] = 2;
+        state.players[Player::One].tested_non_knight = 0;
+
+        apply_end_turn(&mut state);
+
+        assert_eq!(state.players[Player::One].tested_non_knight, 0);
+    }
+
+    /// Robber on desert (no resource) does not count as blocking — no
+    /// strategic reason to play knight there, so no evidence.
+    #[test]
+    fn tested_non_knight_no_increment_on_desert() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        // Move one of P1's settlements onto a corner of the desert so the
+        // robber-on-desert check would pass the adjacency test.
+        let desert = find_desert_tile(&state);
+        let desert_nodes = state.topology.adj.tile_nodes[desert.0 as usize];
+        let node = desert_nodes.trailing_zeros() as u8;
+        // Force a settlement on the first desert corner (bypass legality).
+        state.boards[Player::One].settlements |= 1u64 << node;
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.robber = desert;
+        state.players[Player::One].dev_cards.0[DevCardKind::Monopoly as usize] = 2;
+        state.players[Player::One].tested_non_knight = 0;
+
+        apply_end_turn(&mut state);
+
+        assert_eq!(
+            state.players[Player::One].tested_non_knight,
+            0,
+            "desert should not trigger blocked-no-knight increment"
+        );
+    }
+
+    /// Cards bought this turn are not eligible for the increment.
+    #[test]
+    fn tested_non_knight_no_increment_when_only_new_cards() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.robber = find_resource_tile_touching(&state, Player::One);
+        // All 2 cards were bought this turn → eligible_old = 0.
+        state.players[Player::One].dev_cards.0[DevCardKind::Monopoly as usize] = 2;
+        state.players[Player::One].dev_cards_bought_this_turn.0[DevCardKind::Monopoly as usize] = 2;
+        state.players[Player::One].tested_non_knight = 0;
+
+        apply_end_turn(&mut state);
+
+        assert_eq!(state.players[Player::One].tested_non_knight, 0);
+    }
+
+    /// Playing a knight resets tested_non_knight to 0 (evidence invalidated).
+    #[test]
+    fn tested_non_knight_resets_on_knight_play() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.players[Player::One].dev_cards.0[DevCardKind::Knight as usize] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+        state.players[Player::One].tested_non_knight = 4;
+
+        apply_play_knight(&mut state);
+
+        assert_eq!(state.players[Player::One].tested_non_knight, 0);
+    }
+
+    /// Buying a dev card does NOT change tested_non_knight — the old cards
+    /// are still believed to not be knights.
+    #[test]
+    fn tested_non_knight_preserved_on_buy() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.players[Player::One].hand.add(DEV_CARD_COST);
+        state.players[Player::One].tested_non_knight = 3;
+        // Dev deck has stock to buy.
+        assert!(state.dev_deck.total > 0);
+
+        apply(&mut state, ActionId(BUY_DEV_CARD));
+
+        assert_eq!(state.players[Player::One].tested_non_knight, 3);
+    }
+
+    /// Playing a non-knight dev card clamps tested_non_knight to the new
+    /// hand size (cannot exceed dev-card hand).
+    #[test]
+    fn tested_non_knight_clamps_on_non_knight_play() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        // Hand: 2 YoP cards, tested saturated at 2.
+        state.players[Player::One].dev_cards.0[DevCardKind::YearOfPlenty as usize] = 2;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+        state.players[Player::One].tested_non_knight = 2;
+
+        apply(&mut state, yop_id(Resource::Lumber, Resource::Brick));
+
+        // Hand shrinks 2 → 1, tested clamps 2 → 1.
+        assert_eq!(state.players[Player::One].tested_non_knight, 1);
+    }
+
+    /// Accumulation across turns: increment survives subsequent buys and
+    /// resets only on knight play. Reproduces the key user scenario.
+    #[test]
+    fn tested_non_knight_accumulation_and_reset() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+        state.robber = find_resource_tile_touching(&state, Player::One);
+        state.players[Player::One].dev_cards.0[DevCardKind::Monopoly as usize] = 2;
+        state.players[Player::One].tested_non_knight = 0;
+
+        // Turn 1 end: tested = 2.
+        apply_end_turn(&mut state);
+        assert_eq!(state.players[Player::One].tested_non_knight, 2);
+
+        // P1's turn comes back around eventually. Simulate by resetting state.
+        state.current_player = Player::One;
+        state.phase = Phase::Main;
+
+        // Buy a card: tested should NOT change.
+        state.players[Player::One].hand.add(DEV_CARD_COST);
+        apply(&mut state, ActionId(BUY_DEV_CARD));
+        assert_eq!(
+            state.players[Player::One].tested_non_knight,
+            2,
+            "buy must preserve tested"
+        );
+
+        // Resolve the DevCardDraw chance outcome (anything that's legal).
+        if let Phase::DevCardDraw = state.phase {
+            state.phase = Phase::Main;
+            // Manually advance — the card draw specifics don't matter for this test.
+            state.players[Player::One].dev_cards.0[DevCardKind::Knight as usize] += 1;
+            state.players[Player::One].dev_cards_bought_this_turn.0
+                [DevCardKind::Knight as usize] += 1;
+        }
+
+        // Play knight: tested resets to 0.
+        state.players[Player::One].dev_cards.0[DevCardKind::Knight as usize] = 1;
+        state.players[Player::One].dev_cards_bought_this_turn.0[DevCardKind::Knight as usize] = 0;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+        apply_play_knight(&mut state);
+        assert_eq!(state.players[Player::One].tested_non_knight, 0);
     }
 }
