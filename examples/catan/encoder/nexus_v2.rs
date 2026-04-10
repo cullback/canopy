@@ -1,4 +1,4 @@
-//! # NexusEncoder (1949 features)
+//! # NexusEncoderV2V2 (1949 features)
 //!
 //! Heterogeneous encoder that keeps tiles, nodes, and edges as separate entity streams.
 //!
@@ -81,10 +81,10 @@ use super::{
     opponent_expected_dev_cards, roll_probabilities, self_dev_cards_playable, tile_numbers,
 };
 
-pub struct NexusEncoder;
+pub struct NexusEncoderV2;
 
 #[allow(dead_code)]
-impl NexusEncoder {
+impl NexusEncoderV2 {
     pub const FEATURE_SIZE: usize = 1949;
     pub const GLOBAL_LEN: usize = 121;
     pub const TILES_F: usize = 10;
@@ -193,7 +193,7 @@ fn encode_player_nexus(
     out.push(f32::from(p.has_played_dev_card_this_turn));
 }
 
-impl StateEncoder<GameState> for NexusEncoder {
+impl StateEncoder<GameState> for NexusEncoderV2 {
     fn feature_size(&self) -> usize {
         Self::FEATURE_SIZE
     }
@@ -395,8 +395,8 @@ mod tests {
     fn feature_vector_length() {
         let state = make_state();
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
-        assert_eq!(features.len(), NexusEncoder.feature_size());
+        NexusEncoderV2.encode(&state, &mut features);
+        assert_eq!(features.len(), NexusEncoderV2.feature_size());
     }
 
     #[test]
@@ -404,8 +404,8 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
-        assert_eq!(features.len(), NexusEncoder.feature_size());
+        NexusEncoderV2.encode(&state, &mut features);
+        assert_eq!(features.len(), NexusEncoderV2.feature_size());
     }
 
     #[test]
@@ -413,7 +413,7 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -426,7 +426,7 @@ mod tests {
     fn values_in_range_before_setup() {
         let state = make_state();
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
         for (i, &v) in features.iter().enumerate() {
             assert!(
                 (0.0..=1.0).contains(&v),
@@ -440,10 +440,10 @@ mod tests {
         let mut state = make_state();
         play_setup(&mut state);
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
         let p1_features = features.clone();
         state.current_player = state.current_player.opponent();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
         assert_ne!(p1_features, features);
         assert_eq!(p1_features.len(), features.len());
     }
@@ -473,7 +473,7 @@ mod tests {
         let tile_numbers = super::super::tile_numbers(topo);
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         for (i, tile) in topo.tiles.iter().enumerate() {
             let resource_idx = tile.terrain.resource().map(|r| r as usize);
@@ -514,7 +514,7 @@ mod tests {
         state.boards[Player::Two].settlements = 1u64 << opp_node;
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         assert_eq!(features[node_feat(s_node, 0)], 0.5, "settlement = 0.5");
         assert_eq!(features[node_feat(c_node, 0)], 1.0, "city = 1.0");
@@ -527,7 +527,7 @@ mod tests {
         let state = make_main_state();
         let topo = &state.topology;
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         for n in 0..54 {
             let node = &topo.nodes[n];
@@ -563,7 +563,7 @@ mod tests {
         state.boards[Player::One].settlements = 1u64 << 10;
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         // Network distance at per-node offset 19-20 (2 + 5 + 5 + 5 + 2 = 19)
         // Node 10 is on-network → own_dist = 0.0
@@ -597,7 +597,7 @@ mod tests {
         let tile_numbers = super::super::tile_numbers(topo);
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         // Pick an interior node that has 3 adjacent tiles
         for n in 0..54 {
@@ -643,7 +643,7 @@ mod tests {
         state.robber = robber_tile.id;
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         // Nodes adjacent to the robber tile should have nonzero blocked_production
         for &nid in &robber_tile.nodes {
@@ -680,7 +680,7 @@ mod tests {
         state.players[Player::Two].trade_ratios = [4, 4, 4, 4, 4];
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         // Global: phase(7) + cur player starts at 7
         // Inside per-player: resource_count(5) then trade_ratio at offset 5
@@ -708,7 +708,7 @@ mod tests {
         play_setup(&mut state);
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         // cur_settle_legal (offset 21): right after setup, all road endpoints
         // are either occupied (settlements) or neighbor-blocked (distance rule).
@@ -750,7 +750,7 @@ mod tests {
         play_setup(&mut state);
 
         let mut features = Vec::new();
-        NexusEncoder.encode(&state, &mut features);
+        NexusEncoderV2.encode(&state, &mut features);
 
         let mut cur_roads = 0;
         let mut opp_roads = 0;
@@ -831,8 +831,8 @@ mod tests {
             state.phase,
             Phase::Main | Phase::PreRoll | Phase::MoveRobber | Phase::RoadBuilding { .. }
         ) {
-            NexusEncoder.encode(&state, &mut features);
-            assert_eq!(features.len(), NexusEncoder::FEATURE_SIZE);
+            NexusEncoderV2.encode(&state, &mut features);
+            assert_eq!(features.len(), NexusEncoderV2::FEATURE_SIZE);
 
             // Check edge features have some roads placed
             let total_roads: usize = (0..72)

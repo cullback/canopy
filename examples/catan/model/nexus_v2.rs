@@ -49,7 +49,7 @@ const NUM_OTHER: usize = NUM_OTHER_PRE + NUM_OTHER_POST;
 
 // ── Static graph topology ────────────────────────────────────────────
 
-struct NexusGraphData {
+struct NexusV2GraphData {
     /// Row-normalized node-to-node adjacency [54×54], flattened.
     node_adj_flat: Vec<f32>,
     /// Row-normalized tile-to-node adjacency [54×19], flattened.
@@ -64,10 +64,10 @@ struct NexusGraphData {
     edge_dst: [usize; NUM_EDGES],
 }
 
-static NEXUS_GRAPH_DATA: OnceLock<NexusGraphData> = OnceLock::new();
+static NEXUS_V2_GRAPH_DATA: OnceLock<NexusV2GraphData> = OnceLock::new();
 
-fn nexus_graph_data() -> &'static NexusGraphData {
-    NEXUS_GRAPH_DATA.get_or_init(|| {
+fn nexus_v2_graph_data() -> &'static NexusV2GraphData {
+    NEXUS_V2_GRAPH_DATA.get_or_init(|| {
         let topo = Topology::from_seed(0);
 
         // Node-to-node adjacency (row-normalized, no self-loops)
@@ -109,7 +109,7 @@ fn nexus_graph_data() -> &'static NexusGraphData {
             edge_dst[e] = b;
         }
 
-        NexusGraphData {
+        NexusV2GraphData {
             node_adj_flat,
             tile_to_node_adj_flat,
             node_to_tile_adj_flat,
@@ -209,7 +209,7 @@ impl<B: Backend> HeteroGnnLayer<B> {
 // ── Nexus Model ──────────────────────────────────────────────────────
 
 #[derive(Module, Debug)]
-pub struct CatanNexusModel<B: Backend> {
+pub struct CatanNexusModelV2<B: Backend> {
     // Input projections
     global_proj: Linear<B>,
     tile_proj: Linear<B>,
@@ -246,8 +246,8 @@ pub struct CatanNexusModel<B: Backend> {
     aux_value_out: Option<Linear<B>>,
 }
 
-pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> CatanNexusModel<B> {
-    let graph = nexus_graph_data();
+pub fn init_nexus_v2<B: Backend>(device: &B::Device, num_aux_heads: usize) -> CatanNexusModelV2<B> {
+    let graph = nexus_v2_graph_data();
 
     // Build constant graph tensors
     let node_adj = Tensor::<B, 2>::from_data(
@@ -281,7 +281,7 @@ pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Catan
 
     let pool_dim = HIDDEN + HIDDEN + GLOBAL_HIDDEN;
 
-    CatanNexusModel {
+    CatanNexusModelV2 {
         global_proj: LinearConfig::new(GL, GLOBAL_HIDDEN).init(device),
         tile_proj: LinearConfig::new(TF, HIDDEN).init(device),
         node_proj: LinearConfig::new(NF, HIDDEN).init(device),
@@ -339,7 +339,7 @@ pub fn init_nexus<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Catan
     }
 }
 
-impl<B: Backend> PolicyValueNet<B> for CatanNexusModel<B> {
+impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV2<B> {
     fn forward(&self, input: Tensor<B, 2>) -> ForwardOutput<B> {
         let [batch, _] = input.dims();
 

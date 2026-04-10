@@ -21,25 +21,25 @@ mod model;
 mod presenter;
 mod visualize;
 
-use encoder::{NexusEncoder, NexusEncoderV1, NexusEncoderV3};
+use encoder::{NexusEncoderV1, NexusEncoderV2, NexusEncoderV3};
 use game::dice::Dice;
-use model::{init_nexus, init_nexus_v1, init_nexus_v3};
+use model::{init_nexus_v1, init_nexus_v2, init_nexus_v3};
 
 fn main() {
     let mut setup = GameCli::new("catan", "Catan tournament between two MCTS bots");
     setup.add_evaluator("rollout", canopy::eval::RolloutEvaluator::default());
 
     // Encoders
-    setup.add_encoder("nexus", Arc::new(NexusEncoder));
     setup.add_encoder("nexus-v1", Arc::new(NexusEncoderV1));
+    setup.add_encoder("nexus-v2", Arc::new(NexusEncoderV2));
     setup.add_encoder("nexus-v3", Arc::new(NexusEncoderV3));
 
     // Models
-    setup.add_model("nexus", |device, cfg| {
-        init_nexus(device, cfg.aux_value_horizons.len())
-    });
     setup.add_model("nexus-v1", |device, cfg| {
         init_nexus_v1::<_, 256, 96, 4>(device, cfg.aux_value_horizons.len())
+    });
+    setup.add_model("nexus-v2", |device, cfg| {
+        init_nexus_v2(device, cfg.aux_value_horizons.len())
     });
     setup.add_model("nexus-v3", |device, cfg| {
         init_nexus_v3(device, cfg.aux_value_horizons.len())
@@ -47,7 +47,7 @@ fn main() {
 
     // Configs
     setup.add_config(
-        "nexus",
+        "nexus-v2",
         TrainConfig {
             iterations: 1000,
             train_samples_per_iter: 150_000,
@@ -78,7 +78,7 @@ fn main() {
             epochs: 2,
             lr: 0.0005,
             filter_legal: true,
-            mcts_sims: 800,
+            mcts_sims: 2400,
             inference_batch_size: 2048,
             train_batch_size: 1024,
             leaf_batch_size: 32,
