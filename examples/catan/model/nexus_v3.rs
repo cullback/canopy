@@ -231,11 +231,20 @@ pub struct CatanNexusModelV3<B: Backend> {
     edge_dst: Tensor<B, 1, Int>,
 
     // Policy heads
-    policy_settlement: [Linear<B>; 4],
-    policy_road: [Linear<B>; 4],
-    policy_city: [Linear<B>; 4],
-    policy_other: [Linear<B>; 4],
-    policy_robber: [Linear<B>; 4],
+    //
+    // Head depth is allocated by task complexity. Per-position heads
+    // (settlement/city/robber) are pure readouts of a single GNN embedding
+    // and get 1 hidden layer (2 Linears). Road has to combine two endpoint
+    // embeddings, and Other projects pooled global state into 50 logits,
+    // so both get 2 hidden layers (3 Linears). Deep head capacity competes
+    // with trunk gradient pressure — keeping readout heads shallow forces
+    // the GNN trunk to learn features that work for all heads AND the
+    // value head, which is exactly what multi-task training wants.
+    policy_settlement: [Linear<B>; 2],
+    policy_road: [Linear<B>; 3],
+    policy_city: [Linear<B>; 2],
+    policy_other: [Linear<B>; 3],
+    policy_robber: [Linear<B>; 2],
 
     // Soft policy head: separate final projection producing soft logits.
     // Trained against policy^(1/T) targets for better action ranking.
@@ -245,8 +254,11 @@ pub struct CatanNexusModelV3<B: Backend> {
     soft_policy_other: Linear<B>,
     soft_policy_robber: Linear<B>,
 
-    // Value head
-    value: [Linear<B>; 4],
+    // Value head: pool → 3 WDL logits. Unlike per-position policy heads,
+    // this is a genuine integration task — aggregate the entire pooled
+    // game state into a single outcome estimate — so it earns 2 hidden
+    // layers (3 Linears) vs 1 for the simple readouts.
+    value: [Linear<B>; 3],
 
     // Auxiliary short-term value heads (None if num_aux_heads == 0)
     aux_value_hidden: Option<Linear<B>>,
@@ -306,33 +318,35 @@ pub fn init_nexus_v3<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Ca
         edge_src,
         edge_dst,
 
+        // Settlement: readout of a single node embedding.
+        //   hidden → logit — 1 hidden layer.
         policy_settlement: [
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, 1).init(device),
         ],
+        // Road: combines two endpoint embeddings (h_src, h_dst) so needs
+        // a bit more depth to learn nontrivial edge features.
+        //   2·hidden → hidden → hidden → logit — 2 hidden layers.
         policy_road: [
             LinearConfig::new(HIDDEN * 2, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, 1).init(device),
         ],
+        // City: same shape as settlement — single-node readout.
         policy_city: [
             LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, 1).init(device),
         ],
+        // Other: projects pooled global state into 50 logits for the
+        // non-spatial actions (dev cards, trades, discards, etc). This
+        // is an integration task, not a simple readout, so 2 hidden.
         policy_other: [
             LinearConfig::new(pool_dim, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
         ],
+        // Robber: readout of a single tile embedding.
         policy_robber: [
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, 1).init(device),
         ],
@@ -345,9 +359,9 @@ pub fn init_nexus_v3<B: Backend>(device: &B::Device, num_aux_heads: usize) -> Ca
         soft_policy_other: LinearConfig::new(HIDDEN, NUM_OTHER).init(device),
         soft_policy_robber: LinearConfig::new(HIDDEN, 1).init(device),
 
+        // Value: pool → 3 WDL logits, with 2 hidden layers for integration.
         value: [
             LinearConfig::new(pool_dim, HIDDEN).init(device),
-            LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, HIDDEN).init(device),
             LinearConfig::new(HIDDEN, 3).init(device),
         ],
@@ -439,32 +453,32 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV3<B> {
         // h_node: [batch, 54, HIDDEN], h_tile: [batch, 19, HIDDEN]
 
         // ── Policy: Settlement (actions 0-53) ────────────────────────
+        // 1 hidden layer: the GNN already encodes per-node value; the
+        // head just reads out a scalar score for each node.
         let s = h_node.clone().reshape([batch * NUM_NODES, HIDDEN]);
-        let s = relu(self.policy_settlement[0].forward(s));
-        let s = relu(self.policy_settlement[1].forward(s));
-        let s_h = relu(self.policy_settlement[2].forward(s));
-        let settlement_logits = self.policy_settlement[3]
+        let s_h = relu(self.policy_settlement[0].forward(s));
+        let settlement_logits = self.policy_settlement[1]
             .forward(s_h.clone())
             .reshape([batch, NUM_NODES]);
 
         // ── Policy: Road (actions 54-125) ────────────────────────────
+        // 2 hidden layers: combines two endpoint embeddings so needs
+        // more capacity than a single-node readout.
         let h_src = h_node.clone().select(1, self.edge_src.clone());
         let h_dst = h_node.clone().select(1, self.edge_dst.clone());
         let edge_feats = Tensor::cat(vec![h_src, h_dst], 2);
         let r = edge_feats.reshape([batch * NUM_EDGES, HIDDEN * 2]);
         let r = relu(self.policy_road[0].forward(r));
-        let r = relu(self.policy_road[1].forward(r));
-        let r_h = relu(self.policy_road[2].forward(r));
-        let road_logits = self.policy_road[3]
+        let r_h = relu(self.policy_road[1].forward(r));
+        let road_logits = self.policy_road[2]
             .forward(r_h.clone())
             .reshape([batch, NUM_EDGES]);
 
         // ── Policy: City (actions 126-179) ───────────────────────────
+        // 1 hidden layer: same single-node readout as settlement.
         let c = h_node.clone().reshape([batch * NUM_NODES, HIDDEN]);
-        let c = relu(self.policy_city[0].forward(c));
-        let c = relu(self.policy_city[1].forward(c));
-        let c_h = relu(self.policy_city[2].forward(c));
-        let city_logits = self.policy_city[3]
+        let c_h = relu(self.policy_city[0].forward(c));
+        let city_logits = self.policy_city[1]
             .forward(c_h.clone())
             .reshape([batch, NUM_NODES]);
 
@@ -474,20 +488,21 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV3<B> {
         let pooled = Tensor::cat(vec![node_pool, tile_pool, global], 1);
 
         // ── Policy: Other (50 non-robber actions) ────────────────────
+        // 2 hidden layers: pooled state → 50 non-spatial action logits
+        // is an integration task (dev cards, trades, discards vary by
+        // global state).
         let o = relu(self.policy_other[0].forward(pooled.clone()));
-        let o = relu(self.policy_other[1].forward(o));
-        let o_h = relu(self.policy_other[2].forward(o));
-        let other_logits = self.policy_other[3].forward(o_h.clone());
+        let o_h = relu(self.policy_other[1].forward(o));
+        let other_logits = self.policy_other[2].forward(o_h.clone());
         // Split into pre-robber [25] and post-robber [25]
         let other_pre = other_logits.clone().narrow(1, 0, NUM_OTHER_PRE);
         let other_post = other_logits.narrow(1, NUM_OTHER_PRE, NUM_OTHER_POST);
 
         // ── Policy: Robber (actions 205-223) ─────────────────────────
+        // 1 hidden layer: single-tile readout.
         let rb = h_tile.clone().reshape([batch * NUM_TILES, HIDDEN]);
-        let rb = relu(self.policy_robber[0].forward(rb));
-        let rb = relu(self.policy_robber[1].forward(rb));
-        let rb_h = relu(self.policy_robber[2].forward(rb));
-        let robber_logits = self.policy_robber[3]
+        let rb_h = relu(self.policy_robber[0].forward(rb));
+        let robber_logits = self.policy_robber[1]
             .forward(rb_h.clone())
             .reshape([batch, NUM_TILES]);
 
@@ -536,12 +551,16 @@ impl<B: Backend> PolicyValueNet<B> for CatanNexusModelV3<B> {
             1,
         );
 
-        // ── Value head (4 layers) ───────────────────────────────────
+        // ── Value head (2 hidden layers) ────────────────────────────
+        // Genuinely an integration task: reduce pooled game state to
+        // a 3-class outcome estimate. Keeps more depth than readout
+        // heads but stays shallower than the deep variant that starved
+        // trunk gradient flow toward value features.
         let mut v = pooled.clone();
-        for layer in &self.value[..3] {
+        for layer in &self.value[..2] {
             v = relu(layer.forward(v));
         }
-        let value = self.value[3].forward(v);
+        let value = self.value[2].forward(v);
 
         // ── Auxiliary value heads ────────────────────────────────────
         let aux_values = if let (Some(aux_hidden), Some(aux_out)) =
