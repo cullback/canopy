@@ -455,6 +455,7 @@ impl<G: Game> Search<G> {
     /// child if the exact outcome wasn't explored or no action was
     /// recorded for it. Stops early once the pointer becomes `None`.
     pub fn walk_tree(&mut self, actions: &[usize]) -> usize {
+        let orig_root = self.root;
         let mut walked = 0;
         for &action in actions {
             let Some(root) = self.root else { break };
@@ -489,6 +490,14 @@ impl<G: Game> Search<G> {
             self.root = self.tree.best_chance_child(root);
         }
         self.search_active = false;
+        // If the root moved, the existing Gumbel state (candidates, logits,
+        // schedule) refers to a different node and must be discarded. Without
+        // this, `begin_search`'s "resume existing gumbel" branch would reuse
+        // a stale schedule — often already exhausted — causing a budget
+        // refill to run zero new sims after an opponent move.
+        if self.root != orig_root {
+            self.gumbel = None;
+        }
         walked
     }
 
@@ -616,7 +625,20 @@ impl<G: Game> Search<G> {
             self.tree.clear();
 
             match self.tree.try_expand(&self.root_state, &mut self.bufs) {
-                ExpandResult::Leaf(_) => unreachable!("empty non-terminal tree"),
+                ExpandResult::Leaf(_) => {
+                    // Degenerate non-terminal state: no chance outcomes and
+                    // no legal actions. Log details for diagnosis — this
+                    // indicates a game logic bug.
+                    let mut actions = Vec::new();
+                    self.root_state.legal_actions(&mut actions);
+                    let mut chances = Vec::new();
+                    self.root_state.chance_outcomes(&mut chances);
+                    panic!(
+                        "degenerate non-terminal root: status={:?}, \
+                         legal_actions={actions:?}, chance_outcomes={chances:?}",
+                        self.root_state.status(),
+                    );
+                }
                 ExpandResult::Chance(id) => {
                     self.root = Some(id);
                     self.root_network_value = self.tree.utility(id);
@@ -1745,5 +1767,47 @@ mod tests {
         let search = Search::new(TrivialGame::new(), Config::default());
         assert!(search.snapshot().is_none());
         assert!(search.snapshot_subtree(1).is_none());
+    }
+
+    /// Game that transitions into a degenerate state: Ongoing but no chance
+    /// outcomes and no legal actions (e.g. Catan's DevCardDraw with an
+    /// exhausted pool, or StealResolve with empty opponent hand).
+    #[derive(Clone)]
+    struct DeadEndGame {
+        stuck: bool,
+    }
+
+    impl Game for DeadEndGame {
+        const NUM_ACTIONS: usize = 2;
+
+        fn status(&self) -> Status {
+            // Not terminal, even when stuck.
+            Status::Ongoing
+        }
+        fn legal_actions(&self, buf: &mut Vec<usize>) {
+            if !self.stuck {
+                buf.push(0);
+            }
+            // When stuck: no legal actions AND no chance outcomes.
+        }
+        fn apply_action(&mut self, _action: usize) {
+            self.stuck = true;
+        }
+    }
+
+    /// A degenerate non-terminal root (no chance outcomes, no legal actions)
+    /// panics with diagnostic info so the game logic bug can be found.
+    #[test]
+    #[should_panic(expected = "degenerate non-terminal root")]
+    fn degenerate_root_panics_with_diagnostics() {
+        let evaluator = RolloutEvaluator::default();
+        let config = Config {
+            num_simulations: 10,
+            ..Default::default()
+        };
+        let mut rng = fastrand::Rng::new();
+
+        let mut search = Search::new(DeadEndGame { stuck: true }, config);
+        let _result = run_to_completion(&mut search, &evaluator, &mut rng);
     }
 }
