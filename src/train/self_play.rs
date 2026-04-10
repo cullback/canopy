@@ -25,7 +25,7 @@ pub(super) struct IterGameResults {
     pub min_game_length: Option<u32>,
     pub max_game_length: u32,
     pub game_length_stddev: f64,
-    pub search_depth_avg: f32,
+    pub search_pv_depth: f32,
     pub search_depth_max: u32,
 }
 
@@ -57,7 +57,7 @@ impl IterGameResults {
                 draws += 1;
             }
             for s in &game.samples {
-                depth_sum += s.search_depth_avg as f64;
+                depth_sum += s.search_pv_depth as f64;
                 depth_max = depth_max.max(s.search_depth_max);
                 depth_count += 1;
             }
@@ -72,7 +72,7 @@ impl IterGameResults {
             0.0
         };
 
-        let search_depth_avg = if depth_count > 0 {
+        let search_pv_depth = if depth_count > 0 {
             (depth_sum / depth_count as f64) as f32
         } else {
             0.0
@@ -86,7 +86,7 @@ impl IterGameResults {
             min_game_length,
             max_game_length,
             game_length_stddev,
-            search_depth_avg,
+            search_pv_depth,
             search_depth_max: depth_max,
         }
     }

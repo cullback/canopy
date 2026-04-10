@@ -60,8 +60,9 @@ pub struct Sample {
     pub prior_agrees: bool,
     /// Short-term value targets (length = aux_value_horizons.len()).
     pub aux_targets: Box<[f32]>,
-    /// Average simulation depth for this position's search.
-    pub search_depth_avg: f32,
+    /// Principal variation depth for this position's search (most-visited
+    /// path from root, edges = actions + chance nodes).
+    pub search_pv_depth: f32,
     /// Maximum simulation depth for this position's search.
     pub search_depth_max: u32,
 }
@@ -460,7 +461,7 @@ pub fn run_training<G>(
             train_metrics.loss_policy_val,
             train_metrics.loss_wdl_train,
             train_metrics.loss_wdl_val,
-            sp.search_depth_avg,
+            sp.search_pv_depth,
             sp.search_depth_max,
             evals_per_sec,
             avg_batch_size,
@@ -532,7 +533,7 @@ pub fn run_training<G>(
             time_train_secs: train_elapsed.as_secs_f64(),
             evals_per_sec,
             avg_batch_size,
-            search_depth_avg: sp.search_depth_avg,
+            search_pv_depth: sp.search_pv_depth,
             search_depth_max: sp.search_depth_max,
         });
     }

@@ -80,10 +80,9 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
                 evals = evaluator.evaluate_batch(&refs, rng);
             }
             Step::Done(result) => {
-                // Accumulate depth stats using integer encoding (avg_depth * 100)
                 counters
                     .depth_sum
-                    .fetch_add((result.avg_depth * 100.0) as u64, Ordering::Relaxed);
+                    .fetch_add(result.pv_depth as u64, Ordering::Relaxed);
                 counters
                     .depth_max
                     .fetch_max(result.max_depth, Ordering::Relaxed);
@@ -323,8 +322,8 @@ pub fn tournament<G: Game + std::fmt::Display>(
     drop(span);
 
     let dc = counters.depth_count.load(Ordering::Relaxed);
-    let avg_depth = if dc > 0 {
-        counters.depth_sum.load(Ordering::Relaxed) as f64 / dc as f64 / 100.0
+    let pv_depth = if dc > 0 {
+        counters.depth_sum.load(Ordering::Relaxed) as f64 / dc as f64
     } else {
         0.0
     };
@@ -341,7 +340,7 @@ pub fn tournament<G: Game + std::fmt::Display>(
         d,
         total,
         d as f32 / total as f32 * 100.0,
-        avg_depth,
+        pv_depth,
         max_depth,
     );
 

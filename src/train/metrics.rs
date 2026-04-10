@@ -164,9 +164,10 @@ pub(super) struct CsvRow {
     /// Average batch size sent to GPU inference.
     #[serde(serialize_with = "round6::f64")]
     pub avg_batch_size: f64,
-    /// Average simulation depth across all searches this iteration.
+    /// Average principal variation depth (most-visited path from root,
+    /// edges = actions + chance nodes) across all searches this iteration.
     #[serde(serialize_with = "round6::f32")]
-    pub search_depth_avg: f32,
+    pub search_pv_depth: f32,
     /// Maximum simulation depth across all searches this iteration.
     pub search_depth_max: u32,
 }

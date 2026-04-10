@@ -119,8 +119,9 @@ pub struct SearchResult {
     pub children_q: Vec<(usize, f32)>,
     /// Action with highest raw prior (network policy argmax).
     pub prior_top1_action: usize,
-    /// Average simulation depth (tree edges traversed per sim).
-    pub avg_depth: f32,
+    /// Principal variation depth: edges along the most-visited path from
+    /// root to the deepest expanded node.
+    pub pv_depth: u32,
     /// Maximum simulation depth across all sims.
     pub max_depth: u32,
 }
@@ -173,10 +174,8 @@ pub struct Search<G: Game> {
     root_network_value: f32,
     /// Whether a search is currently active (between first `step` and `Done`).
     search_active: bool,
-    /// Depth tracking for the current search.
-    depth_sum: u32,
+    /// Maximum simulation depth across all sims in the current search.
     depth_max: u32,
-    depth_count: u32,
     /// Leaf states awaiting evaluation.  Filled by simulation, consumed by
     /// `step`.  Reused across calls to avoid allocation.
     pending_states: Vec<G>,
@@ -254,9 +253,7 @@ impl<G: Game> Search<G> {
             vanilla_q_bounds: (0.0, 0.0),
             root_network_value: 0.0,
             search_active: false,
-            depth_sum: 0,
             depth_max: 0,
-            depth_count: 0,
             pending_states: Vec::new(),
             pending_contexts: Vec::new(),
         }
@@ -501,13 +498,13 @@ impl<G: Game> Search<G> {
         walked
     }
 
-    fn depth_stats(&self) -> (f32, u32) {
-        let avg = if self.depth_count > 0 {
-            self.depth_sum as f32 / self.depth_count as f32
-        } else {
-            0.0
-        };
-        (avg, self.depth_max)
+    /// Principal variation depth: follow the most-visited edge from root,
+    /// counting edges until reaching a node with no expanded children.
+    fn pv_depth(&self) -> u32 {
+        match self.root {
+            Some(root) => compute_pv_depth(&self.tree, root),
+            None => 0,
+        }
     }
 
     /// Feed evaluations and advance the search.
@@ -537,9 +534,7 @@ impl<G: Game> Search<G> {
         self.search_active = true;
         self.vanilla_budget_remaining = self.config.num_simulations;
         self.vanilla_q_bounds = (0.0, 0.0);
-        self.depth_sum = 0;
         self.depth_max = 0;
-        self.depth_count = 0;
 
         // Terminal root requires no tree logic — immediate result.
         if let Status::Terminal(reward) = self.root_state.status() {
@@ -552,7 +547,7 @@ impl<G: Game> Search<G> {
                 network_value: 0.0,
                 children_q: vec![],
                 prior_top1_action: 0,
-                avg_depth: 0.0,
+                pv_depth: 0,
                 max_depth: 0,
             });
         }
@@ -728,18 +723,14 @@ impl<G: Game> Search<G> {
                     return Step::NeedsEval(&self.pending_states);
                 }
                 self.search_active = false;
-                let avg_depth = if self.depth_count > 0 {
-                    self.depth_sum as f32 / self.depth_count as f32
-                } else {
-                    0.0
-                };
+                let pv_depth = compute_pv_depth(&self.tree, root);
                 return Step::Done(extract_gumbel_result::<G>(
                     &self.tree,
                     root,
                     gs,
                     &self.config,
                     network_value,
-                    avg_depth,
+                    pv_depth,
                     self.depth_max,
                 ));
             }
@@ -765,16 +756,12 @@ impl<G: Game> Search<G> {
             match result {
                 SimResult::Complete => {
                     let d = self.bufs.path.len() as u32;
-                    self.depth_sum += d;
                     self.depth_max = self.depth_max.max(d);
-                    self.depth_count += 1;
                     advance_sim(gs, &self.tree, &self.bufs.path, root, &self.config);
                 }
                 SimResult::NeedsEval { state, context } => {
                     let d = phase_path(&context).len() as u32;
-                    self.depth_sum += d;
                     self.depth_max = self.depth_max.max(d);
-                    self.depth_count += 1;
                     // Advance before applying virtual loss so that
                     // update_q_bounds reads Q values not yet polluted by this
                     // simulation's virtual loss (q_min/q_max never contract,
@@ -818,17 +805,13 @@ impl<G: Game> Search<G> {
             ) {
                 SimResult::Complete => {
                     let d = self.bufs.path.len() as u32;
-                    self.depth_sum += d;
                     self.depth_max = self.depth_max.max(d);
-                    self.depth_count += 1;
                     widen_q_bounds(&self.tree, &self.bufs.path, &mut q_bounds);
                     self.vanilla_budget_remaining -= 1;
                 }
                 SimResult::NeedsEval { state, context } => {
                     let d = phase_path(&context).len() as u32;
-                    self.depth_sum += d;
                     self.depth_max = self.depth_max.max(d);
-                    self.depth_count += 1;
                     // Widen bounds before virtual loss (same rationale as Gumbel path)
                     widen_q_bounds(&self.tree, phase_path(&context), &mut q_bounds);
                     self.tree.apply_virtual_loss(phase_path(&context));
@@ -850,13 +833,13 @@ impl<G: Game> Search<G> {
         }
         self.search_active = false;
         let network_value = self.root_network_value;
-        let (avg_depth, max_depth) = self.depth_stats();
+        let pv_depth = self.pv_depth();
         Step::Done(visit_count_result::<G>(
             &self.tree,
             root,
             network_value,
-            avg_depth,
-            max_depth,
+            pv_depth,
+            self.depth_max,
         ))
     }
 }
@@ -1296,7 +1279,7 @@ fn visit_count_result<G: Game>(
     tree: &Tree,
     root: NodeId,
     network_value: f32,
-    avg_depth: f32,
+    pv_depth: u32,
     max_depth: u32,
 ) -> SearchResult {
     let edges = tree.edges(root);
@@ -1330,7 +1313,7 @@ fn visit_count_result<G: Game>(
         network_value,
         children_q,
         prior_top1_action,
-        avg_depth,
+        pv_depth,
         max_depth,
     }
 }
@@ -1342,7 +1325,7 @@ fn extract_gumbel_result<G: Game>(
     gs: &GumbelState,
     config: &Config,
     network_value: f32,
-    avg_depth: f32,
+    pv_depth: u32,
     max_depth: u32,
 ) -> SearchResult {
     let ctx = RootContext::new(tree, root);
@@ -1403,7 +1386,7 @@ fn extract_gumbel_result<G: Game>(
         network_value,
         children_q,
         prior_top1_action,
-        avg_depth,
+        pv_depth,
         max_depth,
     }
 }
@@ -1457,6 +1440,27 @@ fn snapshot_node(
         player: parent_player,
         children,
     }
+}
+
+/// Walk the most-visited path from `root`, counting edges.
+fn compute_pv_depth(tree: &Tree, root: NodeId) -> u32 {
+    let mut node = root;
+    let mut depth = 0u32;
+    loop {
+        let best = tree
+            .edges(node)
+            .iter()
+            .filter_map(|e| e.child.map(|c| (c, e.visits)))
+            .max_by_key(|&(_, v)| v);
+        match best {
+            Some((child, _)) => {
+                depth += 1;
+                node = child;
+            }
+            None => break,
+        }
+    }
+    depth
 }
 
 #[cfg(test)]

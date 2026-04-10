@@ -128,7 +128,7 @@ fn make_sample(
         q_std,
         prior_agrees,
         aux_targets: vec![0.0; num_aux_targets].into_boxed_slice(),
-        search_depth_avg: result.avg_depth,
+        search_pv_depth: result.pv_depth as f32,
         search_depth_max: result.max_depth,
     }
 }
