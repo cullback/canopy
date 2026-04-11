@@ -420,9 +420,20 @@ fn populate_move_robber(state: &GameState, actions: &mut Vec<ActionId>) {
     }
 
     let filter = state.canonical_build_order && any_touches_opp;
+    let start_len = actions.len();
     for (tid, touches_opp) in &legal_tiles {
         if !filter || *touches_opp {
             actions.push(robber_id(*tid));
+        }
+    }
+
+    // Fallback: if the friendly-robber and canonical filters eliminated
+    // every candidate, all non-robber tiles become legal.
+    if actions.len() == start_len {
+        for tile in &topo.tiles {
+            if tile.id != state.robber {
+                actions.push(robber_id(tile.id));
+            }
         }
     }
 }
