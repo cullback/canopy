@@ -285,31 +285,33 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
             Phase::Roll | Phase::StealResolve | Phase::DevCardDraw | Phase::GameOver(_)
         )
     {
+        let cur = state.current_player;
+        let opp = cur.opponent();
         eprintln!(
             "!! legal_actions empty: phase={:?} turn={} cur={:?} pre_roll={} \
-             setup_count={} robber={:?} cur_pvps={} opp_pvps={} cur_hand={} \
-             opp_hand={} cur_settles={} cur_cities={} opp_settles={} opp_cities={} \
-             canonical={} min_step={}",
+             setup_count={} robber={:?} cur_pvps={} opp_pvps={} \
+             cur_hand={:?}({}) opp_hand={:?}({}) \
+             cur_settles={} cur_cities={} opp_settles={} opp_cities={} \
+             canonical={} min_step={} discard_threshold={}",
             state.phase,
             state.turn_number,
-            state.current_player,
+            cur,
             state.pre_roll,
             state.setup_count,
             state.robber,
-            state.public_vps(state.current_player),
-            state.public_vps(state.current_player.opponent()),
-            state.players[state.current_player].hand.total(),
-            state.players[state.current_player.opponent()].hand.total(),
-            state.boards[state.current_player].settlements.count_ones(),
-            state.boards[state.current_player].cities.count_ones(),
-            state.boards[state.current_player.opponent()]
-                .settlements
-                .count_ones(),
-            state.boards[state.current_player.opponent()]
-                .cities
-                .count_ones(),
+            state.public_vps(cur),
+            state.public_vps(opp),
+            state.players[cur].hand.0,
+            state.players[cur].hand.total(),
+            state.players[opp].hand.0,
+            state.players[opp].hand.total(),
+            state.boards[cur].settlements.count_ones(),
+            state.boards[cur].cities.count_ones(),
+            state.boards[opp].settlements.count_ones(),
+            state.boards[opp].cities.count_ones(),
             state.canonical_build_order,
             state.min_step,
+            state.discard_threshold,
         );
     }
 }
@@ -416,6 +418,18 @@ fn populate_discard(
         .iter()
         .map(|&r| hand[r])
         .sum();
+    if suffix_total < remaining {
+        eprintln!(
+            "!! discard invariant broken at entry: player={player:?} hand={:?}({}) \
+             remaining={remaining} min_resource={min_resource} suffix={suffix_total} \
+             cur={:?} threshold={}",
+            hand.0,
+            hand.total(),
+            state.current_player,
+            state.discard_threshold,
+        );
+        return;
+    }
     for &r in &ALL_RESOURCES[min_resource as usize..] {
         if hand[r] > 0 && suffix_total >= remaining {
             actions.push(discard_id(r));

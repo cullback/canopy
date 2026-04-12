@@ -817,16 +817,33 @@ fn apply_discard_resource(state: &mut GameState, resource: Resource) {
         ..
     } = state.phase
     {
+        assert!(
+            state.players[player].hand[resource] > 0,
+            "discard underflow: player={player:?} resource={resource:?} hand={:?}",
+            state.players[player].hand.0,
+        );
         state.players[player].hand[resource] -= 1;
         state.bank[resource] += 1;
 
         let new_remaining = remaining - 1;
         if new_remaining > 0 {
+            let min_r = resource as u8;
+            let suffix: u8 = ALL_RESOURCES[min_r as usize..]
+                .iter()
+                .map(|&r| state.players[player].hand[r])
+                .sum();
+            assert!(
+                suffix >= new_remaining,
+                "discard invariant broken after discard: player={player:?} resource={resource:?} \
+                 hand={:?}({}) remaining={new_remaining} min_resource={min_r} suffix={suffix}",
+                state.players[player].hand.0,
+                state.players[player].hand.total(),
+            );
             state.phase = Phase::Discard {
                 player,
                 remaining: new_remaining,
                 roller,
-                min_resource: resource as u8,
+                min_resource: min_r,
             };
         } else {
             // Current discard player finished — check if the other player
