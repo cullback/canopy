@@ -275,6 +275,43 @@ pub fn legal_actions(state: &GameState, actions: &mut Vec<ActionId>) {
         }
         Phase::GameOver(_) => {}
     }
+    // Diagnostic: any non-chance, non-terminal phase that produces zero
+    // legal actions indicates a game-logic bug. Print state so we can
+    // reproduce it. Chance phases (Roll/Steal/Dev) legitimately return
+    // empty and are handled upstream by sample_chance.
+    if actions.is_empty()
+        && !matches!(
+            state.phase,
+            Phase::Roll | Phase::StealResolve | Phase::DevCardDraw | Phase::GameOver(_)
+        )
+    {
+        eprintln!(
+            "!! legal_actions empty: phase={:?} turn={} cur={:?} pre_roll={} \
+             setup_count={} robber={:?} cur_pvps={} opp_pvps={} cur_hand={} \
+             opp_hand={} cur_settles={} cur_cities={} opp_settles={} opp_cities={} \
+             canonical={} min_step={}",
+            state.phase,
+            state.turn_number,
+            state.current_player,
+            state.pre_roll,
+            state.setup_count,
+            state.robber,
+            state.public_vps(state.current_player),
+            state.public_vps(state.current_player.opponent()),
+            state.players[state.current_player].hand.total(),
+            state.players[state.current_player.opponent()].hand.total(),
+            state.boards[state.current_player].settlements.count_ones(),
+            state.boards[state.current_player].cities.count_ones(),
+            state.boards[state.current_player.opponent()]
+                .settlements
+                .count_ones(),
+            state.boards[state.current_player.opponent()]
+                .cities
+                .count_ones(),
+            state.canonical_build_order,
+            state.min_step,
+        );
+    }
 }
 
 /// Minimum total pips for a setup settlement spot. Spots below this threshold
@@ -708,11 +745,18 @@ fn populate_road_building(state: &GameState, roads_left: u8, actions: &mut Vec<A
         actions.push(ActionId(END_TURN));
         return;
     }
+    let canon = state.canonical_build_order;
     let mut legal = state.boards[pid].road_network.reachable_edges();
     let mut found = false;
     while legal != 0 {
         let eid = legal.trailing_zeros() as u8;
         legal &= legal - 1;
+        if canon && roads_left < 2 {
+            let key = road_key(state.road_distances[eid as usize], eid);
+            if key < state.min_road_key {
+                continue;
+            }
+        }
         actions.push(road_id(EdgeId(eid)));
         found = true;
     }

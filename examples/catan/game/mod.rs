@@ -276,7 +276,21 @@ pub fn apply(state: &mut GameState, action: ActionId) {
         ROLL => {
             state.phase = Phase::Roll;
         }
-        END_TURN => apply_end_turn(state),
+        END_TURN => {
+            if matches!(state.phase, Phase::RoadBuilding { .. }) {
+                if state.pre_roll {
+                    state.phase = Phase::Roll;
+                } else {
+                    state.phase = Phase::Main;
+                }
+                if state.canonical_build_order {
+                    state.compute_road_distances();
+                    state.min_road_key = 0;
+                }
+            } else {
+                apply_end_turn(state);
+            }
+        }
         BUY_DEV_CARD => apply_buy_dev_card(state),
         PLAY_KNIGHT => apply_play_knight(state),
         PLAY_ROAD_BUILDING => apply_play_road_building(state),
@@ -577,8 +591,13 @@ fn apply_build_road(state: &mut GameState, eid: EdgeId) {
             // Recompute road distances after free roads changed the frontier.
             if state.canonical_build_order {
                 state.compute_road_distances();
+                state.min_road_key = 0;
             }
         } else {
+            if state.canonical_build_order {
+                let key = state.road_distances[eid.0 as usize] as u16 * 72 + eid.0 as u16;
+                state.min_road_key = key;
+            }
             state.phase = Phase::RoadBuilding {
                 roads_left: remaining,
             };
@@ -712,6 +731,7 @@ fn apply_play_road_building(state: &mut GameState) {
     clamp_tested_non_knight(p);
     if state.canonical_build_order {
         state.min_step = state.min_step.max(2);
+        state.min_road_key = 0;
     }
     state.phase = Phase::RoadBuilding { roads_left: 2 };
 }
@@ -2033,6 +2053,123 @@ mod tests {
             state.phase
         );
         assert_eq!(state.players[Player::One].roads_left, 0);
+    }
+
+    /// Road Building canonical ordering: chaining (extending beyond the
+    /// frontier) must always be allowed even when the new edge has a lower
+    /// ID than the first road built.
+    #[test]
+    fn road_building_allows_chain() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.pre_roll = false;
+        state.phase = Phase::Main;
+        state.players[Player::One].roads_left = 2;
+        state.players[Player::One].dev_cards[DevCardKind::RoadBuilding] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        apply(&mut state, ActionId(PLAY_ROAD_BUILDING));
+        assert!(matches!(state.phase, Phase::RoadBuilding { roads_left: 2 }));
+
+        // Pick the highest-ID reachable edge so any chain extension is likely
+        // to have a lower edge ID.
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+        let first_road = actions
+            .iter()
+            .filter(|a| a.0 >= ROAD_START && a.0 < ROAD_END)
+            .max_by_key(|a| a.0)
+            .copied()
+            .expect("should have legal roads");
+
+        apply(&mut state, first_road);
+        assert!(matches!(state.phase, Phase::RoadBuilding { roads_left: 1 }));
+
+        // Second road must include any newly-reachable edges (chain),
+        // even if their edge ID is below the first road's.
+        action::legal_actions(&state, &mut actions);
+        let second_roads: Vec<ActionId> = actions
+            .iter()
+            .filter(|a| a.0 >= ROAD_START && a.0 < ROAD_END)
+            .copied()
+            .collect();
+        assert!(!second_roads.is_empty(), "should have legal second road");
+
+        // Verify newly-reachable edges aren't pruned: edges with distance > 0
+        // in the original distances were not reachable before the first road.
+        let current_reachable = state.boards[Player::One].road_network.reachable_edges();
+        let mut chain_count = 0;
+        let mut bits = current_reachable;
+        while bits != 0 {
+            let eid = bits.trailing_zeros() as u8;
+            bits &= bits - 1;
+            if state.road_distances[eid as usize] > 0 {
+                chain_count += 1;
+                assert!(
+                    second_roads.contains(&road_id(EdgeId(eid))),
+                    "chain edge {eid} was pruned by canonical ordering"
+                );
+            }
+        }
+        assert!(
+            chain_count > 0,
+            "test did not exercise any chain extensions"
+        );
+    }
+
+    /// Road Building canonical ordering: two initially-reachable roads are
+    /// commutative, so only the ascending-ID ordering should be legal.
+    #[test]
+    fn road_building_prunes_commutative_pair() {
+        let mut state = make_state_with_seed(42);
+        play_setup(&mut state);
+
+        state.current_player = Player::One;
+        state.pre_roll = false;
+        state.phase = Phase::Main;
+        state.players[Player::One].roads_left = 2;
+        state.players[Player::One].dev_cards[DevCardKind::RoadBuilding] = 1;
+        state.players[Player::One].has_played_dev_card_this_turn = false;
+
+        apply(&mut state, ActionId(PLAY_ROAD_BUILDING));
+
+        let mut actions = Vec::new();
+        action::legal_actions(&state, &mut actions);
+        let roads: Vec<ActionId> = actions
+            .iter()
+            .filter(|a| a.0 >= ROAD_START && a.0 < ROAD_END)
+            .copied()
+            .collect();
+
+        // Need at least 2 initially-reachable roads for this test.
+        if roads.len() < 2 {
+            return;
+        }
+
+        // Pick the lowest-ID road first.
+        let first = roads[0];
+        let first_eid = first.0 - ROAD_START;
+        let mut s1 = state.clone();
+        apply(&mut s1, first);
+
+        action::legal_actions(&s1, &mut actions);
+        let second_roads: Vec<u8> = actions
+            .iter()
+            .filter(|a| a.0 >= ROAD_START && a.0 < ROAD_END)
+            .map(|a| a.0 - ROAD_START)
+            .collect();
+
+        // No initially-reachable (distance 0) edge with ID < first should be legal.
+        for &eid in &second_roads {
+            if s1.road_distances[eid as usize] == 0 {
+                assert!(
+                    eid >= first_eid,
+                    "commutative edge {eid} should be pruned (first was {first_eid})"
+                );
+            }
+        }
     }
 
     // --- Dev Card tests ---
