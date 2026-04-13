@@ -69,7 +69,13 @@ impl ResourceArray {
 
     pub fn sub(&mut self, other: ResourceArray) {
         for i in 0..5 {
-            self.0[i] = self.0[i].saturating_sub(other.0[i]);
+            assert!(
+                self.0[i] >= other.0[i],
+                "resource underflow: have {:?} sub {:?} (index {i})",
+                self.0,
+                other.0,
+            );
+            self.0[i] -= other.0[i];
         }
     }
 }
