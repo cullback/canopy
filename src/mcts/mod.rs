@@ -176,6 +176,10 @@ pub struct Search<G: Game> {
     search_active: bool,
     /// Maximum simulation depth across all sims in the current search.
     depth_max: u32,
+    /// When vanilla sims are used because only 0–1 edges are legal,
+    /// this holds the sole legal action so `visit_count_result` returns
+    /// it instead of picking a stale edge from the tree.
+    sole_legal_action: Option<usize>,
     /// Leaf states awaiting evaluation.  Filled by simulation, consumed by
     /// `step`.  Reused across calls to avoid allocation.
     pending_states: Vec<G>,
@@ -254,6 +258,7 @@ impl<G: Game> Search<G> {
             root_network_value: 0.0,
             search_active: false,
             depth_max: 0,
+            sole_legal_action: None,
             pending_states: Vec::new(),
             pending_contexts: Vec::new(),
         }
@@ -535,6 +540,7 @@ impl<G: Game> Search<G> {
         self.vanilla_budget_remaining = self.config.num_simulations;
         self.vanilla_q_bounds = (0.0, 0.0);
         self.depth_max = 0;
+        self.sole_legal_action = None;
 
         // Terminal root requires no tree logic — immediate result.
         if let Status::Terminal(reward) = self.root_state.status() {
@@ -590,12 +596,17 @@ impl<G: Game> Search<G> {
             };
 
             // Single legal action — Gumbel can't halve, use vanilla sims
-            // for WDL estimation.
+            // for WDL estimation only; the action is predetermined.
             let num_legal = legal
                 .as_ref()
                 .map_or(self.tree.edges(new_root).len(), |l| l.len());
             if num_legal <= 1 {
                 self.gumbel = None;
+                // Remember the sole legal action so visit_count_result
+                // returns it instead of picking a stale edge.
+                self.sole_legal_action = legal
+                    .as_ref()
+                    .and_then(|le| le.first().map(|&i| self.tree.edges(new_root)[i].action));
                 return self.run_vanilla_sims(rng);
             }
 
@@ -834,13 +845,14 @@ impl<G: Game> Search<G> {
         self.search_active = false;
         let network_value = self.root_network_value;
         let pv_depth = self.pv_depth();
-        Step::Done(visit_count_result::<G>(
-            &self.tree,
-            root,
-            network_value,
-            pv_depth,
-            self.depth_max,
-        ))
+        let mut result =
+            visit_count_result::<G>(&self.tree, root, network_value, pv_depth, self.depth_max);
+        // When only one action was legal, override the visit-count-based
+        // selection to prevent returning a stale tree edge.
+        if let Some(action) = self.sole_legal_action {
+            result.selected_action = action;
+        }
+        Step::Done(result)
     }
 }
 
