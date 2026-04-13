@@ -105,6 +105,22 @@ impl Game for GameState {
                 check_victory(self);
             }
             _ => {
+                if let Phase::Discard {
+                    player,
+                    remaining,
+                    min_resource,
+                    ..
+                } = &self.phase
+                {
+                    let aid = action as u8;
+                    assert!(
+                        aid >= DISCARD_START && aid < DISCARD_END,
+                        "non-discard action {aid} during Discard: player={player:?} \
+                         hand={:?}({}) remaining={remaining} min_resource={min_resource}",
+                        self.players[*player].hand.0,
+                        self.players[*player].hand.total(),
+                    );
+                }
                 apply(self, ActionId(action as u8));
             }
         }
