@@ -540,7 +540,6 @@ impl<G: Game> Search<G> {
         if let Status::Terminal(reward) = self.root_state.status() {
             self.search_active = false;
             self.gumbel = None;
-            eprintln!("!! search returning terminal result (reward={reward})");
             return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
                 wdl: wdl_from_scalar(reward),
@@ -742,18 +741,6 @@ impl<G: Game> Search<G> {
                     pv_depth,
                     self.depth_max,
                 );
-                if result.selected_action == 0 {
-                    let edges = self.tree.edges(root);
-                    eprintln!(
-                        "!! gumbel returning action 0: candidates={:?} edges={} \
-                         edge_actions={:?} legal_edges={:?} sims={}",
-                        gs.candidates,
-                        edges.len(),
-                        edges.iter().map(|e| e.action).collect::<Vec<_>>(),
-                        gs.legal_edges.as_ref().map(|le| le.len()),
-                        gs.sim_index,
-                    );
-                }
                 return Step::Done(result);
             }
 
@@ -872,13 +859,6 @@ impl<G: Game> Search<G> {
             pv_depth,
             self.depth_max,
         );
-        if result.selected_action == 0 {
-            eprintln!(
-                "!! vanilla returning action 0: legal={:?} edges={}",
-                legal.map(|l| l.len()),
-                self.tree.edges(root).len(),
-            );
-        }
         Step::Done(result)
     }
 }
@@ -978,25 +958,6 @@ fn simulate<G: Game>(
         bufs.path.push((current, edge_idx));
         let action = edges[edge_idx].action;
         let child_opt = edges[edge_idx].child;
-
-        // Temporary debug: verify action is valid before applying
-        {
-            let kind = tree.kind(current);
-            let is_chance = matches!(*kind, NodeKind::Chance);
-            if !is_chance {
-                bufs.legal.clear();
-                state.legal_actions(&mut bufs.legal);
-                assert!(
-                    bufs.legal.contains(&action),
-                    "illegal action in simulate: action={action} edge_idx={edge_idx} \
-                     edges={} legal={:?} kind={kind:?} depth={} filter_legal={}",
-                    edges.len(),
-                    &bufs.legal[..bufs.legal.len().min(20)],
-                    bufs.path.len(),
-                    filter_legal,
-                );
-            }
-        }
 
         state.apply_action(action);
 
