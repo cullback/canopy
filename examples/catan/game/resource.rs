@@ -69,12 +69,18 @@ impl ResourceArray {
 
     pub fn sub(&mut self, other: ResourceArray) {
         for i in 0..5 {
-            assert!(
-                self.0[i] >= other.0[i],
-                "resource underflow: have {:?} sub {:?} (index {i})",
-                self.0,
-                other.0,
-            );
+            if self.0[i] < other.0[i] {
+                #[cfg(debug_assertions)]
+                panic!(
+                    "resource underflow: have {:?} sub {:?} (index {i})",
+                    self.0, other.0,
+                );
+                #[cfg(not(debug_assertions))]
+                {
+                    self.0[i] = 0;
+                    continue;
+                }
+            }
             self.0[i] -= other.0[i];
         }
     }
