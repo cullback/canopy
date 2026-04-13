@@ -631,6 +631,14 @@ fn apply_build_road(state: &mut GameState, eid: EdgeId) {
 fn apply_build_settlement(state: &mut GameState, nid: NodeId) {
     let pid = state.current_player;
     let opp = pid.opponent();
+    assert!(
+        state.current().hand.contains(SETTLEMENT_COST),
+        "settlement without resources: phase={:?} hand={:?} nid={} player={:?}",
+        state.phase,
+        state.current().hand.0,
+        nid.0,
+        pid,
+    );
     state.current_mut().hand.sub(SETTLEMENT_COST);
     state.bank.add(SETTLEMENT_COST);
     state.boards[pid].settlements |= 1u64 << nid.0;
