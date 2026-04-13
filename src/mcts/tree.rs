@@ -49,6 +49,7 @@ impl Edge {
 
 // ── Node types ───────────────────────────────────────────────────────
 
+#[derive(Debug)]
 pub(super) enum NodeKind {
     Terminal,
     Decision(f32),

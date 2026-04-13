@@ -40,6 +40,7 @@ fn parse_one(matches: &ArgMatches, prefix: &str) -> Config {
         c_visit: get("c-visit").parse().unwrap(),
         c_scale: get("c-scale").parse().unwrap(),
         leaf_batch_size: get("leaf-batch").parse().unwrap(),
+        filter_legal: true,
         ..Default::default()
     }
 }

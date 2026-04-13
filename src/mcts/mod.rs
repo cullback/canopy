@@ -939,6 +939,22 @@ fn simulate<G: Game>(
         bufs.path.push((current, edge_idx));
         let action = edges[edge_idx].action;
         let child_opt = edges[edge_idx].child;
+
+        // Temporary debug: verify filter_legal actually filtered this action
+        if filter_legal && matches!(*tree.kind(current), NodeKind::Decision(_)) {
+            bufs.legal.clear();
+            state.legal_actions(&mut bufs.legal);
+            assert!(
+                bufs.legal.contains(&action),
+                "filter_legal FAILED: action={action} edge_idx={edge_idx} \
+                 edges={} legal={:?} kind={:?} depth={}",
+                edges.len(),
+                &bufs.legal[..bufs.legal.len().min(20)],
+                tree.kind(current),
+                bufs.path.len(),
+            );
+        }
+
         state.apply_action(action);
 
         if let Some(child) = child_opt {
