@@ -243,11 +243,26 @@ where
         let result = run_search(search, encoder, &mut encode_buf, &infer, rng).await;
 
         // Choose action (exploration vs exploitation)
-        let chosen = if action_count < actor_config.explore_actions {
+        let exploring = action_count < actor_config.explore_actions;
+        let chosen = if exploring {
             sample_from_policy(&result.policy, rng)
         } else {
             result.selected_action
         };
+
+        // Verify chosen action is legal before applying.
+        {
+            let mut legal_check = Vec::new();
+            search.state().legal_actions(&mut legal_check);
+            assert!(
+                legal_check.contains(&chosen),
+                "illegal chosen action {chosen} (exploring={exploring} action_count={action_count} \
+                 selected={} policy_at={:.6}): legal={:?}",
+                result.selected_action,
+                result.policy.get(chosen).copied().unwrap_or(-1.0),
+                &legal_check[..legal_check.len().min(10)],
+            );
+        }
 
         samples.push(make_sample(
             result,
