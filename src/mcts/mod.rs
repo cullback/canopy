@@ -540,6 +540,7 @@ impl<G: Game> Search<G> {
         if let Status::Terminal(reward) = self.root_state.status() {
             self.search_active = false;
             self.gumbel = None;
+            eprintln!("!! search returning terminal result (reward={reward})");
             return Step::Done(SearchResult {
                 policy: vec![0.0; G::NUM_ACTIONS],
                 wdl: wdl_from_scalar(reward),
@@ -724,7 +725,7 @@ impl<G: Game> Search<G> {
                 }
                 self.search_active = false;
                 let pv_depth = compute_pv_depth(&self.tree, root);
-                return Step::Done(extract_gumbel_result::<G>(
+                let result = extract_gumbel_result::<G>(
                     &self.tree,
                     root,
                     gs,
@@ -732,7 +733,20 @@ impl<G: Game> Search<G> {
                     network_value,
                     pv_depth,
                     self.depth_max,
-                ));
+                );
+                if result.selected_action == 0 {
+                    let edges = self.tree.edges(root);
+                    eprintln!(
+                        "!! gumbel returning action 0: candidates={:?} edges={} \
+                         edge_actions={:?} legal_edges={:?} sims={}",
+                        gs.candidates,
+                        edges.len(),
+                        edges.iter().map(|e| e.action).collect::<Vec<_>>(),
+                        gs.legal_edges.as_ref().map(|le| le.len()),
+                        gs.sim_index,
+                    );
+                }
+                return Step::Done(result);
             }
 
             let offset = gs.schedule.candidate_offset(gs.sim_index);
@@ -842,14 +856,22 @@ impl<G: Game> Search<G> {
         } else {
             None
         };
-        Step::Done(visit_count_result::<G>(
+        let result = visit_count_result::<G>(
             &self.tree,
             root,
             legal,
             network_value,
             pv_depth,
             self.depth_max,
-        ))
+        );
+        if result.selected_action == 0 {
+            eprintln!(
+                "!! vanilla returning action 0: legal={:?} edges={}",
+                legal.map(|l| l.len()),
+                self.tree.edges(root).len(),
+            );
+        }
+        Step::Done(result)
     }
 }
 
