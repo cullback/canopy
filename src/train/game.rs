@@ -293,16 +293,19 @@ fn compute_short_term_values(samples: &mut [Sample], horizons: &[u32]) {
 fn sample_from_policy(policy: &[f32], rng: &mut fastrand::Rng) -> usize {
     let mut roll = rng.f32();
     for (i, &p) in policy.iter().enumerate() {
-        roll -= p;
-        if roll <= 0.0 {
-            return i;
+        if p > 0.0 {
+            roll -= p;
+            if roll < 0.0 {
+                return i;
+            }
         }
     }
-    // Fallback: return argmax
+    // Fallback: return argmax (only among positive entries)
     policy
         .iter()
         .enumerate()
+        .filter(|&(_, &p)| p > 0.0)
         .max_by(|a, b| a.1.total_cmp(b.1))
-        .unwrap()
-        .0
+        .map(|(i, _)| i)
+        .unwrap_or(0)
 }
