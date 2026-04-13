@@ -303,8 +303,11 @@ impl<G: Game> Search<G> {
     }
 
     /// Update the simulation budget (takes effect on the next search).
+    /// Clears the Gumbel state so `begin_search` creates a fresh schedule
+    /// for the new budget. The tree is preserved for reuse.
     pub fn set_num_simulations(&mut self, n: u32) {
         self.config.num_simulations = n;
+        self.gumbel = None;
     }
 
     /// Whether a search is currently active (between first `step` and `Done`).
