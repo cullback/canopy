@@ -562,9 +562,17 @@ impl<G: Game> Search<G> {
             let root_value = self.root_network_value;
             let root_sign = match *self.tree.kind(new_root) {
                 NodeKind::Decision(sign) => sign,
-                _ => {
+                NodeKind::Chance => {
                     self.gumbel = None;
                     return self.run_vanilla_sims(rng);
+                }
+                NodeKind::Terminal => {
+                    // Stale node from a degenerate simulation (SO-ISMCTS
+                    // state inconsistency). State is ongoing but the tree
+                    // thinks it's terminal. Discard and start fresh.
+                    self.root = None;
+                    self.gumbel = None;
+                    return self.begin_search(rng);
                 }
             };
 
