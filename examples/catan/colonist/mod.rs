@@ -956,6 +956,9 @@ async fn handle_colonist_socket(
                                     break;
                                 }
                             }
+                            canopy::server::ClientMsg::RunSims { count } => {
+                                sims_budget += count;
+                            }
                             _ => {
                                 let msgs = session.handle(msg);
                                 if send_all(&mut socket, &msgs).await.is_err() {
