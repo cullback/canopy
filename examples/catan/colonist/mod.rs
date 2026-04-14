@@ -927,7 +927,11 @@ async fn handle_colonist_socket(
             // state persists (not reset by cancel_search), so BATCH_SIZE
             // just controls how many ticks before we yield for UI/polling.
             if !session.is_searching() {
-                session.set_num_simulations(sims_budget);
+                // Include existing visits so Gumbel plans sequential
+                // halving over the full search depth, not just the new
+                // budget. This way "Run Sims" deepens one continuous
+                // search instead of starting independent short ones.
+                session.set_num_simulations(before + sims_budget);
             }
             let mut evals = vec![];
             let mut ticks = 0u32;
