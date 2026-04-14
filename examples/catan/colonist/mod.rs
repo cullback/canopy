@@ -983,13 +983,6 @@ async fn handle_colonist_socket(
             let after = session.root_visits();
             let sims_ran = after.saturating_sub(before);
             sims_budget = sims_budget.saturating_sub(sims_ran);
-            if sims_ran > 0 {
-                eprintln!(
-                    "search: batch done, ran={sims_ran} total={after} budget={sims_budget} \
-                     searching={}",
-                    session.is_searching(),
-                );
-            }
             if let Some((snap, labels)) = session.snapshot_with_labels() {
                 let _ = canopy::server::send_msg(
                     &mut socket,
