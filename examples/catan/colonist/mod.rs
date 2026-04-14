@@ -932,6 +932,11 @@ async fn handle_colonist_socket(
                 // budget. This way "Run Sims" deepens one continuous
                 // search instead of starting independent short ones.
                 session.set_num_simulations(before + sims_budget);
+                eprintln!(
+                    "search: starting new search, before={before} budget={sims_budget} \
+                     total={}",
+                    before + sims_budget,
+                );
             }
             let mut evals = vec![];
             let mut ticks = 0u32;
@@ -974,7 +979,15 @@ async fn handle_colonist_socket(
                 }
             }
             let after = session.root_visits();
-            sims_budget = sims_budget.saturating_sub(after.saturating_sub(before));
+            let sims_ran = after.saturating_sub(before);
+            sims_budget = sims_budget.saturating_sub(sims_ran);
+            if sims_ran > 0 {
+                eprintln!(
+                    "search: batch done, ran={sims_ran} total={after} budget={sims_budget} \
+                     searching={}",
+                    session.is_searching(),
+                );
+            }
             if let Some((snap, labels)) = session.snapshot_with_labels() {
                 let _ = canopy::server::send_msg(
                     &mut socket,
