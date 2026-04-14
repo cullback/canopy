@@ -907,15 +907,17 @@ async fn handle_colonist_socket(
 
         // --- Poll colonist if due ---
         if last_poll.elapsed() >= POLL_INTERVAL {
-            session.cancel_search();
             let (msgs, state_changed) = poll_state.poll(session).await;
             last_poll = std::time::Instant::now();
             if send_all(&mut socket, &msgs).await.is_err() {
                 return;
             }
-            if state_changed && auto_refill > 0 {
-                sims_budget = auto_refill;
-                eprintln!("poll: state changed, budget refilled to {auto_refill}");
+            if state_changed {
+                session.cancel_search();
+                if auto_refill > 0 {
+                    sims_budget = auto_refill;
+                    eprintln!("poll: state changed, budget refilled to {auto_refill}");
+                }
             }
         }
 
