@@ -23,8 +23,8 @@ pub struct EdgeSnapshot {
     pub logit: f32,
     /// Improved policy weight (None if no gumbel state).
     pub improved_policy: Option<f32>,
-    /// PV depth from this edge's child (0 if unvisited).
-    pub pv_depth: u32,
+    /// Max visited depth from this edge's child (0 if unvisited).
+    pub depth: u32,
 }
 
 /// Snapshot of the root search state.
@@ -391,7 +391,7 @@ impl<G: Game> Search<G> {
                 prior: edge.prior,
                 logit: edge.logit,
                 improved_policy: improved.as_ref().map(|ip| ip[i]),
-                pv_depth: edge
+                depth: edge
                     .child
                     .map(|c| compute_pv_depth(&self.tree, c))
                     .unwrap_or(0),

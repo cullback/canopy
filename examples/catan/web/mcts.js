@@ -78,7 +78,7 @@ class MCTSPanel {
           </div>
           <span class="w-10 text-right text-gray-500 shrink-0 text-[10px]">${edge.visits}</span>
           <span class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—'}</span>
-          <span class="w-6 text-right text-gray-500 shrink-0 text-[10px]">${edge.pv_depth || ''}</span>
+          <span class="w-6 text-right text-gray-500 shrink-0 text-[10px]">${edge.depth || ''}</span>
         `;
 
         this.barsEl.appendChild(row);
@@ -97,7 +97,7 @@ class MCTSPanel {
           spans[2].textContent = q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—';
           spans[2].style.color = qColor;
         }
-        if (spans[3]) spans[3].textContent = `${edge.pv_depth || ''}`;
+        if (spans[3]) spans[3].textContent = `${edge.depth || ''}`;
       }
     }
   }
