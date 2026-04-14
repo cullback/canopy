@@ -95,7 +95,7 @@ impl Default for Config {
     fn default() -> Self {
         Self {
             num_simulations: 800,
-            num_sampled_actions: 4,
+            num_sampled_actions: 6,
             c_visit: 50.0,
             c_scale: 1.0,
             leaf_batch_size: 1,
