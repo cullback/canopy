@@ -28,12 +28,17 @@ class MCTSPanel {
       label: labels[i] || `Action ${e.action}`,
     }));
 
-    // Sort: visited first, then by visits descending, then by improved policy
+    // Sort: visited first by Q descending, then unvisited by policy
     edges.sort((a, b) => {
       const av = a.visits > 0 ? 1 : 0;
       const bv = b.visits > 0 ? 1 : 0;
       if (av !== bv) return bv - av;
-      if (a.visits !== b.visits) return b.visits - a.visits;
+      if (av && bv) {
+        const aq = a.q ?? 0;
+        const bq = b.q ?? 0;
+        if (aq !== bq) return bq - aq;
+        return b.visits - a.visits;
+      }
       const ap = a.improved_policy ?? 0;
       const bp = b.improved_policy ?? 0;
       return bp - ap;
