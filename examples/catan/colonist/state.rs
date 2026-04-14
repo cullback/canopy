@@ -452,81 +452,6 @@ pub(crate) struct ReplayCtx<'a> {
 /// Used by the live polling path to process incremental events.
 /// Returns `Some(entries)` on success (state updated), `None` on failure
 /// (state unchanged — caller should retry with more events later).
-/// Derive canonical ordering state from per-turn tracking fields.
-fn derive_canonical_state(state: &mut GameState) {
-    state.min_step = 0;
-    state.min_trade_idx = 0;
-    state.min_city_node = 0;
-    state.min_road_key = 0;
-    state.min_settle_node = 0;
-    state.min_port_settle_node = 0;
-
-    let player = &state.players[state.current_player];
-
-    // Dev card played → past step 1
-    if player.has_played_dev_card_this_turn {
-        state.min_step = state.min_step.max(2);
-    }
-
-    // Traded this turn → past step 1
-    if player.has_traded_this_turn {
-        state.min_step = state.min_step.max(2);
-    }
-
-    // Dev card bought this turn → past step 3
-    // Check both revealed and hidden buys (hidden_dev_cards_bought_this_turn
-    // is set by apply_hidden_dev_card_buy during colonist replay).
-    let bought: u8 = player.dev_cards_bought_this_turn.0.iter().sum::<u8>()
-        + player.hidden_dev_cards_bought_this_turn;
-    if bought > 0 {
-        state.min_step = state.min_step.max(3);
-    }
-
-    // City built this turn on a pre-existing settlement → step 4.
-    // Match self-play: min_step.max(4), min_city_node = highest city node + 1.
-    let cities = state.boards[state.current_player].cities;
-    let pre_existing_cities = cities & state.settlements_at_turn_start;
-    if pre_existing_cities != 0 {
-        state.min_step = state.min_step.max(4);
-        // Set min_city_node past the highest pre-existing city built this turn.
-        let highest = 63 - pre_existing_cities.leading_zeros() as u8;
-        state.min_city_node = highest + 1;
-    }
-
-    // Roads built this turn → past step 5
-    if player.roads_placed > state.roads_placed_at_turn_start {
-        state.min_step = state.min_step.max(5);
-    }
-
-    // New settlements this turn
-    let boards = &state.boards[state.current_player];
-    let adj = &state.topology.adj;
-    let new_settlements = boards.settlements & !state.settlements_at_turn_start;
-    if new_settlements != 0 {
-        let any_port = {
-            let mut bits = new_settlements;
-            let mut found = false;
-            while bits != 0 {
-                let nid = bits.trailing_zeros() as u8;
-                bits &= bits - 1;
-                let bit = 1u64 << nid;
-                if adj.port_specific.iter().any(|&p| p & bit != 0) || adj.port_generic & bit != 0 {
-                    found = true;
-                    break;
-                }
-            }
-            found
-        };
-        if any_port {
-            state.min_step = state.min_step.max(2);
-        } else {
-            state.min_step = state.min_step.max(6);
-        }
-    }
-
-    state.compute_road_distances();
-}
-
 pub fn replay_events(
     state: &mut GameState,
     events: &[GameEvent],
@@ -538,15 +463,12 @@ pub fn replay_events(
     state.canonical_build_order = false;
     let (mut final_state, entries, walk_actions) =
         try_replay(state.clone(), events, 0, ctx, timeline, Vec::new())?;
-    // Derive canonical ordering state from actions taken this turn,
-    // then enable ordering for search.
     tracing::info!(
         phase = ?final_state.phase,
         player = ?final_state.current_player,
         min_step = final_state.min_step,
         "replay complete"
     );
-    derive_canonical_state(&mut final_state);
     final_state.canonical_build_order = true;
     *state = final_state;
     Some((entries, walk_actions))
