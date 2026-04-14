@@ -15,7 +15,8 @@ class MCTSPanel {
   // Reuses existing DOM rows when the edge set hasn't changed to keep
   // click handlers stable during live search updates.
   updateSnapshot(snapshot, labels) {
-    this.simsEl.textContent = `${snapshot.total_simulations} sims`;
+    const pvDepth = snapshot.pv_depth ?? 0;
+    this.simsEl.textContent = `${snapshot.total_simulations} sims · depth ${pvDepth}`;
     const [w, d, l] = snapshot.root_wdl;
     this.rootQEl.textContent = `W ${(w*100).toFixed(0)}% D ${(d*100).toFixed(0)}% L ${(l*100).toFixed(0)}%`;
     const nv = snapshot.network_value;
@@ -77,6 +78,7 @@ class MCTSPanel {
           </div>
           <span class="w-10 text-right text-gray-500 shrink-0 text-[10px]">${edge.visits}</span>
           <span class="w-11 text-right shrink-0 text-[10px]" style="color:${qColor}">${q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—'}</span>
+          <span class="w-6 text-right text-gray-500 shrink-0 text-[10px]">${edge.pv_depth || ''}</span>
         `;
 
         this.barsEl.appendChild(row);
@@ -95,6 +97,7 @@ class MCTSPanel {
           spans[2].textContent = q != null ? ((q + 1) / 2 * 100).toFixed(0) + '%' : '—';
           spans[2].style.color = qColor;
         }
+        if (spans[3]) spans[3].textContent = `${edge.pv_depth || ''}`;
       }
     }
   }
