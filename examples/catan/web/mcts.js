@@ -28,12 +28,15 @@ class MCTSPanel {
       label: labels[i] || `Action ${e.action}`,
     }));
 
-    // Sort by improved policy (descending), fallback to visits
+    // Sort: visited first, then by visits descending, then by improved policy
     edges.sort((a, b) => {
+      const av = a.visits > 0 ? 1 : 0;
+      const bv = b.visits > 0 ? 1 : 0;
+      if (av !== bv) return bv - av;
+      if (a.visits !== b.visits) return b.visits - a.visits;
       const ap = a.improved_policy ?? 0;
       const bp = b.improved_policy ?? 0;
-      if (ap !== bp) return bp - ap;
-      return b.visits - a.visits;
+      return bp - ap;
     });
 
     // Check if the edge set changed (different actions or count).
