@@ -138,7 +138,7 @@ fn main() {
                 .arg(
                     Arg::new("gumbel-m")
                         .long("gumbel-m")
-                        .default_value("4")
+                        .default_value("6")
                         .help("Gumbel-Top-k sampled actions at root"),
                 ),
         )
