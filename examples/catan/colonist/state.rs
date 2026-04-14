@@ -482,13 +482,15 @@ fn derive_canonical_state(state: &mut GameState) {
         state.min_step = state.min_step.max(3);
     }
 
-    // City built this turn on a pre-existing settlement → past step 4
-    // (Cities on same-turn settlements are always allowed at step 7,
-    // but pre-existing cities advance min_step.)
+    // City built this turn on a pre-existing settlement → step 4.
+    // Match self-play: min_step.max(4), min_city_node = highest city node + 1.
     let cities = state.boards[state.current_player].cities;
     let pre_existing_cities = cities & state.settlements_at_turn_start;
     if pre_existing_cities != 0 {
-        state.min_step = state.min_step.max(5);
+        state.min_step = state.min_step.max(4);
+        // Set min_city_node past the highest pre-existing city built this turn.
+        let highest = 63 - pre_existing_cities.leading_zeros() as u8;
+        state.min_city_node = highest + 1;
     }
 
     // Roads built this turn → past step 5
