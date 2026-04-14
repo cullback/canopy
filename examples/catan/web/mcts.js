@@ -14,7 +14,7 @@ class MCTSPanel {
   // Update the analysis panel with a search snapshot.
   // Reuses existing DOM rows when the edge set hasn't changed to keep
   // click handlers stable during live search updates.
-  updateSnapshot(snapshot, labels) {
+  updateSnapshot(snapshot, labels, currentPlayer = 0) {
     const pvDepth = snapshot.pv_depth ?? 0;
     this.simsEl.textContent = `${snapshot.total_simulations} sims · depth ${pvDepth}`;
     const [w, d, l] = snapshot.root_wdl;
@@ -29,14 +29,15 @@ class MCTSPanel {
       label: labels[i] || `Action ${e.action}`,
     }));
 
-    // Sort: visited first by Q descending, then unvisited by policy
+    // Sort: visited first by Q descending (flipped for P2), then unvisited by policy
+    const qSign = currentPlayer === 0 ? 1 : -1;
     edges.sort((a, b) => {
       const av = a.visits > 0 ? 1 : 0;
       const bv = b.visits > 0 ? 1 : 0;
       if (av !== bv) return bv - av;
       if (av && bv) {
-        const aq = a.q ?? 0;
-        const bq = b.q ?? 0;
+        const aq = (a.q ?? 0) * qSign;
+        const bq = (b.q ?? 0) * qSign;
         if (aq !== bq) return bq - aq;
         return b.visits - a.visits;
       }

@@ -143,7 +143,7 @@ function updateSearchHighlights(snapshot, labels) {
 }
 
 session.on('Snapshot', (msg) => {
-  mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
+  mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
   updateSearchHighlights(msg.snapshot, msg.action_labels);
   controls.onSimsDone(msg.snapshot);
 });
@@ -153,14 +153,14 @@ session.on('Subtree', (msg) => {
 });
 
 session.on('SearchProgress', (msg) => {
-  mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels);
+  mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels, currentState?.current_player ?? 0);
   mctsPanel.showProgress(msg.snapshot.total_simulations, msg.sims_total);
   updateSearchHighlights(msg.snapshot, msg.action_labels);
 });
 
 session.on('BotAction', (msg) => {
   if (msg.snapshot) {
-    mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || []);
+    mctsPanel.updateSnapshot(msg.snapshot, msg.action_labels || [], currentState?.current_player ?? 0);
     updateSearchHighlights(msg.snapshot, msg.action_labels || []);
   }
   controls.onBotDone();
