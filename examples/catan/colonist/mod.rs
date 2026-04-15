@@ -763,7 +763,7 @@ impl ColonistPollState {
 }
 
 /// Poll interval for checking colonist.io state changes.
-const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(2);
+const POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(1);
 
 /// Sims per search batch — controls how many sims run before checking
 /// WebSocket messages. Small enough that the loop stays responsive.
@@ -924,18 +924,9 @@ async fn handle_colonist_socket(
         // --- Run search batch (interleaved with WebSocket reads) ---
         if sims_budget > 0 && session.can_search() {
             let before = session.root_visits();
-            // Set the full budget on the first batch so Gumbel plans its
-            // halving schedule correctly. On subsequent batches the Gumbel
-            // state persists (not reset by cancel_search), so BATCH_SIZE
-            // just controls how many ticks before we yield for UI/polling.
             // Include existing visits so the search deepens one continuous
             // search instead of starting independent short ones.
             session.set_num_simulations(before + sims_budget);
-            eprintln!(
-                "search: starting new search, before={before} budget={sims_budget} \
-                 total={}",
-                before + sims_budget,
-            );
             let mut ticks = 0u32;
             loop {
                 if session.search_tick().is_some() {

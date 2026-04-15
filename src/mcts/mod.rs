@@ -191,7 +191,7 @@ impl<G: Game> Search<G> {
     ///
     /// Safe to call even when no search is active (no-op).
     pub fn cancel_search(&mut self) {
-        self.sims_done = self.config.num_simulations;
+        self.sims_done = 0;
     }
 
     /// Update the simulation budget (takes effect on the next search).
@@ -566,7 +566,6 @@ impl<G: Game> Search<G> {
                             current,
                             sign,
                             &self.config,
-                            self.q_bounds,
                             &self.bufs.legal_edges,
                             noise,
                         )
@@ -670,7 +669,6 @@ fn puct_select(
     node_id: NodeId,
     sign: f32,
     config: &Config,
-    q_bounds: (f32, f32),
     legal_edges: &[usize],
     noise: Option<&[f32]>,
 ) -> usize {
@@ -691,9 +689,10 @@ fn puct_select(
         };
 
         let cq = completed_q(tree, edge, vmix_val);
-        let q_norm = normalize_q(cq, q_bounds.0, q_bounds.1, sign);
+        // Q from current player's perspective (flip for minimizer)
+        let q = cq * sign;
         let exploration = config.c_puct * prior * sqrt_total / (1.0 + edge.visits as f32);
-        let score = q_norm + exploration;
+        let score = q + exploration;
 
         if score > best_score {
             best_score = score;

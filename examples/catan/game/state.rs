@@ -372,10 +372,13 @@ impl GameState {
             for t in 0..5 {
                 let cards = self.players[pid].dev_cards.0[t] as u16;
                 let played = self.players[pid].dev_cards_played.0[t] as u16;
-                // Saturating: during SO-ISMCTS sims, played counts can exceed
-                // the original deck because interior tree nodes may replay dev
-                // card actions from a different determinization.
-                pool[t] = pool[t].saturating_sub((cards + played).min(255) as u8);
+                let used = (cards + played) as u8;
+                assert!(
+                    pool[t] >= used,
+                    "dev pool underflow: kind={t} pool={} cards={cards} played={played}",
+                    pool[t],
+                );
+                pool[t] -= used;
             }
         }
         pool

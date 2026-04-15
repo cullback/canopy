@@ -21,7 +21,7 @@ use crate::game_log::GameLog;
 use crate::mcts::Config;
 
 /// Send a progress snapshot every N simulations.
-const PROGRESS_INTERVAL: u32 = 10;
+const PROGRESS_INTERVAL: u32 = 100;
 
 /// Launch the web analysis board server.
 ///
@@ -184,6 +184,8 @@ async fn handle_socket<G: Game + 'static>(
     mut socket: WebSocket,
     session: Arc<Mutex<GameSession<G>>>,
 ) {
+    let mut auto_search: Option<u32> = None;
+
     // Send initial state.
     {
         let mut session = session.lock().await;
@@ -216,6 +218,11 @@ async fn handle_socket<G: Game + 'static>(
             }
         };
 
+        // Track auto-search state at the connection level.
+        if let ClientMsg::SetAutoSearch { enabled, target } = &client_msg {
+            auto_search = if *enabled { Some(*target) } else { None };
+        }
+
         let mut session = session.lock().await;
         let responses = match &client_msg {
             ClientMsg::BotMove { .. } | ClientMsg::RunSims { .. } => {
@@ -227,9 +234,33 @@ async fn handle_socket<G: Game + 'static>(
             _ => session.handle(client_msg),
         };
 
+        // Check if any response is a state update that should trigger auto-search.
+        let has_state_update = responses
+            .iter()
+            .any(|m| matches!(m, ServerMsg::GameState { .. }));
+
         for msg in responses {
             if send_msg(&mut socket, &msg).await.is_err() {
                 return;
+            }
+        }
+
+        // Auto-search: trigger RunSims after state changes (e.g. PlayAction, BotMove).
+        if has_state_update {
+            if let Some(target) = auto_search {
+                if session.can_search() {
+                    let auto_msg = ClientMsg::RunSims { count: target };
+                    match run_search(&mut socket, &mut session, &auto_msg).await {
+                        Ok(msgs) => {
+                            for msg in msgs {
+                                if send_msg(&mut socket, &msg).await.is_err() {
+                                    return;
+                                }
+                            }
+                        }
+                        Err(()) => return,
+                    }
+                }
             }
         }
     }

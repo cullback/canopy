@@ -133,12 +133,8 @@ function updateSearchHighlights(snapshot, labels) {
     ...e,
     label: labels[i] || `Action ${e.action}`,
   }));
-  edges.sort((a, b) => {
-    const ap = a.improved_policy ?? 0;
-    const bp = b.improved_policy ?? 0;
-    if (ap !== bp) return bp - ap;
-    return b.visits - a.visits;
-  });
+  // Sort by visits descending (matches MCTS panel order).
+  edges.sort((a, b) => b.visits - a.visits);
   board.showSearchHighlights(edges, currentBoard);
 }
 

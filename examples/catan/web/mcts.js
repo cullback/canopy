@@ -29,17 +29,18 @@ class MCTSPanel {
       label: labels[i] || `Action ${e.action}`,
     }));
 
-    // Sort: visited first by Q descending (flipped for P2), then unvisited by policy
+    // Sort: visited first by visits descending, then Q as tiebreaker (flipped for P2),
+    // then unvisited by policy
     const qSign = currentPlayer === 0 ? 1 : -1;
     edges.sort((a, b) => {
       const av = a.visits > 0 ? 1 : 0;
       const bv = b.visits > 0 ? 1 : 0;
       if (av !== bv) return bv - av;
       if (av && bv) {
+        if (a.visits !== b.visits) return b.visits - a.visits;
         const aq = (a.q ?? 0) * qSign;
         const bq = (b.q ?? 0) * qSign;
-        if (aq !== bq) return bq - aq;
-        return b.visits - a.visits;
+        return bq - aq;
       }
       const ap = a.improved_policy ?? 0;
       const bp = b.improved_policy ?? 0;

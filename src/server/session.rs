@@ -991,9 +991,16 @@ fn label_subtree_walk<G: Game + Clone>(
     }
     let is_chance = node.kind == "chance";
     // Advance state through this node's action for children.
+    // The tree may contain edges from determinized simulations whose
+    // actions are invalid in the actual root state. Catch panics so
+    // stale subtrees degrade gracefully (unlabeled) instead of crashing.
     let next = if let Some(action) = node.action {
         let mut s = state;
-        s.apply_action(action);
+        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.apply_action(action)))
+            .is_err()
+        {
+            return; // stop labeling this branch
+        }
         s
     } else {
         state
