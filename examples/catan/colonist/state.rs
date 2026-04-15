@@ -789,28 +789,54 @@ fn try_replay(
                     vec![]
                 };
 
+                // Use StartingResources to constrain which DOM position goes here.
+                // The 2nd settlement of each player grants starting resources;
+                // the 1st does not. For the 2nd placement (setup_after 3 or 4),
+                // match the candidate's resources against the expected grant.
+                // For the 1st placement (setup_after 1 or 2), exclude candidates
+                // whose resources match the 2nd settlement's grant (negative filter).
                 let setup_after = state.setup_count + 1;
-                if setup_after == 3 || setup_after == 4 {
-                    let starting = events[i + 1..].iter().find_map(|e| match e {
-                        GameEvent::StartingResources {
-                            player: p,
-                            resources,
-                        } if *p == *player => Some(*resources),
-                        _ => None,
-                    });
-                    if let Some(expected) = starting {
-                        candidates.retain(|&aid| {
-                            let nid = NodeId(aid as u8);
-                            let node = &state.topology.nodes[nid.0 as usize];
-                            let mut would_give = ResourceArray::default();
-                            for &tid in &node.adjacent_tiles {
-                                let tile = &state.topology.tiles[tid.0 as usize];
-                                if let Some(resource) = tile.terrain.resource() {
-                                    would_give[resource] += 1;
-                                }
+                let starting = events[i + 1..].iter().find_map(|e| match e {
+                    GameEvent::StartingResources {
+                        player: p,
+                        resources,
+                    } if *p == *player => Some(*resources),
+                    _ => None,
+                });
+                if let Some(expected) = starting {
+                    let node_resources = |aid: usize| {
+                        let nid = NodeId(aid as u8);
+                        let node = &state.topology.nodes[nid.0 as usize];
+                        let mut r = ResourceArray::default();
+                        for &tid in &node.adjacent_tiles {
+                            let tile = &state.topology.tiles[tid.0 as usize];
+                            if let Some(resource) = tile.terrain.resource() {
+                                r[resource] += 1;
                             }
-                            would_give == expected
-                        });
+                        }
+                        r
+                    };
+                    if setup_after == 3 || setup_after == 4 {
+                        // Positive filter: must match starting resources
+                        candidates.retain(|&aid| node_resources(aid) == expected);
+                    } else {
+                        // Negative filter: must NOT match (this is the 1st settle,
+                        // the starting resources belong to the 2nd)
+                        candidates.retain(|&aid| node_resources(aid) != expected);
+                        if candidates.is_empty() {
+                            // All candidates give the same resources — can't
+                            // distinguish, keep them all
+                            legal_set(&state, &mut legal_buf);
+                            candidates = if let Some(pid) = pid {
+                                ctx.dom_settlements[pid]
+                                    .iter()
+                                    .map(|&nid| action::settlement_id(nid).0 as usize)
+                                    .filter(|aid| legal_buf.contains(aid))
+                                    .collect()
+                            } else {
+                                vec![]
+                            };
+                        }
                     }
                 }
 
@@ -1152,25 +1178,10 @@ fn try_replay(
                                 .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
                         });
                     }
-                    // If pre_filter_rolls had NO rolls at all (building event before
-                    // the first roll), scan past building events to find a
-                    // differentiating roll. Only use this fallback when pre_filter_rolls
-                    // returned empty — if it returned rolls that didn't narrow, those
-                    // rolls after a build event can't be reliably checked against
-                    // the pre-build state.
-                    if candidates.len() > 1 && check_rolls.is_empty() {
-                        let extended = extended_roll_gains(&events[i + 1..], ctx.color_map);
-                        if !extended.is_empty() {
-                            candidates.retain(|&aid| {
-                                let tile = TileId((aid - action::ROBBER_START as usize) as u8);
-                                let mut trial = state.clone();
-                                trial.robber = tile;
-                                extended.iter().all(|(roll, gains)| {
-                                    validate_distribution(&trial, *roll, gains)
-                                })
-                            });
-                        }
-                    }
+                    // NOTE: we previously had an "extended roll filter" here that
+                    // looked past building events to find differentiating rolls.
+                    // Removed because it validated rolls against the pre-build
+                    // state (wrong bank/board), producing false negatives.
                     // Only branch if roll constraints actually narrowed
                     // candidates (meaning the choice matters for future rolls).
                     // If all candidates pass the same rolls, they're equivalent.
@@ -1180,10 +1191,6 @@ fn try_replay(
                         backtrack(i, "robber: 0 candidates");
                         return None;
                     } else if candidates.len() == 1 {
-                        {
-                            let tid = (candidates[0] - action::ROBBER_START as usize) as u8;
-                            eprintln!("  robber e{i}: SINGLE → T{tid}");
-                        }
                         actions.push(candidates[0]);
                         state.apply_action(candidates[0]);
                     } else if !rolls_narrowed {
@@ -1794,52 +1801,6 @@ fn pre_filter_rolls(
 }
 
 /// Like `pre_filter_rolls` but doesn't stop at BuildSettlement/BuildCity.
-/// Scans past building events to find the next roll that can differentiate
-/// robber positions. The distribution check is approximate (doesn't account
-/// for buildings placed between the robber and the roll) but correctly
-/// identifies which tile is blocked for EXISTING buildings.
-fn extended_roll_gains(
-    events: &[GameEvent],
-    color_map: &[(u8, Player)],
-) -> Vec<(u8, [ResourceArray; 2])> {
-    let mut results = Vec::new();
-    let mut current_roll: Option<u8> = None;
-    let mut gains: [ResourceArray; 2] = Default::default();
-
-    for event in events {
-        match event {
-            GameEvent::MoveRobber { .. } | GameEvent::PlayedKnight { .. } => {
-                if let Some(roll) = current_roll.take() {
-                    results.push((roll, gains));
-                }
-                break;
-            }
-            GameEvent::Roll { d1, d2, .. } => {
-                if let Some(roll) = current_roll.take() {
-                    results.push((roll, gains));
-                    gains = Default::default();
-                }
-                let total = d1 + d2;
-                if total != 7 {
-                    current_roll = Some(total);
-                } else {
-                    current_roll = None;
-                }
-            }
-            GameEvent::GotResources { player, resources } if current_roll.is_some() => {
-                if let Some(pid) = player_of_color(color_map, *player) {
-                    gains[pid as usize].add(*resources);
-                }
-            }
-            _ => {}
-        }
-    }
-    if let Some(roll) = current_roll {
-        results.push((roll, gains));
-    }
-    results
-}
-
 /// Check if a roll would produce the expected resource gains with the given state.
 fn validate_distribution(state: &GameState, roll: u8, expected: &[ResourceArray; 2]) -> bool {
     use crate::game::resource::ALL_RESOURCES;
