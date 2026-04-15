@@ -654,18 +654,19 @@ fn replay_search(
     ctx.known_steal_indices = known_steal_indices;
     ctx.max_calls = 2_000_000;
 
-    // Diagnostic: dump dice_to_tiles mapping for roll 10
-    eprintln!("  dice_to_tiles[10]:");
-    for &tid in &state.topology.dice_to_tiles[10] {
-        let tile = &state.topology.tiles[tid.0 as usize];
-        let adj_mask = state.topology.adj.tile_nodes[tid.0 as usize];
-        let adj_nodes: Vec<u8> = (0..54).filter(|&n| adj_mask & (1u64 << n) != 0).collect();
-        eprintln!(
-            "    T{}: {:?} adj_nodes={:?}",
-            tid.0, tile.terrain, adj_nodes
-        );
+    // Diagnostic: dump dice_to_tiles mapping
+    for roll in [6, 10] {
+        eprintln!("  dice_to_tiles[{roll}]:");
+        for &tid in &state.topology.dice_to_tiles[roll] {
+            let tile = &state.topology.tiles[tid.0 as usize];
+            let adj_mask = state.topology.adj.tile_nodes[tid.0 as usize];
+            let adj_nodes: Vec<u8> = (0..54).filter(|&n| adj_mask & (1u64 << n) != 0).collect();
+            eprintln!(
+                "    T{}: {:?} adj_nodes={:?}",
+                tid.0, tile.terrain, adj_nodes
+            );
+        }
     }
-    // Also show which tiles N3 and N13 are adjacent to
     for &nid in &[3u8, 13] {
         let node = &state.topology.nodes[nid as usize];
         let tiles: Vec<_> = node
@@ -797,6 +798,14 @@ fn try_replay(
 
     let mut i = idx;
     while i < events.len() {
+        if i >= 4 && i <= 18 {
+            let t12_mask = state.topology.adj.tile_nodes[12];
+            let p2_s = (state.boards[Player::Two].settlements & t12_mask).count_ones();
+            eprintln!(
+                "  >> e{i} {:?} phase={:?} P2.T12={p2_s}",
+                events[i], state.phase,
+            );
+        }
         match &events[i] {
             GameEvent::PlaceSettlement { player }
                 if matches!(state.phase, Phase::PlaceSettlement) =>
@@ -865,6 +874,48 @@ fn try_replay(
                     }
                 }
 
+                // For the 3rd/4th setup settlement, use post-setup roll
+                // distributions to disambiguate candidates with identical
+                // starting resources. Only check the placing player's gains
+                // (the other player may not have all settlements yet).
+                // Don't apply for 1st/2nd: the board is too incomplete and
+                // the filter can't distinguish which of this player's two
+                // settlements contributes to each roll.
+                if candidates.len() > 1 && setup_after >= 3 {
+                    if let Some(pid) = pid {
+                        let pi = pid as usize;
+                        let setup_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
+                        if !setup_rolls.is_empty() {
+                            candidates.retain(|&aid| {
+                                let mut trial = state.clone();
+                                trial.apply_action(aid);
+                                setup_rolls.iter().all(|(roll, gains)| {
+                                    // Only check this player's gains
+                                    let mut trial_gains = [[0u8; 5]; 2];
+                                    let topo = &trial.topology;
+                                    for &tid in &topo.dice_to_tiles[*roll as usize] {
+                                        if tid == trial.robber {
+                                            continue;
+                                        }
+                                        let tile = &topo.tiles[tid.0 as usize];
+                                        let Some(resource) = tile.terrain.resource() else {
+                                            continue;
+                                        };
+                                        let ri = resource as usize;
+                                        let mask = topo.adj.tile_nodes[tid.0 as usize];
+                                        let s = (trial.boards[pid].settlements & mask).count_ones()
+                                            as u8;
+                                        let c =
+                                            (trial.boards[pid].cities & mask).count_ones() as u8;
+                                        trial_gains[pi][ri] += s + c * 2;
+                                    }
+                                    trial_gains[pi] == gains[pi].0
+                                })
+                            });
+                        }
+                    }
+                }
+
                 if candidates.len() == 1 {
                     actions.push(candidates[0]);
                     state.apply_action(candidates[0]);
@@ -895,8 +946,23 @@ fn try_replay(
                     }
                     log_branch(i, "setup settle", candidates.len());
                     for &aid in &candidates {
+                        if i <= 10 {
+                            eprintln!(
+                                "    trying e{i}: N{aid} for {:?} (current_player={:?}, setup_count={})",
+                                pid, state.current_player, state.setup_count,
+                            );
+                        }
                         let mut trial = state.clone();
                         trial.apply_action(aid);
+                        if i <= 10 {
+                            let t12_mask = trial.topology.adj.tile_nodes[12];
+                            let p2_s =
+                                (trial.boards[Player::Two].settlements & t12_mask).count_ones();
+                            eprintln!(
+                                "    after e{i} N{aid}: P2 on T12={p2_s} bits=0x{:x}",
+                                trial.boards[Player::Two].settlements
+                            );
+                        }
                         let mut trial_tl = timeline.clone();
                         trial_tl.push(TimelineEntry {
                             label: format!(
@@ -1037,7 +1103,7 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
-                                if i <= 12 {
+                                if i <= 20 {
                                     // Show which tiles this roll hits and who has buildings there
                                     let tiles = &state.topology.dice_to_tiles[total as usize];
                                     for &tid in tiles {
@@ -1175,8 +1241,21 @@ fn try_replay(
                         }
                     }
 
-                    let mut candidates = robber_actions;
+                    let mut candidates = robber_actions.clone();
                     let opp = state.current_player.opponent();
+                    if i == 16 {
+                        eprintln!(
+                            "  robber e16 debug: {} legal, steal={:?} opp_cards={} friendly={}",
+                            candidates.len(),
+                            events[i + 1..].iter().find_map(|e| match e {
+                                GameEvent::Stole { .. } => Some(true),
+                                GameEvent::StoleNothing { .. } => Some(false),
+                                _ => None,
+                            }),
+                            state.players[opp].hand.total(),
+                            state.players[opp].building_vps < crate::game::FRIENDLY_ROBBER_VP,
+                        );
+                    }
 
                     // Scan forward for TileBlocked to constrain which tile the
                     // robber is on. Stop at the NEXT MoveRobber (which changes
@@ -1221,6 +1300,17 @@ fn try_replay(
                             None => true,
                         }
                     });
+                    if i == 16 {
+                        eprintln!("  robber e16: after steal filter: {}", candidates.len());
+                        let cr = pre_filter_rolls(&events[i + 1..], ctx.color_map);
+                        eprintln!(
+                            "  robber e16: check_rolls: {:?}",
+                            cr.iter().map(|(r, _)| r).collect::<Vec<_>>()
+                        );
+                        for (roll, gains) in &cr {
+                            eprintln!("    roll {roll}: P1={:?} P2={:?}", gains[0].0, gains[1].0);
+                        }
+                    }
                     let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
                     let candidates_before_rolls = candidates.len();
                     if !check_rolls.is_empty() {
@@ -1228,10 +1318,53 @@ fn try_replay(
                             let tile = TileId((aid - action::ROBBER_START as usize) as u8);
                             let mut trial = state.clone();
                             trial.robber = tile;
-                            check_rolls
+                            let pass = check_rolls
                                 .iter()
-                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
+                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains));
+                            if i == 16 && !pass && tile.0 == 1 {
+                                for (roll, gains) in &check_rolls {
+                                    if !validate_distribution(&trial, *roll, gains) {
+                                        let topo = &trial.topology;
+                                        for &tid in &topo.dice_to_tiles[*roll as usize] {
+                                            if tid == trial.robber {
+                                                continue;
+                                            }
+                                            let t = &topo.tiles[tid.0 as usize];
+                                            let mask = topo.adj.tile_nodes[tid.0 as usize];
+                                            for (pi, &pid) in
+                                                [Player::One, Player::Two].iter().enumerate()
+                                            {
+                                                let s = (trial.boards[pid].settlements & mask)
+                                                    .count_ones();
+                                                let c =
+                                                    (trial.boards[pid].cities & mask).count_ones();
+                                                if s + c > 0 {
+                                                    eprintln!(
+                                                        "    T{} {:?}: P{}({s}s+{c}c)",
+                                                        tid.0,
+                                                        t.terrain,
+                                                        pi + 1
+                                                    );
+                                                }
+                                            }
+                                        }
+                                        eprintln!(
+                                            "    expected P1={:?} P2={:?}",
+                                            gains[0].0, gains[1].0
+                                        );
+                                        break;
+                                    }
+                                }
+                            }
+                            pass
                         });
+                    }
+                    if i == 16 {
+                        eprintln!(
+                            "  robber e16: after roll filter: {} (check_rolls={})",
+                            candidates.len(),
+                            check_rolls.len()
+                        );
                     }
                     // NOTE: we previously had an "extended roll filter" here that
                     // looked past building events to find differentiating rolls.
