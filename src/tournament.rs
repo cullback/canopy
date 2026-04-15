@@ -9,7 +9,7 @@ use tracing_indicatif::span_ext::IndicatifSpanExt;
 use crate::eval::{Evaluator, Evaluators};
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
-use crate::mcts::{Config, Search, SearchResult, Step};
+use crate::mcts::{Config, Search, SearchResult, Select};
 
 /// Parsed tournament settings.
 pub struct TournamentOptions {
@@ -69,17 +69,18 @@ fn run_to_completion<G: Game, E: Evaluator<G> + ?Sized>(
     rng: &mut fastrand::Rng,
     counters: &TournamentCounters,
 ) -> SearchResult {
-    let mut evals = vec![];
     loop {
-        match search.step(&evals, rng) {
-            Step::NeedsEval(states) => {
-                counters
-                    .evals
-                    .fetch_add(states.len() as u64, Ordering::Relaxed);
-                let refs: Vec<&G> = states.iter().collect();
-                evals = evaluator.evaluate_batch(&refs, rng);
+        match search.select(rng) {
+            Select::Eval(leaf, ref state) => {
+                counters.evals.fetch_add(1, Ordering::Relaxed);
+                let eval = evaluator.evaluate(state, rng);
+                search.backup(leaf, eval);
             }
-            Step::Done(result) => {
+            Select::Terminal(leaf, wdl) => {
+                search.backup_terminal(leaf, wdl);
+            }
+            Select::Done => {
+                let result = search.result();
                 counters
                     .depth_sum
                     .fetch_add(result.pv_depth as u64, Ordering::Relaxed);
@@ -140,21 +141,20 @@ pub fn play_match<G: Game>(
 
     loop {
         // Get state info without holding a borrow across the mutable section.
-        let (status, chance, sign) = {
+        let (status, chance) = {
             let state = searches[ref_idx].as_ref().unwrap().state();
             let status = state.status();
-            let chance = if matches!(status, Status::Ongoing) {
+            let chance = if matches!(status, Status::Chance) {
                 state.sample_chance(rng)
             } else {
                 None
             };
-            let sign = state.current_sign();
-            (status, chance, sign)
+            (status, chance)
         };
 
         match status {
             Status::Terminal(reward) => return (reward, actions),
-            Status::Ongoing => {}
+            Status::Decision(_) | Status::Chance => {}
         };
 
         // Action cap: declare a draw once the game exceeds max_actions.
@@ -167,7 +167,7 @@ pub fn play_match<G: Game>(
             for search in searches.iter_mut().flatten() {
                 search.apply_action(action);
             }
-        } else {
+        } else if let Status::Decision(sign) = status {
             // sign-to-index: 1.0 → 0, -1.0 → 1
             let idx = ((1.0 - sign) / 2.0) as usize;
             let seat = idx ^ (swap as usize);
@@ -387,7 +387,7 @@ impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
         states: &[&G],
         _rng: &mut fastrand::Rng,
     ) -> Vec<crate::eval::Evaluation> {
-        use crate::eval::{Evaluation, flip_wdl};
+        use crate::eval::{Evaluation, Wdl};
         use crate::train::inference::{InferRequest, InferResponse};
 
         let feature_size = self.encoder.feature_size();
@@ -402,8 +402,11 @@ impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
                 Status::Terminal(reward) => {
                     results[i] = Some(Evaluation::uniform(num_actions, reward));
                 }
-                Status::Ongoing => {
-                    signs.push(state.current_sign());
+                Status::Chance => {
+                    results[i] = Some(Evaluation::uniform(num_actions, 0.0));
+                }
+                Status::Decision(sign) => {
+                    signs.push(sign);
                     nn_indices.push(i);
                 }
             }
@@ -413,7 +416,7 @@ impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
             return results.into_iter().map(|r| r.unwrap()).collect();
         }
 
-        // Encode ongoing states
+        // Encode decision states
         let n = nn_indices.len();
         let mut flat_features = Vec::with_capacity(n * feature_size);
         let mut buf = Vec::with_capacity(feature_size);
@@ -442,11 +445,15 @@ impl<G: Game> Evaluator<G> for BatchedEvaluator<G> {
             let wdl_start = j * 3;
             let wdl_raw = &resp.flat_wdl[wdl_start..wdl_start + 3];
             // Sign-flip for P1 perspective (swap W/L when sign < 0)
-            let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
+            let wdl_cp = Wdl {
+                w: wdl_raw[0],
+                d: wdl_raw[1],
+                l: wdl_raw[2],
+            };
             let wdl = if signs[j] > 0.0 {
                 wdl_cp
             } else {
-                flip_wdl(wdl_cp)
+                wdl_cp.flip()
             };
             results[i] = Some(Evaluation {
                 policy_logits: logits,

@@ -1,62 +1,50 @@
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Status {
-    Ongoing,
-    /// Reward from P1's perspective. P2's reward is `-reward` (zero-sum).
+    /// Decision node: the given player acts. `+1.0` = maximizer, `-1.0` = minimizer.
+    Decision(f32),
+    /// Chance node: the environment acts.
+    Chance,
+    /// Game over. Reward from P1's perspective; P2's reward is `-reward` (zero-sum).
     Terminal(f32),
 }
 
 /// Core trait: every game implements this.
-///
-/// Actions are `usize` in `[0, NUM_ACTIONS)`.
 pub trait Game: Clone + Send + Sync {
-    // ── Core (required) ───────────────────────────────────────────
-
-    /// Total number of distinct actions. Actions map to indices in `[0, NUM_ACTIONS)`.
+    /// Total number of distinct actions in `[0, NUM_ACTIONS)`.
     const NUM_ACTIONS: usize;
 
+    /// Current node type and acting player.
     fn status(&self) -> Status;
+
+    /// Append legal actions to `buf`. Only meaningful for decision nodes.
     fn legal_actions(&self, buf: &mut Vec<usize>);
+
+    /// Apply an action (player decision or chance outcome).
     fn apply_action(&mut self, action: usize);
 
-    /// Sign of the current player: `1.0` for the maximizing player, `-1.0`
-    /// for the minimizing player. Single-player games can leave the default.
-    fn current_sign(&self) -> f32 {
-        1.0
-    }
-
-    // ── Transposition ─────────────────────────────────────────────
-
-    /// Transposition key. Returns `None` (no transpositions) by default.
+    /// Transposition key. `None` disables transposition detection (default).
     fn state_key(&self) -> Option<u64> {
         None
     }
 
-    // ── Stochastic ────────────────────────────────────────────────
-
-    /// Fills `buf` with `(outcome, weight)` pairs (unnormalized integer weights).
-    /// An empty buffer means this is a decision node; non-empty means chance node.
-    /// Outcomes are passed back to `apply_action` — the game knows it's in a chance
-    /// state and interprets the `usize` accordingly.
-    ///
-    /// Used by MCTS to enumerate all chance branches. For sampling a single
-    /// outcome, use [`sample_chance`](Game::sample_chance) instead.
+    /// Enumerate chance outcomes as `(outcome, weight)` pairs.
+    /// Outcomes are passed back to `apply_action`.
     fn chance_outcomes(&self, _buf: &mut Vec<(usize, u32)>) {}
 
-    /// Sample a single chance outcome. Returns `None` for decision/terminal nodes.
-    ///
-    /// The default delegates to [`chance_outcomes`](Game::chance_outcomes).
-    /// Stochastic games should override this to avoid the intermediate `Vec`.
+    /// Sample a single chance outcome. Returns `None` for non-chance nodes.
+    /// Override to avoid the intermediate `Vec` from `chance_outcomes`.
     fn sample_chance(&self, rng: &mut fastrand::Rng) -> Option<usize> {
         let mut buf = Vec::new();
         self.chance_outcomes(&mut buf);
         crate::utils::sample_weighted(&buf, rng)
     }
 
-    /// Resample hidden information before an MCTS rollout.
+    /// Resample hidden information before an MCTS simulation.
     ///
-    /// Called once per simulation after cloning the root state.
-    /// Games with hidden state (e.g. unobserved opponent cards) override this
-    /// to sample concrete assignments from the unknown pool.
-    /// Default is a no-op.
-    fn determinize(&mut self, _rng: &mut fastrand::Rng) {}
+    /// Called once per simulation on a clone of the root state. Returns
+    /// `true` if resampling occurred — search then filters tree edges
+    /// against `legal_actions()` during descent (SO-ISMCTS).
+    fn determinize(&mut self, _rng: &mut fastrand::Rng) -> bool {
+        false
+    }
 }

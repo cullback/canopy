@@ -25,20 +25,25 @@ impl Game for PigGame {
         match self.winner() {
             Some(Player::One) => Status::Terminal(1.0),
             Some(Player::Two) => Status::Terminal(-1.0),
-            None => Status::Ongoing,
-        }
-    }
-
-    fn current_sign(&self) -> f32 {
-        match self.current_player() {
-            Player::One => 1.0,
-            Player::Two => -1.0,
+            None => {
+                if self.is_rolling() {
+                    Status::Chance
+                } else {
+                    let sign = match self.current_player() {
+                        Player::One => 1.0,
+                        Player::Two => -1.0,
+                    };
+                    Status::Decision(sign)
+                }
+            }
         }
     }
 
     fn legal_actions(&self, buf: &mut Vec<usize>) {
-        buf.push(game::ROLL);
-        buf.push(game::HOLD);
+        if !self.is_rolling() {
+            buf.push(game::ROLL);
+            buf.push(game::HOLD);
+        }
     }
 
     fn apply_action(&mut self, action: usize) {

@@ -152,10 +152,9 @@ pub async fn run_search<G: Game + 'static>(
     match session.begin_search(msg) {
         Err(msgs) => Ok(msgs),
         Ok(sims_total) => {
-            let mut evals = vec![];
             let mut last_progress = 0;
             let result = loop {
-                if let Some(result) = session.search_tick(&mut evals) {
+                if let Some(result) = session.search_tick() {
                     break result;
                 }
                 if let Some((snap, labels)) = session.snapshot_with_labels() {

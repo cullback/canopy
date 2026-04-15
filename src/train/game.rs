@@ -7,9 +7,9 @@
 
 use std::future::Future;
 
-use crate::eval::{Evaluation, flip_wdl};
+use crate::eval::{Evaluation, Wdl};
 use crate::game::{Game, Status};
-use crate::mcts::{Search, SearchResult, Step};
+use crate::mcts::{Search, SearchResult, Select};
 use crate::nn::StateEncoder;
 
 use super::Sample;
@@ -44,39 +44,32 @@ where
     F: Fn(Vec<f32>, usize) -> Fut,
     Fut: Future<Output = (Vec<f32>, Vec<f32>)>,
 {
-    let feature_size = encoder.feature_size();
-    let mut evals: Vec<Evaluation> = vec![];
+    let num_actions = G::NUM_ACTIONS;
     loop {
-        match search.step(&evals, rng) {
-            Step::NeedsEval(states) => {
-                let batch_size = states.len();
-                let mut signs = Vec::with_capacity(batch_size);
-                let mut flat_features = Vec::with_capacity(batch_size * feature_size);
-                for pending_state in states {
-                    let sign = match pending_state.status() {
-                        Status::Ongoing => pending_state.current_sign(),
-                        Status::Terminal(_) => 1.0,
-                    };
-                    signs.push(sign);
-                    encode_buf.clear();
-                    encoder.encode(pending_state, encode_buf);
-                    flat_features.extend_from_slice(encode_buf);
-                }
-                let (flat_logits, flat_wdl) = infer(flat_features, batch_size).await;
-                evals.clear();
-                let num_actions = G::NUM_ACTIONS;
-                for (i, &sign) in signs.iter().enumerate() {
-                    let logits_start = i * num_actions;
-                    let policy_logits =
-                        flat_logits[logits_start..logits_start + num_actions].to_vec();
-                    let wdl_start = i * 3;
-                    let wdl_raw = &flat_wdl[wdl_start..wdl_start + 3];
-                    let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
-                    let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
-                    evals.push(Evaluation { policy_logits, wdl });
-                }
+        match search.select(rng) {
+            Select::Eval(leaf, ref state) => {
+                let sign = match state.status() {
+                    Status::Decision(s) => s,
+                    Status::Chance => 1.0,
+                    Status::Terminal(_) => 1.0,
+                };
+                encode_buf.clear();
+                encoder.encode(state, encode_buf);
+                let flat_features = encode_buf.clone();
+                let (flat_logits, flat_wdl) = infer(flat_features, 1).await;
+                let policy_logits = flat_logits[..num_actions].to_vec();
+                let wdl_cp = Wdl {
+                    w: flat_wdl[0],
+                    d: flat_wdl[1],
+                    l: flat_wdl[2],
+                };
+                let wdl = if sign > 0.0 { wdl_cp } else { wdl_cp.flip() };
+                search.backup(leaf, Evaluation { policy_logits, wdl });
             }
-            Step::Done(result) => return result,
+            Select::Terminal(leaf, wdl) => {
+                search.backup_terminal(leaf, wdl);
+            }
+            Select::Done => return search.result(),
         }
     }
 }
@@ -93,12 +86,10 @@ fn make_sample(
     let q_wdl = if sign > 0.0 {
         result.wdl
     } else {
-        flip_wdl(result.wdl)
+        result.wdl.flip()
     };
-    debug_assert!(q_wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
-    debug_assert!((q_wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
 
-    let root_v = result.wdl[0] - result.wdl[2];
+    let root_v = result.wdl.q();
     let value_correction = (root_v - result.network_value).abs();
     let q_std = if result.children_q.len() >= 2 {
         let mean =
@@ -225,7 +216,10 @@ where
             };
         }
 
-        let sign = search.state().current_sign();
+        let sign = match search.state().status() {
+            Status::Decision(s) => s,
+            _ => 1.0,
+        };
 
         // Playout cap randomization
         let is_full_search = rng.f32() < actor_config.playout_cap_full_prob;
@@ -282,7 +276,7 @@ fn compute_short_term_values(samples: &mut [Sample], horizons: &[u32]) {
         let mut ema_p1 = 0.0f32;
         for i in (0..samples.len()).rev() {
             // Convert Q to P1 perspective: q_cp * sign (z is the player sign)
-            let q_cp = samples[i].q_wdl[0] - samples[i].q_wdl[2];
+            let q_cp = samples[i].q_wdl.q();
             let q_p1 = q_cp * samples[i].z;
             ema_p1 = alpha * q_p1 + (1.0 - alpha) * ema_p1;
             // Store in current-player perspective

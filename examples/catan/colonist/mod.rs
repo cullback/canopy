@@ -928,22 +928,17 @@ async fn handle_colonist_socket(
             // halving schedule correctly. On subsequent batches the Gumbel
             // state persists (not reset by cancel_search), so BATCH_SIZE
             // just controls how many ticks before we yield for UI/polling.
-            if !session.is_searching() {
-                // Include existing visits so Gumbel plans sequential
-                // halving over the full search depth, not just the new
-                // budget. This way "Run Sims" deepens one continuous
-                // search instead of starting independent short ones.
-                session.set_num_simulations(before + sims_budget);
-                eprintln!(
-                    "search: starting new search, before={before} budget={sims_budget} \
-                     total={}",
-                    before + sims_budget,
-                );
-            }
-            let mut evals = vec![];
+            // Include existing visits so the search deepens one continuous
+            // search instead of starting independent short ones.
+            session.set_num_simulations(before + sims_budget);
+            eprintln!(
+                "search: starting new search, before={before} budget={sims_budget} \
+                 total={}",
+                before + sims_budget,
+            );
             let mut ticks = 0u32;
             loop {
-                if session.search_tick(&mut evals).is_some() {
+                if session.search_tick().is_some() {
                     break;
                 }
                 ticks += 1;
@@ -1007,8 +1002,6 @@ pub fn run_serve(
     serve_port: u16,
     evaluator: Arc<dyn canopy::eval::Evaluator<crate::game::state::GameState> + Sync>,
     eval_name: &str,
-    leaf_batch_size: u32,
-    gumbel_m: u32,
 ) {
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
 
@@ -1073,12 +1066,7 @@ pub fn run_serve(
     let dice = Dice::Balanced(BalancedDice::new());
     let presenter =
         Arc::new(CatanPresenter::new(static_dir.clone(), dice).with_player_names(names));
-    let mcts_config = canopy::mcts::Config {
-        filter_legal: true,
-        leaf_batch_size,
-        num_sampled_actions: gumbel_m,
-        ..canopy::mcts::Config::default()
-    };
+    let mcts_config = canopy::mcts::Config::default();
     let mut session = canopy::server::GameSession::with_state(
         timeline_pairs[0].1.clone(),
         evaluator,

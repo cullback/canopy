@@ -1,4 +1,4 @@
-use canopy::eval::{Evaluation, Evaluator, wdl_from_scalar};
+use canopy::eval::{Evaluation, Evaluator, Wdl};
 
 use crate::game::{self, PigGame};
 
@@ -12,7 +12,7 @@ impl Evaluator<PigGame> for HoldAt {
         logits[if hold { game::HOLD } else { game::ROLL }] = 10.0;
         Evaluation {
             policy_logits: logits,
-            wdl: wdl_from_scalar(0.0),
+            wdl: Wdl::DRAW,
         }
     }
 }
@@ -41,7 +41,7 @@ impl Evaluator<PigGame> for EndRaceKeepPace {
         logits[if hold { game::HOLD } else { game::ROLL }] = 10.0;
         Evaluation {
             policy_logits: logits,
-            wdl: wdl_from_scalar(0.0),
+            wdl: Wdl::DRAW,
         }
     }
 }

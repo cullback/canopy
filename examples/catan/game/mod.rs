@@ -54,12 +54,9 @@ impl Game for GameState {
     fn status(&self) -> Status {
         match &self.phase {
             Phase::GameOver(p) => Status::Terminal(p.sign()),
-            _ => Status::Ongoing,
+            Phase::Roll | Phase::StealResolve | Phase::DevCardDraw => Status::Chance,
+            _ => Status::Decision(self.current_player.sign()),
         }
-    }
-
-    fn current_sign(&self) -> f32 {
-        self.current_player.sign()
     }
 
     fn legal_actions(&self, buf: &mut Vec<usize>) {
@@ -202,7 +199,7 @@ impl Game for GameState {
         }
     }
 
-    fn determinize(&mut self, rng: &mut fastrand::Rng) {
+    fn determinize(&mut self, rng: &mut fastrand::Rng) -> bool {
         // Hide the opponent's dev cards: move their known cards into the
         // hidden pool so the searching player (current_player) cannot see
         // them. In colonist mode opponent cards are already hidden, so
@@ -271,6 +268,7 @@ impl Game for GameState {
             self.players[pid].hidden_dev_cards = 0;
             self.players[pid].hidden_dev_cards_bought_this_turn = 0;
         }
+        true
     }
 }
 

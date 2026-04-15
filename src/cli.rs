@@ -14,18 +14,15 @@ fn prefixed_args(prefix: &str) -> Vec<Arg> {
         Arg::new(format!("{prefix}-sims"))
             .long(format!("{prefix}-sims"))
             .default_value(d.num_simulations.to_string()),
-        Arg::new(format!("{prefix}-gumbel-m"))
-            .long(format!("{prefix}-gumbel-m"))
-            .default_value(d.num_sampled_actions.to_string()),
+        Arg::new(format!("{prefix}-c-puct"))
+            .long(format!("{prefix}-c-puct"))
+            .default_value(d.c_puct.to_string()),
         Arg::new(format!("{prefix}-c-visit"))
             .long(format!("{prefix}-c-visit"))
             .default_value(d.c_visit.to_string()),
         Arg::new(format!("{prefix}-c-scale"))
             .long(format!("{prefix}-c-scale"))
             .default_value(d.c_scale.to_string()),
-        Arg::new(format!("{prefix}-leaf-batch"))
-            .long(format!("{prefix}-leaf-batch"))
-            .default_value("8"),
     ]
 }
 
@@ -36,11 +33,9 @@ fn parse_one(matches: &ArgMatches, prefix: &str) -> Config {
     };
     Config {
         num_simulations: get("sims").parse().unwrap(),
-        num_sampled_actions: get("gumbel-m").parse().unwrap(),
+        c_puct: get("c-puct").parse().unwrap(),
         c_visit: get("c-visit").parse().unwrap(),
         c_scale: get("c-scale").parse().unwrap(),
-        leaf_batch_size: get("leaf-batch").parse().unwrap(),
-        filter_legal: true,
         ..Default::default()
     }
 }
@@ -259,12 +254,6 @@ pub fn train_command() -> Command {
                 .help("Save model checkpoint every N iterations (last iteration always saved)"),
         )
         .arg(
-            Arg::new("gumbel-m")
-                .long("gumbel-m")
-                .default_value(d.gumbel_m.to_string())
-                .help("Gumbel-Top-k sampled actions at root"),
-        )
-        .arg(
             Arg::new("c-visit")
                 .long("c-visit")
                 .default_value(d.c_visit.to_string()),
@@ -273,12 +262,6 @@ pub fn train_command() -> Command {
             Arg::new("c-scale")
                 .long("c-scale")
                 .default_value(d.c_scale.to_string()),
-        )
-        .arg(
-            Arg::new("leaf-batch-size")
-                .long("leaf-batch-size")
-                .default_value(d.leaf_batch_size.to_string())
-                .help("Leaves to collect per MCTS batch before requesting evaluation"),
         )
         .arg(
             Arg::new("max-actions")
@@ -760,17 +743,11 @@ pub fn parse_train_config(
     if set("checkpoint-interval") {
         config.checkpoint_interval = val("checkpoint-interval").parse().unwrap();
     }
-    if set("gumbel-m") {
-        config.gumbel_m = val("gumbel-m").parse().unwrap();
-    }
     if set("c-visit") {
         config.c_visit = val("c-visit").parse().unwrap();
     }
     if set("c-scale") {
         config.c_scale = val("c-scale").parse().unwrap();
-    }
-    if set("leaf-batch-size") {
-        config.leaf_batch_size = val("leaf-batch-size").parse().unwrap();
     }
     if set("max-actions") {
         config.max_actions = val("max-actions").parse().unwrap();

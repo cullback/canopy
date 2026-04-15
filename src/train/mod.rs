@@ -43,7 +43,7 @@ pub struct Sample {
     /// then is multiplied by the terminal reward once the game ends.
     pub z: f32,
     /// Root WDL from current player's perspective (search-refined).
-    pub q_wdl: [f32; 3],
+    pub q_wdl: crate::eval::Wdl,
     /// Whether this position used full search (for playout cap randomization)
     pub full_search: bool,
     /// Action index when this sample was generated (0-indexed).
@@ -208,11 +208,8 @@ pub fn run_training<G>(
 
     let mcts_config = crate::mcts::Config {
         num_simulations: config.mcts_sims,
-        num_sampled_actions: config.gumbel_m,
         c_visit: config.c_visit,
         c_scale: config.c_scale,
-        leaf_batch_size: config.leaf_batch_size,
-        filter_legal: config.filter_legal,
         ..Default::default()
     };
 

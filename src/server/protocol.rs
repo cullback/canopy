@@ -1,7 +1,39 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-use crate::mcts::{SearchSnapshot, TreeNodeSnapshot};
+// ── Snapshot types (wire format for the JS frontend) ────────────────
+
+/// Root-level search snapshot sent to the frontend.
+#[derive(Debug, Serialize)]
+pub struct SearchSnapshot {
+    pub total_simulations: u32,
+    pub pv_depth: u32,
+    pub root_wdl: [f32; 3],
+    pub network_value: f32,
+    pub edges: Vec<EdgeSnapshot>,
+}
+
+/// Per-edge data in a search snapshot.
+#[derive(Debug, Serialize)]
+pub struct EdgeSnapshot {
+    pub action: usize,
+    pub visits: u32,
+    pub q: Option<f32>,
+    pub improved_policy: f32,
+    pub depth: Option<u32>,
+}
+
+/// Recursive tree node for the subtree explorer.
+#[derive(Debug, Serialize)]
+pub struct TreeNodeSnapshot {
+    pub action: Option<usize>,
+    pub label: Option<String>,
+    pub kind: String,
+    pub visits: u32,
+    pub wdl: [f32; 3],
+    pub player: Option<u8>,
+    pub children: Vec<TreeNodeSnapshot>,
+}
 
 // ── Client → Server ──────────────────────────────────────────────────
 

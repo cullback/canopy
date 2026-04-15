@@ -807,15 +807,14 @@ mod tests {
 
         // Play until game over or 500 actions
         for _ in 0..500 {
-            if state.status() != canopy::game::Status::Ongoing {
-                break;
-            }
-            let mut chances = Vec::new();
-            state.chance_outcomes(&mut chances);
-            if !chances.is_empty() {
-                let outcome = state.sample_chance(&mut rng).unwrap();
-                state.apply_action(outcome);
-                continue;
+            match state.status() {
+                canopy::game::Status::Terminal(_) => break,
+                canopy::game::Status::Chance => {
+                    let outcome = state.sample_chance(&mut rng).unwrap();
+                    state.apply_action(outcome);
+                    continue;
+                }
+                canopy::game::Status::Decision(_) => {}
             }
             state.legal_actions(&mut actions);
             if actions.is_empty() {

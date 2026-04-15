@@ -1,22 +1,21 @@
 use std::collections::{HashMap, VecDeque};
-use std::ops::{Index, IndexMut};
 
-use crate::eval::{Evaluation, wdl_from_scalar};
+use crate::eval::{Evaluation, Wdl};
 use crate::game::{Game, Status};
 
 // ── NodeId ───────────────────────────────────────────────────────────
 
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub(super) struct NodeId(u32);
+pub struct NodeId(u32);
 
 // ── Edge ─────────────────────────────────────────────────────────────
 
-pub(super) struct Edge {
+pub struct Edge {
     pub action: usize,
     pub child: Option<NodeId>,
     /// Softmax probability (for v_mix weighting, chance sampling).
     pub prior: f32,
-    /// Raw policy logit (for Gumbel/improved-policy selection).
+    /// Raw policy logit (for improved-policy selection).
     pub logit: f32,
     pub visits: u32,
     /// In-flight simulations treated as losses (leaf parallelism).
@@ -35,7 +34,7 @@ impl Edge {
         }
     }
 
-    fn new_chance((action, weight): (usize, u32)) -> Self {
+    pub(super) fn new_chance((action, weight): (usize, u32)) -> Self {
         Self {
             action,
             child: None,
@@ -50,7 +49,7 @@ impl Edge {
 // ── Node types ───────────────────────────────────────────────────────
 
 #[derive(Debug)]
-pub(super) enum NodeKind {
+pub enum NodeKind {
     Terminal,
     Decision(f32),
     Chance,
@@ -60,13 +59,13 @@ pub(super) struct NodeData {
     pub kind: NodeKind,
     pub total_visits: u32,
     /// Raw network WDL (P1 perspective), preserved for backup numerator.
-    pub utility_wdl: [f32; 3],
+    pub utility_wdl: Wdl,
     /// Search-averaged WDL (P1 perspective), updated by backup.
-    pub wdl: [f32; 3],
+    pub wdl: Wdl,
 }
 
 impl NodeData {
-    fn new(kind: NodeKind, wdl: [f32; 3]) -> Self {
+    fn new(kind: NodeKind, wdl: Wdl) -> Self {
         let total_visits = match kind {
             NodeKind::Chance => 0,
             _ => 1,
@@ -146,7 +145,7 @@ pub(super) enum ExpandResult {
 // ── Tree ─────────────────────────────────────────────────────────────
 
 #[derive(Default)]
-pub(super) struct Tree {
+pub struct Tree {
     nodes: Vec<NodeEntry>,
     edges: Vec<Edge>,
     table: HashMap<u64, NodeId>,
@@ -164,7 +163,7 @@ impl Tree {
         &self.edges[self.edge_range(id)]
     }
 
-    pub fn edges_mut(&mut self, id: NodeId) -> &mut [Edge] {
+    pub(super) fn edges_mut(&mut self, id: NodeId) -> &mut [Edge] {
         let r = self.edge_range(id);
         &mut self.edges[r]
     }
@@ -174,40 +173,46 @@ impl Tree {
         self.edges(id).iter().map(|e| e.visits).max().unwrap_or(0)
     }
 
-    pub fn set_child(&mut self, parent: NodeId, edge_idx: usize, child: NodeId) {
+    pub(super) fn set_child(&mut self, parent: NodeId, edge_idx: usize, child: NodeId) {
         self.edges_mut(parent)[edge_idx].child = Some(child);
     }
 
     pub fn q(&self, id: NodeId) -> f32 {
-        let w = self.nodes[id.0 as usize].data.wdl;
-        w[0] - w[2]
+        self.nodes[id.0 as usize].data.wdl.q()
     }
 
-    pub fn wdl(&self, id: NodeId) -> [f32; 3] {
+    pub fn wdl(&self, id: NodeId) -> Wdl {
         self.nodes[id.0 as usize].data.wdl
     }
 
-    pub fn utility(&self, id: NodeId) -> f32 {
-        let w = self.nodes[id.0 as usize].data.utility_wdl;
-        w[0] - w[2]
+    pub(super) fn utility(&self, id: NodeId) -> f32 {
+        self.nodes[id.0 as usize].data.utility_wdl.q()
     }
 
     pub fn kind(&self, id: NodeId) -> &NodeKind {
         &self.nodes[id.0 as usize].data.kind
     }
 
-    #[allow(dead_code)]
+    /// The root node (always `NodeId(0)` after compaction).
+    pub fn root(&self) -> NodeId {
+        NodeId(0)
+    }
+
     pub fn node_count(&self) -> usize {
         self.nodes.len()
     }
 
+    pub fn is_empty(&self) -> bool {
+        self.nodes.is_empty()
+    }
+
     // ── Insert ───────────────────────────────────────────────────
 
-    pub fn insert(
+    pub(super) fn insert(
         &mut self,
         state_key: Option<u64>,
         kind: NodeKind,
-        wdl: [f32; 3],
+        wdl: Wdl,
         edges: impl Iterator<Item = Edge>,
     ) -> NodeId {
         let edge_start = self.edges.len() as u32;
@@ -226,13 +231,13 @@ impl Tree {
     }
 
     /// Look up a state key in the transposition table.
-    pub fn lookup(&self, key: u64) -> Option<NodeId> {
+    pub(super) fn lookup(&self, key: u64) -> Option<NodeId> {
         self.table.get(&key).copied()
     }
 
     // ── Expand ───────────────────────────────────────────────────
 
-    pub fn try_expand<G: Game>(&mut self, state: &G, bufs: &mut Bufs) -> ExpandResult {
+    pub(super) fn try_expand<G: Game>(&mut self, state: &G, bufs: &mut Bufs) -> ExpandResult {
         let state_key = state.state_key();
 
         if let Some(&existing) = state_key.and_then(|k| self.table.get(&k)) {
@@ -244,42 +249,38 @@ impl Tree {
                 let id = self.insert(
                     state_key,
                     NodeKind::Terminal,
-                    wdl_from_scalar(reward),
+                    Wdl::from_value(reward),
                     std::iter::empty(),
                 );
                 ExpandResult::Leaf(id)
             }
-            Status::Ongoing => {
+            Status::Chance => {
+                bufs.chances.clear();
                 state.chance_outcomes(&mut bufs.chances);
-                if !bufs.chances.is_empty() {
-                    let edges = bufs.chances.drain(..).map(Edge::new_chance);
-                    let id = self.insert(state_key, NodeKind::Chance, [0.0, 1.0, 0.0], edges);
-                    return ExpandResult::Chance(id);
-                }
-
+                let edges = bufs.chances.drain(..).map(Edge::new_chance);
+                let id = self.insert(state_key, NodeKind::Chance, Wdl::DRAW, edges);
+                ExpandResult::Chance(id)
+            }
+            Status::Decision(sign) => {
                 bufs.actions.clear();
                 state.legal_actions(&mut bufs.actions);
 
-                // Degenerate state: no chance outcomes AND no legal actions.
+                // Degenerate state: no legal actions.
                 // Can arise from SO-ISMCTS determinization inconsistencies
                 // (e.g. a chance node whose outcome pool was exhausted by a
                 // different determinization). Treat as terminal draw.
                 if bufs.actions.is_empty() {
-                    let id = self.insert(
-                        state_key,
-                        NodeKind::Terminal,
-                        [0.0, 1.0, 0.0],
-                        std::iter::empty(),
-                    );
+                    let id =
+                        self.insert(state_key, NodeKind::Terminal, Wdl::DRAW, std::iter::empty());
                     return ExpandResult::Leaf(id);
                 }
 
-                ExpandResult::NeedsEval(state.current_sign())
+                ExpandResult::NeedsEval(sign)
             }
         }
     }
 
-    pub fn complete_expand(
+    pub(super) fn complete_expand(
         &mut self,
         eval: &Evaluation,
         actions: &[usize],
@@ -297,15 +298,7 @@ impl Tree {
     // ── Backprop ─────────────────────────────────────────────────
 
     /// Walk the simulation path, incrementing edge visits and recomputing Q.
-    ///
-    /// Backprop walks only the current traversal path. Transposed nodes (reachable
-    /// via multiple paths) receive Q updates from whichever path visits them —
-    /// their Q is read correctly by all parents on the *next* visit, so the
-    /// approximation is self-correcting. Full DAG backprop (upward BFS from every
-    /// modified node) would be more precise but adds parent pointers, cycle
-    /// detection, and O(tree) worst-case cost per simulation. Standard practice
-    /// (AlphaZero, KataGo) is path-only backprop even with deduplication.
-    pub fn backprop(&mut self, path: &[(NodeId, usize)]) {
+    pub(super) fn backprop(&mut self, path: &[(NodeId, usize)]) {
         for &(nid, eidx) in path {
             self.edges_mut(nid)[eidx].visits += 1;
         }
@@ -313,76 +306,82 @@ impl Tree {
     }
 
     /// Recompute Q values along a path (leaf-to-root), accounting for virtual losses.
-    ///
-    /// For each node on the path, re-derives Q from its edges' visits and children.
-    /// Virtual-loss visits contribute a pessimistic value (`-sign` for
-    /// decision nodes) instead of the child's Q, discouraging re-selection of
-    /// in-flight edges. When `virtual_losses == 0` everywhere, this degenerates
-    /// to the standard formula.
-    pub fn recompute_q(&mut self, path: &[(NodeId, usize)]) {
+    pub(super) fn recompute_q(&mut self, path: &[(NodeId, usize)]) {
         for &(nid, _) in path.iter().rev() {
-            // Virtual loss WDL (P1 perspective):
-            // Decision(+1): [0, 0, 1] — pessimistic for the acting player P1
-            // Decision(-1): [1, 0, 0] — pessimistic for P2 (P1 winning is bad for P2)
-            // Chance: [0, 1, 0] (neutral draw)
-            let (is_chance, vloss_wdl) = match self[nid].kind {
+            let (is_chance, vloss_wdl) = match self.node(nid).kind {
                 NodeKind::Decision(sign) => {
                     if sign > 0.0 {
-                        (false, [0.0, 0.0, 1.0])
+                        (
+                            false,
+                            Wdl {
+                                w: 0.0,
+                                d: 0.0,
+                                l: 1.0,
+                            },
+                        )
                     } else {
-                        (false, [1.0, 0.0, 0.0])
+                        (
+                            false,
+                            Wdl {
+                                w: 1.0,
+                                d: 0.0,
+                                l: 0.0,
+                            },
+                        )
                     }
                 }
-                _ => (matches!(self[nid].kind, NodeKind::Chance), [0.0, 1.0, 0.0]),
+                _ => (matches!(self.node(nid).kind, NodeKind::Chance), Wdl::DRAW),
             };
 
             let (sum_edge_visits, wwdl) = {
                 let edges = self.edges(nid);
                 let sum = edges.iter().map(|e| e.visits).sum::<u32>();
-                let mut wwdl = [0.0f32; 3];
+                let mut wwdl = Wdl {
+                    w: 0.0,
+                    d: 0.0,
+                    l: 0.0,
+                };
                 for edge in edges {
                     let real_visits = edge.visits - edge.virtual_losses;
                     if let Some(child_id) = edge.child {
-                        let child_wdl = self[child_id].wdl;
-                        for k in 0..3 {
-                            wwdl[k] += real_visits as f32 * child_wdl[k];
-                        }
+                        let child_wdl = self.node(child_id).wdl;
+                        let rv = real_visits as f32;
+                        wwdl.w += rv * child_wdl.w;
+                        wwdl.d += rv * child_wdl.d;
+                        wwdl.l += rv * child_wdl.l;
                     }
-                    for k in 0..3 {
-                        wwdl[k] += edge.virtual_losses as f32 * vloss_wdl[k];
-                    }
+                    let vl = edge.virtual_losses as f32;
+                    wwdl.w += vl * vloss_wdl.w;
+                    wwdl.d += vl * vloss_wdl.d;
+                    wwdl.l += vl * vloss_wdl.l;
                 }
                 (sum, wwdl)
             };
 
-            let node = &mut self[nid];
+            let node = self.node_mut(nid);
             if is_chance {
                 node.total_visits = sum_edge_visits;
                 if sum_edge_visits > 0 {
                     let denom = sum_edge_visits as f32;
-                    for (dst, &src) in node.wdl.iter_mut().zip(&wwdl) {
-                        *dst = src / denom;
-                    }
+                    node.wdl.w = wwdl.w / denom;
+                    node.wdl.d = wwdl.d / denom;
+                    node.wdl.l = wwdl.l / denom;
                 } else {
-                    node.wdl = [0.0, 1.0, 0.0];
+                    node.wdl = Wdl::DRAW;
                 }
             } else {
                 node.total_visits = 1 + sum_edge_visits;
                 let denom = node.total_visits as f32;
                 let util = node.utility_wdl;
-                for (k, dst) in node.wdl.iter_mut().enumerate() {
-                    *dst = (util[k] + wwdl[k]) / denom;
-                }
+                node.wdl.w = (util.w + wwdl.w) / denom;
+                node.wdl.d = (util.d + wwdl.d) / denom;
+                node.wdl.l = (util.l + wwdl.l) / denom;
             }
         }
     }
 
     /// Mark edges along `path` as having an in-flight simulation (virtual loss).
-    ///
-    /// Increments both `visits` and `virtual_losses` on each edge, then
-    /// recomputes Q. The extra visits with pessimistic Q discourage other
-    /// simulations from selecting the same path.
-    pub fn apply_virtual_loss(&mut self, path: &[(NodeId, usize)]) {
+    pub(super) fn apply_virtual_loss(&mut self, path: &[(NodeId, usize)]) {
         for &(nid, eidx) in path {
             let edge = &mut self.edges_mut(nid)[eidx];
             edge.visits += 1;
@@ -392,10 +391,7 @@ impl Tree {
     }
 
     /// Remove virtual loss from edges along `path` (visits stay — they become "real").
-    ///
-    /// Called in [`Search::supply`] before expanding the child node.
-    /// Does **not** recompute Q — the caller should do so after setting the child.
-    pub fn remove_virtual_loss(&mut self, path: &[(NodeId, usize)]) {
+    pub(super) fn remove_virtual_loss(&mut self, path: &[(NodeId, usize)]) {
         for &(nid, eidx) in path {
             self.edges_mut(nid)[eidx].virtual_losses -= 1;
         }
@@ -405,7 +401,7 @@ impl Tree {
 
     /// Compact the tree to only nodes reachable from `root`.
     /// Remaps the transposition table. Returns the new root (always `NodeId(0)`).
-    pub fn compact(&mut self, root: NodeId) -> NodeId {
+    pub(super) fn compact(&mut self, root: NodeId) -> NodeId {
         let old_len = self.nodes.len();
         let mut old_to_new: Vec<Option<NodeId>> = vec![None; old_len];
 
@@ -430,11 +426,6 @@ impl Tree {
             }
         }
 
-        // Rust doesn't allow moving out of a Vec by index (it would leave a hole),
-        // so we wrap each element in Option and use .take() to move ownership out.
-        // This costs one extra allocation + bool per element; an alternative would
-        // be unsafe swap-remove or sentinel values, but this is only called once
-        // per action so clarity wins over micro-optimization.
         let mut old_nodes: Vec<Option<NodeEntry>> = std::mem::take(&mut self.nodes)
             .into_iter()
             .map(Some)
@@ -493,7 +484,7 @@ impl Tree {
 
     /// Remove all nodes and edges but keep the underlying `Vec` capacities
     /// so the next search can reuse the allocations.
-    pub fn clear(&mut self) {
+    pub(super) fn clear(&mut self) {
         self.nodes.clear();
         self.edges.clear();
         self.table.clear();
@@ -520,7 +511,7 @@ impl Tree {
     }
 
     /// Sample a chance edge proportional to weights (stored as f32 in `prior`).
-    pub fn sample_chance_edge(&self, node: NodeId, rng: &mut fastrand::Rng) -> usize {
+    pub(super) fn sample_chance_edge(&self, node: NodeId, rng: &mut fastrand::Rng) -> usize {
         let edges = self.edges(node);
         let total: u32 = edges.iter().map(|e| e.prior as u32).sum();
         let mut r = rng.u32(0..total);
@@ -535,16 +526,12 @@ impl Tree {
     }
 }
 
-impl Index<NodeId> for Tree {
-    type Output = NodeData;
-
-    fn index(&self, id: NodeId) -> &NodeData {
+impl Tree {
+    pub(super) fn node(&self, id: NodeId) -> &NodeData {
         &self.nodes[id.0 as usize].data
     }
-}
 
-impl IndexMut<NodeId> for Tree {
-    fn index_mut(&mut self, id: NodeId) -> &mut NodeData {
+    pub(super) fn node_mut(&mut self, id: NodeId) -> &mut NodeData {
         &mut self.nodes[id.0 as usize].data
     }
 }
@@ -561,21 +548,16 @@ mod tests {
         let a = tree.insert(
             None,
             NodeKind::Terminal,
-            [0.0, 1.0, 0.0],
+            Wdl::DRAW,
             std::iter::once(Edge::new_chance((0, 1))),
         );
         let b = tree.insert(
             None,
             NodeKind::Terminal,
-            [0.0, 1.0, 0.0],
+            Wdl::DRAW,
             std::iter::once(Edge::new_chance((0, 1))),
         );
-        let c = tree.insert(
-            None,
-            NodeKind::Terminal,
-            [0.0, 1.0, 0.0],
-            std::iter::empty(),
-        );
+        let c = tree.insert(None, NodeKind::Terminal, Wdl::DRAW, std::iter::empty());
 
         // Patch child pointers
         tree.set_child(a, 0, b);

@@ -32,14 +32,11 @@ impl Game for TenureGame {
         if self.is_terminal() {
             Status::Terminal(self.terminal_reward())
         } else {
-            Status::Ongoing
-        }
-    }
-
-    fn current_sign(&self) -> f32 {
-        match self.phase {
-            Phase::Attacker => 1.0,
-            Phase::Defender => -1.0,
+            let sign = match self.phase {
+                Phase::Attacker => 1.0,
+                Phase::Defender => -1.0,
+            };
+            Status::Decision(sign)
         }
     }
 
@@ -97,7 +94,6 @@ fn main() {
             train_batch_size: 256,
             q_weight_ramp_iters: 15,
             concurrent_games: 20,
-            leaf_batch_size: 8,
             explore_actions: 10,
             ..TrainConfig::default()
         },

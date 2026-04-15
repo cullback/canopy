@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use burn::prelude::*;
 
-use crate::eval::{Evaluation, Evaluator, flip_wdl};
+use crate::eval::{Evaluation, Evaluator, Wdl};
 use crate::game::{Game, Status};
 
 /// Encodes a game state into a fixed-size feature vector for neural network input.
@@ -110,7 +110,8 @@ where
 {
     fn evaluate(&self, state: &G, _rng: &mut fastrand::Rng) -> Evaluation {
         let sign = match state.status() {
-            Status::Ongoing => state.current_sign(),
+            Status::Decision(sign) => sign,
+            Status::Chance => return Evaluation::uniform(G::NUM_ACTIONS, 0.0),
             Status::Terminal(reward) => return Evaluation::uniform(G::NUM_ACTIONS, reward),
         };
 
@@ -134,10 +135,12 @@ where
         let wdl_data: Vec<f32> = wdl_probs.into_data().to_vec().expect("value tensor to_vec");
 
         // WDL from current player's perspective; sign-flip for P1 (swap W/L)
-        let wdl_cp = [wdl_data[0], wdl_data[1], wdl_data[2]];
-        let wdl = if sign > 0.0 { wdl_cp } else { flip_wdl(wdl_cp) };
-        debug_assert!(wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
-        debug_assert!((wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
+        let wdl_cp = Wdl {
+            w: wdl_data[0],
+            d: wdl_data[1],
+            l: wdl_data[2],
+        };
+        let wdl = if sign > 0.0 { wdl_cp } else { wdl_cp.flip() };
 
         Evaluation {
             policy_logits: logits_data,
@@ -162,8 +165,11 @@ where
                 Status::Terminal(reward) => {
                     results[i] = Some(Evaluation::uniform(G::NUM_ACTIONS, reward));
                 }
-                Status::Ongoing => {
-                    signs.push(state.current_sign());
+                Status::Chance => {
+                    results[i] = Some(Evaluation::uniform(G::NUM_ACTIONS, 0.0));
+                }
+                Status::Decision(sign) => {
+                    signs.push(sign);
                     nn_indices.push(i);
                 }
             }
@@ -192,14 +198,16 @@ where
             let wdl_start = j * 3;
             let wdl_raw = &all_wdl[wdl_start..wdl_start + 3];
             // Sign-flip for P1 perspective (swap W/L when sign < 0)
-            let wdl_cp = [wdl_raw[0], wdl_raw[1], wdl_raw[2]];
+            let wdl_cp = Wdl {
+                w: wdl_raw[0],
+                d: wdl_raw[1],
+                l: wdl_raw[2],
+            };
             let wdl = if signs[j] > 0.0 {
                 wdl_cp
             } else {
-                flip_wdl(wdl_cp)
+                wdl_cp.flip()
             };
-            debug_assert!(wdl.iter().all(|&x| x >= 0.0 && x <= 1.0));
-            debug_assert!((wdl.iter().sum::<f32>() - 1.0).abs() < 1e-4);
             results[i] = Some(Evaluation {
                 policy_logits: logits,
                 wdl,

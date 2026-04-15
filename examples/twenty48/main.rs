@@ -16,9 +16,8 @@ use clap::{Arg, Command};
 use indicatif::{ProgressBar, ProgressStyle};
 
 use canopy::cli::GameCli;
-use canopy::eval::Evaluation;
 use canopy::game::{Game, Status};
-use canopy::mcts::{Config, Search, Step};
+use canopy::mcts::{Config, Search, Select};
 use canopy::train::TrainConfig;
 
 mod encoder;
@@ -32,10 +31,10 @@ impl Game for Board {
 
     fn status(&self) -> Status {
         if self.awaiting_spawn() {
-            return Status::Ongoing;
+            return Status::Chance;
         }
         if game::has_legal_move(self.tiles()) {
-            Status::Ongoing
+            Status::Decision(1.0)
         } else {
             let score = game::board_score(self.tiles()) as f32;
             Status::Terminal((score / 1_000_000.0).min(1.0))
@@ -117,11 +116,6 @@ fn solo_command() -> Command {
                 .default_value("rollout")
                 .help("Evaluator to use"),
         )
-        .arg(
-            Arg::new("gumbel-m")
-                .long("gumbel-m")
-                .default_value(d.num_sampled_actions.to_string()),
-        )
 }
 
 fn run_solo(matches: &clap::ArgMatches, setup: &GameCli<Board>) {
@@ -136,18 +130,12 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameCli<Board>) {
         .parse()
         .unwrap();
     let eval_name = matches.get_one::<String>("eval").unwrap();
-    let gumbel_m: u32 = matches
-        .get_one::<String>("gumbel-m")
-        .unwrap()
-        .parse()
-        .unwrap();
 
     let evaluator = setup.evaluators().get(eval_name);
 
     let config = Config {
         num_simulations: simulations,
-        num_sampled_actions: gumbel_m,
-        gumbel_scale: 0.0, // No exploration noise during evaluation
+        dirichlet_epsilon: 0.0, // No exploration noise during evaluation
         ..Default::default()
     };
 
@@ -170,21 +158,23 @@ fn run_solo(matches: &clap::ArgMatches, setup: &GameCli<Board>) {
         loop {
             match state.status() {
                 Status::Terminal(_) => break,
-                Status::Ongoing => {}
+                Status::Chance | Status::Decision(_) => {}
             }
 
             if let Some(action) = state.sample_chance(&mut rng) {
                 state.apply_action(action);
             } else {
                 let mut search = Search::new(state, config.clone());
-                let mut evals: Vec<Evaluation> = vec![];
                 let result = loop {
-                    match search.step(&evals, &mut rng) {
-                        Step::NeedsEval(states) => {
-                            let refs: Vec<&Board> = states.iter().collect();
-                            evals = evaluator.evaluate_batch(&refs, &mut rng);
+                    match search.select(&mut rng) {
+                        Select::Eval(leaf, ref s) => {
+                            let eval = evaluator.evaluate(s, &mut rng);
+                            search.backup(leaf, eval);
                         }
-                        Step::Done(r) => break r,
+                        Select::Terminal(leaf, wdl) => {
+                            search.backup_terminal(leaf, wdl);
+                        }
+                        Select::Done => break search.result(),
                     }
                 };
                 state.apply_action(result.selected_action);
@@ -242,7 +232,6 @@ fn main() {
             train_batch_size: 128,
             q_weight_ramp_iters: 20,
             concurrent_games: 10,
-            leaf_batch_size: 1,
             explore_actions: 0,
             ..TrainConfig::default()
         },

@@ -119,9 +119,9 @@ fn prepare_batch<B: Backend>(
             };
             let alpha = cfg.q_weight;
             [
-                (1.0 - alpha) * z_wdl[0] + alpha * s.q_wdl[0],
-                (1.0 - alpha) * z_wdl[1] + alpha * s.q_wdl[1],
-                (1.0 - alpha) * z_wdl[2] + alpha * s.q_wdl[2],
+                (1.0 - alpha) * z_wdl[0] + alpha * s.q_wdl.w,
+                (1.0 - alpha) * z_wdl[1] + alpha * s.q_wdl.d,
+                (1.0 - alpha) * z_wdl[2] + alpha * s.q_wdl.l,
             ]
         })
         .collect();

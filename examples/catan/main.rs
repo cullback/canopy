@@ -55,13 +55,10 @@ fn main() {
             max_actions: 2000,
             epochs: 2,
             lr: 0.0005,
-            filter_legal: true,
             mcts_sims: 3200,
             inference_batch_size: 2048,
             train_batch_size: 1024,
-            leaf_batch_size: 32,
             concurrent_games: 1536,
-            gumbel_m: 16,
             explore_actions: 16,
             q_weight_ramp_iters: 60,
             aux_value_horizons: vec![10, 50, 150],
@@ -77,13 +74,10 @@ fn main() {
             max_actions: 2000,
             epochs: 2,
             lr: 0.0001,
-            filter_legal: true,
             mcts_sims: 1600,
             inference_batch_size: 2048,
             train_batch_size: 1024,
-            leaf_batch_size: 32,
             concurrent_games: 768,
-            gumbel_m: 6,
             explore_actions: 24,
             q_weight_ramp_iters: 60,
             ..TrainConfig::default()
@@ -128,18 +122,6 @@ fn main() {
                         .long("eval")
                         .default_value("rollout")
                         .help("Evaluator (name or checkpoint path)"),
-                )
-                .arg(
-                    Arg::new("leaf-batch")
-                        .long("leaf-batch")
-                        .default_value("1")
-                        .help("Leaves per GPU batch (higher = better GPU utilization)"),
-                )
-                .arg(
-                    Arg::new("gumbel-m")
-                        .long("gumbel-m")
-                        .default_value("6")
-                        .help("Gumbel-Top-k sampled actions at root"),
                 ),
         )
         .get_matches();
@@ -178,19 +160,7 @@ fn main() {
                 eval_spec.as_str()
             };
             let evaluator = setup.evaluators().get_arc(eval_name);
-            let leaf_batch: u32 = sub
-                .get_one::<String>("leaf-batch")
-                .unwrap()
-                .parse()
-                .expect("invalid leaf-batch");
-            let gumbel_m: u32 = sub
-                .get_one::<String>("gumbel-m")
-                .unwrap()
-                .parse()
-                .expect("invalid gumbel-m");
-            colonist::run_serve(
-                cdp_port, serve_port, evaluator, eval_name, leaf_batch, gumbel_m,
-            );
+            colonist::run_serve(cdp_port, serve_port, evaluator, eval_name);
         } else {
             colonist::run(cdp_port);
         }

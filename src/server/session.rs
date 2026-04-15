@@ -1,11 +1,13 @@
 use std::sync::Arc;
 
-use crate::eval::{Evaluation, Evaluator};
+use crate::eval::Evaluator;
 use crate::game::{Game, Status};
 use crate::game_log::GameLog;
-use crate::mcts::{Config, Search, SearchResult, SearchSnapshot, Step};
+use crate::mcts::{Config, NodeId, NodeKind, Search, SearchResult, Select, Tree};
 
-use super::protocol::{ActionInfo, ClientMsg, ServerMsg};
+use super::protocol::{
+    ActionInfo, ClientMsg, EdgeSnapshot, SearchSnapshot, ServerMsg, TreeNodeSnapshot,
+};
 use super::traits::GamePresenter;
 
 /// Per-player configuration.
@@ -420,11 +422,13 @@ impl<G: Game + 'static> GameSession<G> {
                 let result = self.run_search();
                 let action = result.selected_action;
                 let label = self.presenter.action_label(self.search.state(), action);
-                let snapshot = self.search.snapshot();
-                let action_labels = snapshot
-                    .as_ref()
-                    .map(|s| self.edge_labels(&s.edges))
-                    .unwrap_or_default();
+                let (snapshot, action_labels) = match self.build_snapshot() {
+                    Some(snap) => {
+                        let labels = self.edge_labels(&snap.edges);
+                        (Some(snap), labels)
+                    }
+                    None => (None, Vec::new()),
+                };
                 self.apply_action(action);
                 self.auto_resolve_chance();
                 vec![
@@ -445,8 +449,7 @@ impl<G: Game + 'static> GameSession<G> {
                 }
                 self.search.set_num_simulations(count);
                 let _result = self.run_search();
-                let snapshot = self.search.snapshot();
-                match snapshot {
+                match self.build_snapshot() {
                     Some(snap) => {
                         let labels = self.edge_labels(&snap.edges);
                         vec![ServerMsg::Snapshot {
@@ -459,7 +462,7 @@ impl<G: Game + 'static> GameSession<G> {
                     }],
                 }
             }
-            ClientMsg::GetSnapshot => match self.search.snapshot() {
+            ClientMsg::GetSnapshot => match self.build_snapshot() {
                 Some(snap) => {
                     let labels = self.edge_labels(&snap.edges);
                     vec![ServerMsg::Snapshot {
@@ -473,10 +476,17 @@ impl<G: Game + 'static> GameSession<G> {
             },
             ClientMsg::ExploreSubtree { action_path, depth } => {
                 self.last_explore = Some((action_path.clone(), depth));
-                match self.search.snapshot_at_path(&action_path, depth) {
-                    Some(mut tree) => {
-                        self.label_subtree(&mut tree);
-                        vec![ServerMsg::Subtree { tree }]
+                let tree = self.search.tree();
+                if tree.is_empty() {
+                    return vec![ServerMsg::Error {
+                        message: "Path not found in tree".into(),
+                    }];
+                }
+                match walk_tree_path(tree, tree.root(), &action_path) {
+                    Some(node) => {
+                        let mut snap = build_subtree_snapshot(tree, node, depth);
+                        self.label_subtree(&mut snap);
+                        vec![ServerMsg::Subtree { tree: snap }]
                     }
                     None => vec![ServerMsg::Error {
                         message: "Path not found in tree".into(),
@@ -607,9 +617,7 @@ impl<G: Game + 'static> GameSession<G> {
     }
 
     fn is_chance(&self) -> bool {
-        let mut buf = Vec::new();
-        self.search.state().chance_outcomes(&mut buf);
-        !buf.is_empty()
+        matches!(self.search.state().status(), Status::Chance)
     }
 
     /// Returns true if the current state can be searched (not terminal, not chance).
@@ -618,8 +626,10 @@ impl<G: Game + 'static> GameSession<G> {
     }
 
     fn current_player_idx(&self) -> usize {
-        let sign = self.search.state().current_sign();
-        if sign > 0.0 { 0 } else { 1 }
+        match self.search.state().status() {
+            Status::Decision(sign) if sign > 0.0 => 0,
+            _ => 1,
+        }
     }
 
     /// Returns true if current player is a human.
@@ -634,10 +644,9 @@ impl<G: Game + 'static> GameSession<G> {
         state.chance_outcomes(&mut chances);
         let is_chance = !chances.is_empty();
         let label = if !is_chance {
-            let player = if state.current_sign() > 0.0 {
-                "P1"
-            } else {
-                "P2"
+            let player = match state.status() {
+                Status::Decision(sign) if sign > 0.0 => "P1",
+                _ => "P2",
             };
             let action_label = self.presenter.action_label(state, action);
             format!("{player}: {action_label}")
@@ -686,15 +695,18 @@ impl<G: Game + 'static> GameSession<G> {
     }
 
     /// Run MCTS to completion and return the result.
-    fn run_search(&mut self) -> crate::mcts::SearchResult {
-        let mut evals = vec![];
+    fn run_search(&mut self) -> SearchResult {
         loop {
-            match self.search.step(&evals, &mut self.rng) {
-                Step::NeedsEval(states) => {
-                    let refs: Vec<&G> = states.iter().collect();
-                    evals = self.evaluator.evaluate_batch(&refs, &mut self.rng);
+            match self.search.select(&mut self.rng) {
+                Select::Eval(leaf_id, state) => {
+                    let eval = self.evaluator.evaluate_batch(&[&state], &mut self.rng);
+                    self.search
+                        .backup(leaf_id, eval.into_iter().next().unwrap());
                 }
-                Step::Done(result) => return result,
+                Select::Terminal(leaf_id, wdl) => {
+                    self.search.backup_terminal(leaf_id, wdl);
+                }
+                Select::Done => return self.search.result(),
             }
         }
     }
@@ -738,14 +750,19 @@ impl<G: Game + 'static> GameSession<G> {
     }
 
     /// Run one step of MCTS. Returns `Some(result)` when search is complete.
-    pub fn search_tick(&mut self, evals: &mut Vec<Evaluation>) -> Option<SearchResult> {
-        match self.search.step(evals, &mut self.rng) {
-            Step::NeedsEval(states) => {
-                let refs: Vec<&G> = states.iter().collect();
-                *evals = self.evaluator.evaluate_batch(&refs, &mut self.rng);
+    pub fn search_tick(&mut self) -> Option<SearchResult> {
+        match self.search.select(&mut self.rng) {
+            Select::Eval(leaf_id, state) => {
+                let eval = self.evaluator.evaluate_batch(&[&state], &mut self.rng);
+                self.search
+                    .backup(leaf_id, eval.into_iter().next().unwrap());
                 None
             }
-            Step::Done(result) => Some(result),
+            Select::Terminal(leaf_id, wdl) => {
+                self.search.backup_terminal(leaf_id, wdl);
+                None
+            }
+            Select::Done => Some(self.search.result()),
         }
     }
 
@@ -755,11 +772,13 @@ impl<G: Game + 'static> GameSession<G> {
             ClientMsg::BotMove { .. } => {
                 let action = result.selected_action;
                 let label = self.presenter.action_label(self.search.state(), action);
-                let snapshot = self.search.snapshot();
-                let action_labels = snapshot
-                    .as_ref()
-                    .map(|s| self.edge_labels(&s.edges))
-                    .unwrap_or_default();
+                let (snapshot, action_labels) = match self.build_snapshot() {
+                    Some(snap) => {
+                        let labels = self.edge_labels(&snap.edges);
+                        (Some(snap), labels)
+                    }
+                    None => (None, Vec::new()),
+                };
                 self.apply_action(action);
                 self.auto_resolve_chance();
                 vec![
@@ -772,7 +791,7 @@ impl<G: Game + 'static> GameSession<G> {
                     self.state_msg(),
                 ]
             }
-            ClientMsg::RunSims { .. } => match self.search.snapshot() {
+            ClientMsg::RunSims { .. } => match self.build_snapshot() {
                 Some(snap) => {
                     let labels = self.edge_labels(&snap.edges);
                     vec![ServerMsg::Snapshot {
@@ -791,21 +810,68 @@ impl<G: Game + 'static> GameSession<G> {
     /// Generate a Subtree message for the last explored path, if any.
     pub fn explore_subtree_msg(&self) -> Option<ServerMsg> {
         let (path, depth) = self.last_explore.as_ref()?;
-        let mut tree = self.search.snapshot_at_path(path, *depth)?;
-        self.label_subtree(&mut tree);
-        Some(ServerMsg::Subtree { tree })
+        let tree = self.search.tree();
+        if tree.is_empty() {
+            return None;
+        }
+        let node = walk_tree_path(tree, tree.root(), path)?;
+        let mut snap = build_subtree_snapshot(tree, node, *depth);
+        label_subtree_walk(
+            &mut snap,
+            self.search.state().clone(),
+            &*self.presenter,
+            false,
+        );
+        Some(ServerMsg::Subtree { tree: snap })
     }
 
     /// Get current snapshot with action labels.
     pub fn snapshot_with_labels(&self) -> Option<(SearchSnapshot, Vec<String>)> {
-        self.search.snapshot().map(|snap| {
+        self.build_snapshot().map(|snap| {
             let labels = self.edge_labels(&snap.edges);
             (snap, labels)
         })
     }
 
+    /// Build a `SearchSnapshot` from the current tree state.
+    fn build_snapshot(&self) -> Option<SearchSnapshot> {
+        let tree = self.search.tree();
+        if tree.is_empty() {
+            return None;
+        }
+        let root = tree.root();
+        let edges = tree.edges(root);
+        let total_sims: u32 = edges.iter().map(|e| e.visits).sum();
+
+        let edge_snaps: Vec<EdgeSnapshot> = edges
+            .iter()
+            .map(|e| {
+                let (q, depth) = match e.child {
+                    Some(child) => (Some(tree.q(child)), Some(compute_pv_depth(tree, child))),
+                    None => (None, None),
+                };
+                EdgeSnapshot {
+                    action: e.action,
+                    visits: e.visits,
+                    q,
+                    improved_policy: e.prior, // use prior as improved_policy approximation
+                    depth,
+                }
+            })
+            .collect();
+
+        let wdl = tree.wdl(root);
+        Some(SearchSnapshot {
+            total_simulations: total_sims,
+            pv_depth: compute_pv_depth(tree, root),
+            root_wdl: [wdl.w, wdl.d, wdl.l],
+            network_value: wdl.q(),
+            edges: edge_snaps,
+        })
+    }
+
     /// Get action labels for edge snapshots.
-    fn edge_labels(&self, edges: &[crate::mcts::EdgeSnapshot]) -> Vec<String> {
+    fn edge_labels(&self, edges: &[EdgeSnapshot]) -> Vec<String> {
         let state = self.search.state();
         edges
             .iter()
@@ -823,25 +889,94 @@ impl<G: Game + 'static> GameSession<G> {
         self.search.set_num_simulations(n);
     }
 
-    /// Whether a search is currently active.
-    pub fn is_searching(&self) -> bool {
-        self.search.is_searching()
-    }
-
     /// Total visits on the current root node.
     pub fn root_visits(&self) -> u32 {
         self.search.root_visits()
     }
 
     /// Label all nodes in a subtree by simulating actions from the root state.
-    fn label_subtree(&self, tree: &mut crate::mcts::TreeNodeSnapshot) {
+    fn label_subtree(&self, tree: &mut TreeNodeSnapshot) {
         let state = self.search.state().clone();
         label_subtree_walk(tree, state, &*self.presenter, false);
     }
 }
 
+/// Walk the tree along an action path, returning the final node if reachable.
+fn walk_tree_path(tree: &Tree, start: NodeId, path: &[usize]) -> Option<NodeId> {
+    let mut node = start;
+    for &action in path {
+        node = tree.child_for_action(node, action)?;
+    }
+    Some(node)
+}
+
+/// Build a recursive `TreeNodeSnapshot` from a tree node, up to `depth` levels.
+fn build_subtree_snapshot(tree: &Tree, node: NodeId, depth: usize) -> TreeNodeSnapshot {
+    build_subtree_node(tree, node, None, depth)
+}
+
+fn build_subtree_node(
+    tree: &Tree,
+    node: NodeId,
+    action: Option<usize>,
+    depth: usize,
+) -> TreeNodeSnapshot {
+    let wdl = tree.wdl(node);
+    let kind = tree.kind(node);
+    let kind_str = match kind {
+        NodeKind::Terminal => "terminal",
+        NodeKind::Decision(_) => "decision",
+        NodeKind::Chance => "chance",
+    };
+    let visits: u32 = tree.edges(node).iter().map(|e| e.visits).sum();
+    let player = match kind {
+        NodeKind::Decision(sign) => Some(if *sign > 0.0 { 0 } else { 1 }),
+        _ => None,
+    };
+
+    let children = if depth > 0 {
+        tree.edges(node)
+            .iter()
+            .filter_map(|e| {
+                e.child
+                    .map(|child| build_subtree_node(tree, child, Some(e.action), depth - 1))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    TreeNodeSnapshot {
+        action,
+        label: None,
+        kind: kind_str.into(),
+        visits,
+        wdl: [wdl.w, wdl.d, wdl.l],
+        player,
+        children,
+    }
+}
+
+/// Compute the principal variation depth from a node.
+fn compute_pv_depth(tree: &Tree, node: NodeId) -> u32 {
+    let mut depth = 0;
+    let mut current = node;
+    loop {
+        let edges = tree.edges(current);
+        let best = edges.iter().max_by_key(|e| e.visits);
+        match best.and_then(|e| e.child) {
+            Some(child) => {
+                depth += 1;
+                current = child;
+            }
+            None => break,
+        }
+    }
+    depth
+}
+
 fn label_subtree_walk<G: Game + Clone>(
-    node: &mut crate::mcts::TreeNodeSnapshot,
+    node: &mut TreeNodeSnapshot,
     state: G, // state from which node.action was taken
     presenter: &dyn GamePresenter<G>,
     parent_is_chance: bool,
