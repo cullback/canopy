@@ -109,8 +109,11 @@ pub(super) fn self_dev_cards_playable(state: &GameState, pid: Player) -> [f32; 5
     out
 }
 
-/// Compute normalized expected dev card held values for the opponent
-/// using hypergeometric proportions over the unknown card pool.
+/// Compute normalized expected dev card held values for the opponent.
+///
+/// Known cards (visible `dev_cards`) are exact; hidden cards are estimated
+/// via hypergeometric proportions over the unknown pool (deck + hidden hand).
+/// In self-play `hidden_dev_cards` is 0, so this returns the exact hand.
 pub(super) fn opponent_expected_dev_cards(
     state: &GameState,
     perspective: Player,
@@ -119,21 +122,26 @@ pub(super) fn opponent_expected_dev_cards(
     let self_player = &state.players[perspective];
     let opp_player = &state.players[opp];
 
-    // dev_cards already includes bought_this_turn (both incremented on buy)
-    let opp_hand_size: f32 =
-        opp_player.dev_cards.0.iter().sum::<u8>() as f32 + opp_player.hidden_dev_cards as f32;
+    let opp_hidden = opp_player.hidden_dev_cards as f32;
     let deck_remaining = state.dev_deck.total as f32;
-    let total_unknown = deck_remaining + opp_hand_size;
+    let total_unknown = deck_remaining + opp_hidden;
 
     let mut out = [0.0; 5];
-    if total_unknown > 0.0 {
-        for t in 0..5 {
+    for t in 0..5 {
+        // Known cards: exact count
+        let known = opp_player.dev_cards.0[t] as f32;
+        // Hidden cards: hypergeometric estimate from unknown pool
+        let estimated_hidden = if total_unknown > 0.0 && opp_hidden > 0.0 {
             let unknown_of_type = ORIGINAL_DECK[t]
                 - self_player.dev_cards.0[t] as f32
                 - self_player.dev_cards_played.0[t] as f32
+                - opp_player.dev_cards.0[t] as f32
                 - opp_player.dev_cards_played.0[t] as f32;
-            out[t] = (unknown_of_type * opp_hand_size / total_unknown) / ORIGINAL_DECK[t];
-        }
+            unknown_of_type.max(0.0) * opp_hidden / total_unknown
+        } else {
+            0.0
+        };
+        out[t] = (known + estimated_hidden) / ORIGINAL_DECK[t];
     }
     out
 }

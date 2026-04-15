@@ -654,6 +654,31 @@ fn replay_search(
     ctx.known_steal_indices = known_steal_indices;
     ctx.max_calls = 2_000_000;
 
+    // Diagnostic: dump dice_to_tiles mapping for roll 10
+    eprintln!("  dice_to_tiles[10]:");
+    for &tid in &state.topology.dice_to_tiles[10] {
+        let tile = &state.topology.tiles[tid.0 as usize];
+        let adj_mask = state.topology.adj.tile_nodes[tid.0 as usize];
+        let adj_nodes: Vec<u8> = (0..54).filter(|&n| adj_mask & (1u64 << n) != 0).collect();
+        eprintln!(
+            "    T{}: {:?} adj_nodes={:?}",
+            tid.0, tile.terrain, adj_nodes
+        );
+    }
+    // Also show which tiles N3 and N13 are adjacent to
+    for &nid in &[3u8, 13] {
+        let node = &state.topology.nodes[nid as usize];
+        let tiles: Vec<_> = node
+            .adjacent_tiles
+            .iter()
+            .map(|t| {
+                let tile = &state.topology.tiles[t.0 as usize];
+                format!("T{}({:?})", t.0, tile.terrain)
+            })
+            .collect();
+        eprintln!("  N{nid} adjacent tiles: {tiles:?}");
+    }
+
     let timeline = vec![TimelineEntry {
         label: "Game start".into(),
         state: state.clone(),
@@ -1012,6 +1037,36 @@ fn try_replay(
                             let mut engine_gain = state.players[p].hand;
                             engine_gain.sub(hands_before[p as usize]);
                             if engine_gain != log_gains[p as usize] {
+                                if i <= 12 {
+                                    // Show which tiles this roll hits and who has buildings there
+                                    let tiles = &state.topology.dice_to_tiles[total as usize];
+                                    for &tid in tiles {
+                                        let tile = &state.topology.tiles[tid.0 as usize];
+                                        let mask = state.topology.adj.tile_nodes[tid.0 as usize];
+                                        let p1_s = (state.boards[Player::One].settlements & mask)
+                                            .count_ones();
+                                        let p1_c =
+                                            (state.boards[Player::One].cities & mask).count_ones();
+                                        let p2_s = (state.boards[Player::Two].settlements & mask)
+                                            .count_ones();
+                                        let p2_c =
+                                            (state.boards[Player::Two].cities & mask).count_ones();
+                                        let blocked = tid == state.robber;
+                                        eprintln!(
+                                            "    T{} {:?}: P1({p1_s}s+{p1_c}c) P2({p2_s}s+{p2_c}c){}",
+                                            tid.0,
+                                            tile.terrain,
+                                            if blocked { " BLOCKED" } else { "" },
+                                        );
+                                    }
+                                    eprintln!(
+                                        "  roll e{i}: {total} P{} engine={:?} log={:?} robber=T{}",
+                                        p as usize + 1,
+                                        engine_gain.0,
+                                        log_gains[p as usize].0,
+                                        state.robber.0,
+                                    );
+                                }
                                 backtrack(
                                     i,
                                     &format!("roll {} dist mismatch P{}", total, p as usize + 1),

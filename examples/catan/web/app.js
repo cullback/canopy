@@ -271,7 +271,8 @@ function updateBank(state) {
   const est = state.expected_bank_dev;
   const hasEstimate = est && est.some(v => v > 0);
 
-  if (hasEstimate) {
+  if (est) {
+    // Colonist mode: bank contents are uncertain, show estimates.
     for (let d = 0; d < 5; d++) {
       if (est[d] >= 0.05) {
         const chip = document.createElement('span');
@@ -281,7 +282,7 @@ function updateBank(state) {
       }
     }
   } else {
-    // Self-play: show exact pool counts.
+    // Self-play: no hidden cards, show exact pool counts.
     const pool = state.frame && state.frame.dev_pool;
     if (!pool) return;
     for (let d = 0; d < 5; d++) {
