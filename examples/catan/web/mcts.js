@@ -134,22 +134,26 @@ class MCTSPanel {
     const prefix = header.dataset.prefix || '';
     header.textContent = `${prefix}${branch}${playerPrefix}${actionLabel} [${dataNode.kind}] V:${dataNode.visits} Q:${q}`;
 
-    // Update children if present — match by action, not position
+    // Match children by action. If the sets differ (new children not in
+    // DOM, or DOM children absent from new data), bail out so the caller
+    // does a full rebuild — otherwise stale children from a previous
+    // navigation would remain visible.
     const childrenDiv = domNode.querySelector(':scope > .tree-children');
-    if (childrenDiv && dataNode.children) {
-      const childDomMap = {};
-      for (const child of childrenDiv.children) {
-        const ch = child.querySelector(':scope > div:not(.tree-children)');
-        if (ch?.dataset.nodeAction) childDomMap[ch.dataset.nodeAction] = child;
-      }
-      for (const childData of dataNode.children) {
-        const key = childData.action != null ? String(childData.action) : 'root';
-        const childDom = childDomMap[key];
-        if (childDom) {
-          this._updateNodeInPlace(childDom, childData);
-        }
-        // New children that don't exist in DOM are ignored (no rebuild)
-      }
+    const newChildren = dataNode.children || [];
+    const domChildren = childrenDiv ? [...childrenDiv.children] : [];
+    if (newChildren.length !== domChildren.length) return false;
+    const childDomMap = {};
+    for (const child of domChildren) {
+      const ch = child.querySelector(':scope > div:not(.tree-children)');
+      if (ch?.dataset.nodeAction) childDomMap[ch.dataset.nodeAction] = child;
+    }
+    for (const childData of newChildren) {
+      const key = childData.action != null ? String(childData.action) : 'root';
+      if (!childDomMap[key]) return false; // structural change
+    }
+    for (const childData of newChildren) {
+      const key = childData.action != null ? String(childData.action) : 'root';
+      if (!this._updateNodeInPlace(childDomMap[key], childData)) return false;
     }
     return true;
   }
