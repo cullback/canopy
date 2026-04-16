@@ -798,14 +798,6 @@ fn try_replay(
 
     let mut i = idx;
     while i < events.len() {
-        if i >= 4 && i <= 18 {
-            let t12_mask = state.topology.adj.tile_nodes[12];
-            let p2_s = (state.boards[Player::Two].settlements & t12_mask).count_ones();
-            eprintln!(
-                "  >> e{i} {:?} phase={:?} P2.T12={p2_s}",
-                events[i], state.phase,
-            );
-        }
         match &events[i] {
             GameEvent::PlaceSettlement { player }
                 if matches!(state.phase, Phase::PlaceSettlement) =>
@@ -850,12 +842,17 @@ fn try_replay(
                         }
                         r
                     };
+                    let dom_count = pid.map(|p| ctx.dom_settlements[p].len()).unwrap_or(0);
                     if setup_after == 3 || setup_after == 4 {
                         // Positive filter: must match starting resources
                         candidates.retain(|&aid| node_resources(aid) == expected);
-                    } else {
+                    } else if dom_count <= 2 {
                         // Negative filter: must NOT match (this is the 1st settle,
-                        // the starting resources belong to the 2nd)
+                        // the starting resources belong to the 2nd).
+                        // Only apply when the player has exactly 2 DOM positions
+                        // (the setup pair). With >2 positions (game-phase buildings
+                        // present), the filter can't distinguish setup from
+                        // game-phase nodes and may keep the wrong one.
                         candidates.retain(|&aid| node_resources(aid) != expected);
                         if candidates.is_empty() {
                             // All candidates give the same resources — can't
@@ -872,6 +869,9 @@ fn try_replay(
                             };
                         }
                     }
+                    // When dom_count > 2 and setup_after <= 2, skip the negative
+                    // filter entirely — branch on all candidates and let
+                    // backtracking find the correct setup assignment.
                 }
 
                 // For the 3rd/4th setup settlement, use post-setup roll
@@ -946,23 +946,8 @@ fn try_replay(
                     }
                     log_branch(i, "setup settle", candidates.len());
                     for &aid in &candidates {
-                        if i <= 10 {
-                            eprintln!(
-                                "    trying e{i}: N{aid} for {:?} (current_player={:?}, setup_count={})",
-                                pid, state.current_player, state.setup_count,
-                            );
-                        }
                         let mut trial = state.clone();
                         trial.apply_action(aid);
-                        if i <= 10 {
-                            let t12_mask = trial.topology.adj.tile_nodes[12];
-                            let p2_s =
-                                (trial.boards[Player::Two].settlements & t12_mask).count_ones();
-                            eprintln!(
-                                "    after e{i} N{aid}: P2 on T12={p2_s} bits=0x{:x}",
-                                trial.boards[Player::Two].settlements
-                            );
-                        }
                         let mut trial_tl = timeline.clone();
                         trial_tl.push(TimelineEntry {
                             label: format!(
@@ -1232,7 +1217,6 @@ fn try_replay(
                         if let Some(tile) = ctx.dom.robber_tile_index.map(TileId) {
                             let aid = action::robber_id(tile).0 as usize;
                             if robber_actions.contains(&aid) {
-                                eprintln!("  robber e{i}: LAST → T{} (dom)", tile.0);
                                 actions.push(aid);
                                 state.apply_action(aid);
                                 i += 1;
@@ -1243,19 +1227,6 @@ fn try_replay(
 
                     let mut candidates = robber_actions.clone();
                     let opp = state.current_player.opponent();
-                    if i == 16 {
-                        eprintln!(
-                            "  robber e16 debug: {} legal, steal={:?} opp_cards={} friendly={}",
-                            candidates.len(),
-                            events[i + 1..].iter().find_map(|e| match e {
-                                GameEvent::Stole { .. } => Some(true),
-                                GameEvent::StoleNothing { .. } => Some(false),
-                                _ => None,
-                            }),
-                            state.players[opp].hand.total(),
-                            state.players[opp].building_vps < crate::game::FRIENDLY_ROBBER_VP,
-                        );
-                    }
 
                     // Scan forward for TileBlocked to constrain which tile the
                     // robber is on. Stop at the NEXT MoveRobber (which changes
@@ -1300,17 +1271,6 @@ fn try_replay(
                             None => true,
                         }
                     });
-                    if i == 16 {
-                        eprintln!("  robber e16: after steal filter: {}", candidates.len());
-                        let cr = pre_filter_rolls(&events[i + 1..], ctx.color_map);
-                        eprintln!(
-                            "  robber e16: check_rolls: {:?}",
-                            cr.iter().map(|(r, _)| r).collect::<Vec<_>>()
-                        );
-                        for (roll, gains) in &cr {
-                            eprintln!("    roll {roll}: P1={:?} P2={:?}", gains[0].0, gains[1].0);
-                        }
-                    }
                     let check_rolls = pre_filter_rolls(&events[i + 1..], ctx.color_map);
                     let candidates_before_rolls = candidates.len();
                     if !check_rolls.is_empty() {
@@ -1318,53 +1278,10 @@ fn try_replay(
                             let tile = TileId((aid - action::ROBBER_START as usize) as u8);
                             let mut trial = state.clone();
                             trial.robber = tile;
-                            let pass = check_rolls
+                            check_rolls
                                 .iter()
-                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains));
-                            if i == 16 && !pass && tile.0 == 1 {
-                                for (roll, gains) in &check_rolls {
-                                    if !validate_distribution(&trial, *roll, gains) {
-                                        let topo = &trial.topology;
-                                        for &tid in &topo.dice_to_tiles[*roll as usize] {
-                                            if tid == trial.robber {
-                                                continue;
-                                            }
-                                            let t = &topo.tiles[tid.0 as usize];
-                                            let mask = topo.adj.tile_nodes[tid.0 as usize];
-                                            for (pi, &pid) in
-                                                [Player::One, Player::Two].iter().enumerate()
-                                            {
-                                                let s = (trial.boards[pid].settlements & mask)
-                                                    .count_ones();
-                                                let c =
-                                                    (trial.boards[pid].cities & mask).count_ones();
-                                                if s + c > 0 {
-                                                    eprintln!(
-                                                        "    T{} {:?}: P{}({s}s+{c}c)",
-                                                        tid.0,
-                                                        t.terrain,
-                                                        pi + 1
-                                                    );
-                                                }
-                                            }
-                                        }
-                                        eprintln!(
-                                            "    expected P1={:?} P2={:?}",
-                                            gains[0].0, gains[1].0
-                                        );
-                                        break;
-                                    }
-                                }
-                            }
-                            pass
+                                .all(|(roll, gains)| validate_distribution(&trial, *roll, gains))
                         });
-                    }
-                    if i == 16 {
-                        eprintln!(
-                            "  robber e16: after roll filter: {} (check_rolls={})",
-                            candidates.len(),
-                            check_rolls.len()
-                        );
                     }
                     // NOTE: we previously had an "extended roll filter" here that
                     // looked past building events to find differentiating rolls.
@@ -1382,43 +1299,58 @@ fn try_replay(
                         actions.push(candidates[0]);
                         state.apply_action(candidates[0]);
                     } else if !rolls_narrowed {
-                        // Candidates are equivalent for nearby rolls. Pick
-                        // desert if available (blocks nothing), otherwise the
-                        // tile with fewest buildings to minimize future impact.
-                        let desert = candidates.iter().copied().find(|&aid| {
+                        // Candidates are equivalent for nearby rolls. Try to
+                        // pick a safe default: desert (blocks nothing), then
+                        // tile with fewest DOM buildings. But if a BuildCity
+                        // follows the robber, the default might block a tile
+                        // that matters for post-city rolls. In that case, sort
+                        // candidates by preference and branch so backtracking
+                        // can recover.
+                        let has_upcoming_city = events[i + 1..]
+                            .iter()
+                            .take_while(|e| !matches!(e, GameEvent::Roll { .. }))
+                            .any(|e| matches!(e, GameEvent::BuildCity { .. }));
+                        // Prefer desert, then tiles with fewest DOM buildings.
+                        let mut dom_buildings = 0u64;
+                        for &nid in ctx.dom_settlements[Player::One]
+                            .iter()
+                            .chain(&ctx.dom_settlements[Player::Two])
+                        {
+                            dom_buildings |= 1u64 << nid.0;
+                        }
+                        candidates.sort_by_key(|&aid| {
                             let tile = TileId((aid - action::ROBBER_START as usize) as u8);
-                            state.topology.tiles[tile.0 as usize]
+                            let has_resource = state.topology.tiles[tile.0 as usize]
                                 .terrain
                                 .resource()
-                                .is_none()
+                                .is_some();
+                            let mask = state.topology.adj.tile_nodes[tile.0 as usize];
+                            let bldg_count = (mask & dom_buildings).count_ones();
+                            (has_resource, bldg_count)
                         });
-                        let best = desert.unwrap_or_else(|| {
-                            // Use DOM buildings (final board) to avoid placing
-                            // the robber on tiles that will have buildings later.
-                            let mut dom_buildings = 0u64;
-                            for &nid in ctx.dom_settlements[Player::One]
-                                .iter()
-                                .chain(&ctx.dom_settlements[Player::Two])
-                            {
-                                dom_buildings |= 1u64 << nid.0;
+                        if !has_upcoming_city {
+                            // No city before next roll — safe to pick the best.
+                            actions.push(candidates[0]);
+                            state.apply_action(candidates[0]);
+                        } else {
+                            // City follows: branch so backtracking can fix
+                            // the robber if the default blocks a critical tile.
+                            log_branch(i, "robber (pre-city)", candidates.len());
+                            for &aid in &candidates {
+                                let mut trial = state.clone();
+                                trial.apply_action(aid);
+                                let trial_tl = timeline.clone();
+                                let mut trial_actions = actions.clone();
+                                trial_actions.push(aid);
+                                if let Some(result) =
+                                    try_replay(trial, events, i + 1, ctx, trial_tl, trial_actions)
+                                {
+                                    return Some(result);
+                                }
                             }
-                            let result = candidates
-                                .iter()
-                                .copied()
-                                .min_by_key(|&aid| {
-                                    let tile = TileId((aid - action::ROBBER_START as usize) as u8);
-                                    let mask = state.topology.adj.tile_nodes[tile.0 as usize];
-                                    (mask & dom_buildings).count_ones()
-                                })
-                                .unwrap();
-                            {
-                                let tid = (result - action::ROBBER_START as usize) as u8;
-                                eprintln!("  robber default e{i}: T{tid}");
-                            }
-                            result
-                        });
-                        actions.push(best);
-                        state.apply_action(best);
+                            backtrack(i, "robber: all branches failed");
+                            return None;
+                        }
                     } else {
                         log_branch(i, "robber", candidates.len());
                         for &aid in &candidates {
