@@ -1251,11 +1251,27 @@ fn try_replay(
                             _ => {}
                         }
                     }
-                    let steal_outcome = events[i + 1..].iter().find_map(|e| match e {
-                        GameEvent::Stole { .. } => Some(true),
-                        GameEvent::StoleNothing { .. } => Some(false),
-                        _ => None,
-                    });
+                    // Find steal outcome for THIS robber move only. Stop at
+                    // the next Roll or MoveRobber to avoid picking up a steal
+                    // from a later, unrelated robber event.
+                    let steal_outcome = {
+                        let mut result = None;
+                        for e in &events[i + 1..] {
+                            match e {
+                                GameEvent::Stole { .. } => {
+                                    result = Some(true);
+                                    break;
+                                }
+                                GameEvent::StoleNothing { .. } => {
+                                    result = Some(false);
+                                    break;
+                                }
+                                GameEvent::Roll { .. } | GameEvent::MoveRobber { .. } => break,
+                                _ => {}
+                            }
+                        }
+                        result
+                    };
                     let opp_buildings = state.player_buildings(opp);
                     let opp_has_cards = state.players[opp].hand.total() > 0;
                     let friendly =
