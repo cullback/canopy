@@ -485,7 +485,7 @@ impl<G: Game + 'static> GameSession<G> {
                 match walk_tree_path(tree, tree.root(), &action_path) {
                     Some(node) => {
                         let mut snap = build_subtree_snapshot(tree, node, depth);
-                        self.label_subtree(&mut snap);
+                        self.label_subtree_at(&mut snap, &action_path);
                         vec![ServerMsg::Subtree { tree: snap }]
                     }
                     None => vec![ServerMsg::Error {
@@ -816,12 +816,7 @@ impl<G: Game + 'static> GameSession<G> {
         }
         let node = walk_tree_path(tree, tree.root(), path)?;
         let mut snap = build_subtree_snapshot(tree, node, *depth);
-        label_subtree_walk(
-            &mut snap,
-            self.search.state().clone(),
-            &*self.presenter,
-            false,
-        );
+        self.label_subtree_at(&mut snap, path);
         Some(ServerMsg::Subtree { tree: snap })
     }
 
@@ -895,9 +890,34 @@ impl<G: Game + 'static> GameSession<G> {
     }
 
     /// Label all nodes in a subtree by simulating actions from the root state.
-    fn label_subtree(&self, tree: &mut TreeNodeSnapshot) {
-        let state = self.search.state().clone();
-        label_subtree_walk(tree, state, &*self.presenter, false);
+    /// Label a subtree whose root is at `path` from the search root.
+    /// Advances the search state by the path so the label walker starts
+    /// with the correct state for the navigated node.
+    fn label_subtree_at(&self, tree: &mut TreeNodeSnapshot, path: &[usize]) {
+        let mut state = self.search.state().clone();
+        // parent_is_chance tracks whether the most recently applied action
+        // was a chance outcome — i.e., whether the navigated node's parent
+        // was a chance node. This determines how to label the navigated node.
+        let mut parent_is_chance = false;
+        for &action in path {
+            match state.status() {
+                Status::Terminal(_) => break,
+                Status::Chance => {
+                    state.apply_action(action);
+                    parent_is_chance = true;
+                }
+                Status::Decision(_) => {
+                    let mut legal = Vec::new();
+                    state.legal_actions(&mut legal);
+                    if !legal.contains(&action) {
+                        break;
+                    }
+                    state.apply_action(action);
+                    parent_is_chance = false;
+                }
+            }
+        }
+        label_subtree_walk(tree, state, &*self.presenter, parent_is_chance);
     }
 }
 
@@ -977,30 +997,40 @@ fn compute_pv_depth(tree: &Tree, node: NodeId) -> u32 {
 
 fn label_subtree_walk<G: Game + Clone>(
     node: &mut TreeNodeSnapshot,
-    state: G, // state from which node.action was taken
+    state: G,
     presenter: &dyn GamePresenter<G>,
     parent_is_chance: bool,
 ) {
-    // Label this node using the state before its action.
     if let Some(action) = node.action {
-        node.label = Some(if parent_is_chance {
-            presenter.chance_label(&state, action)
+        let label = if parent_is_chance {
+            let chance = presenter.chance_label(&state, action);
+            if chance.is_empty() {
+                // Stale state — can't resolve chance outcome to phase.
+                format!("Outcome {action}")
+            } else {
+                chance
+            }
         } else {
-            presenter.action_description(&state, action)
-        });
+            presenter.action_label(&state, action)
+        };
+        node.label = Some(label);
+    } else if node.label.is_none() {
+        node.label = Some(presenter.phase_label(&state));
     }
+
     let is_chance = node.kind == "chance";
-    // Advance state through this node's action for children.
-    // The tree may contain stale edges from subtree reuse whose actions
-    // are no longer legal. Check legality before applying.
+
+    // Advance state for children. If the action is stale (not legal
+    // in the walked state), continue with the un-advanced state —
+    // action labels are state-independent so they still decode
+    // correctly. Chance labels may be approximate.
     let next = if let Some(action) = node.action {
         let mut s = state;
         let mut legal = Vec::new();
         s.legal_actions(&mut legal);
-        if !legal.contains(&action) {
-            return; // stale edge — stop labeling this branch
+        if legal.contains(&action) {
+            s.apply_action(action);
         }
-        s.apply_action(action);
         s
     } else {
         state
