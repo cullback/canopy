@@ -5,6 +5,8 @@ PUCT MCTS, neural self-play, a training loop, a tournament runner, and
 a web analysis board. Targets single-machine training (no distributed
 or networked setup).
 
+![Canopy web analysis board on a 1v1 Catan position](catan.png)
+
 ## Supported games
 
 - **One or two players.** Two-player games are zero-sum; single-player
