@@ -150,11 +150,12 @@ Open an issue to discuss larger changes before writing code.
 
 ## Further reading
 
-- [`notes/architecture.md`](notes/architecture.md) — internal design
-  of the search module (v_mix, virtual loss, compaction, chance
-  handling).
-- [`notes/methods.md`](notes/methods.md) — inventory of the methods
-  used and their impact on training.
+- [`METHODS.md`](METHODS.md) — search architecture, design decisions,
+  and future ideas in one document.
+- [`notes/training-config.md`](notes/training-config.md) —
+  parameter-by-parameter guide for tuning a training run.
+- [`examples/catan/OPTIMIZATIONS.md`](examples/catan/OPTIMIZATIONS.md)
+  — Catan-specific tree and action-space optimizations.
 
 ## References
 

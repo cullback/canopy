@@ -68,32 +68,35 @@ where network top-1 matches MCTS selected action).
   algorithmically, too much compute per sample; reduce sims and compensate with
   more games (see [interactions](#how-sims-samples-and-buffer-interact))
 
-## `gumbel_m`
+## Root exploration: `c_puct`, `dirichlet_alpha`, `dirichlet_epsilon`
 
-Top-k actions considered at root via Gumbel sampling. Sequential Halving
-allocates sims across these candidates: `n / (ceil(log2(m)) × m)` visits per
-candidate in the first round. Doubling `m` roughly halves per-action depth.
-Clamped to the legal action count, so overshooting is safe but wastes sim
-budget.
+Root selection is PUCT with Dirichlet noise mixed into priors
+(`(1 − ε) · P_net + ε · Dir(α)`). Three knobs:
 
-**Initialize:** set to roughly the number of plausible actions in a typical
-position.
+- **`c_puct`** (default 2.5) — PUCT exploration constant. Larger
+  values push search to explore lower-prior actions; smaller values
+  let the network prior dominate.
+- **`dirichlet_alpha`** — noise concentration. Rule of thumb:
+  `α ≈ 10 / num_legal_actions_at_root`. Higher α → more uniform
+  noise (less peaked).
+- **`dirichlet_epsilon`** (default 0.25) — noise mixing fraction at
+  the root. Only applied at the root; interior nodes use raw network
+  priors.
 
-| Position type              | m     |
-| -------------------------- | ----- |
-| 5-10 good actions typical  | 16    |
-| High-branching (Go, Chess) | 32-64 |
-
-Verify: `mcts_sims / (ceil(log2(m)) × m)` should be ≥ 2. If not, either
-increase sims or decrease m.
+**Initialize:** keep `c_puct = 2.5`, `dirichlet_epsilon = 0.25`. Set
+`dirichlet_alpha` from average legal action count at the root — 0.3
+for ~30 actions, 0.05 for ~200 actions (Catan), etc.
 
 **Diagnose:**
 
-- Policy improvement stalls, search never finds the right action → m too low,
-  strong actions excluded from candidates
-- MCTS policy target looks like the prior (no improvement from search) → m too
-  high relative to sims, each candidate gets too few visits for Sequential
-  Halving to distinguish them
+- Self-play drawn into a narrow strategy, little variety across
+  games → `dirichlet_epsilon` too low or α too small (noise too
+  peaked). Try raising ε or α.
+- Search ignores the policy prior, takes many sims to focus on good
+  actions → `c_puct` too high. Lower it.
+- Policy head never improves beyond the raw net → `c_puct` too low
+  and/or ε too low, search can't escape the prior to discover
+  better actions.
 
 ## `train_samples_per_iter`
 
@@ -221,9 +224,10 @@ fast=64: 248 avg sims vs 800 = 3.2× speedup. Policy samples per game ≈
 Sims for fast-search actions. Fast-search actions form the game trajectory that
 determines Z (game outcome). Bad fast search produces noisy Z targets.
 
-**Initialize:** at least `2 × gumbel_m` (Sequential Halving floor). Below that,
-fast-search picks near-random actions. Keep
-below `full_sims / 4` for meaningful compute savings. Default: 64.
+**Initialize:** at least 32 so PUCT has enough visits to focus on
+the top few children. Below that, fast-search picks near-random
+actions. Keep below `full_sims / 4` for meaningful compute savings.
+Default: 64.
 
 **Diagnose:**
 
@@ -468,10 +472,9 @@ horizon in metrics.csv.
 
 1. Estimate avg game length (actions) with random play
 2. `max_actions` = 2–3× that estimate
-3. `gumbel_m` = 16, `mcts_sims` = 200
-   - Verify: `mcts_sims / (ceil(log2(m)) × m) ≥ 2`. With m=16, sims=200:
-     `200 / (4 × 16) = 3.1` ✓. If you drop sims below 128 with m=16, this
-     fails — reduce m or increase sims.
+3. `mcts_sims` = 200, `c_puct` = 2.5, `dirichlet_epsilon` = 0.25,
+   `dirichlet_alpha` ≈ `10 / num_legal_actions_at_root` (e.g. 0.3
+   for a 30-action game, 0.05 for Catan).
 4. `train_samples_per_iter` = `max(256, 2 × action_space_size) × avg_game_length`
    - Stochastic games: bias toward the higher end (more games)
 5. `replay_buffer_samples` = 5× `train_samples_per_iter` (7–10× for stochastic)

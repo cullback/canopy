@@ -152,7 +152,7 @@ pub struct GameState {
     pub last_setup_node: Option<NodeId>,
 
     // ── Canonical action ordering (transposition elimination) ─────────
-    // See experiments/commutativity.md for design rationale.
+    // See examples/catan/OPTIMIZATIONS.md for design rationale.
     //
     // Steps: 1=dev play, 2=trade, 3=buy dev, 4=pre-existing city,
     //        5=road, 6=non-port settle, 7=same-turn city (always),
