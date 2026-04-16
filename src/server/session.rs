@@ -991,16 +991,16 @@ fn label_subtree_walk<G: Game + Clone>(
     }
     let is_chance = node.kind == "chance";
     // Advance state through this node's action for children.
-    // The tree may contain edges from determinized simulations whose
-    // actions are invalid in the actual root state. Catch panics so
-    // stale subtrees degrade gracefully (unlabeled) instead of crashing.
+    // The tree may contain stale edges from subtree reuse whose actions
+    // are no longer legal. Check legality before applying.
     let next = if let Some(action) = node.action {
         let mut s = state;
-        if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| s.apply_action(action)))
-            .is_err()
-        {
-            return; // stop labeling this branch
+        let mut legal = Vec::new();
+        s.legal_actions(&mut legal);
+        if !legal.contains(&action) {
+            return; // stale edge — stop labeling this branch
         }
+        s.apply_action(action);
         s
     } else {
         state
