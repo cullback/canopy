@@ -131,7 +131,8 @@ class MCTSPanel {
     const actionLabel = dataNode.label || (dataNode.action != null ? `Action ${dataNode.action}` : 'Root');
     const q = (dataNode.wdl[0] - dataNode.wdl[2]).toFixed(3);
     const branch = header.dataset.branch || '';
-    header.textContent = `${branch}${playerPrefix}${actionLabel} [${dataNode.kind}] V:${dataNode.visits} Q:${q}`;
+    const prefix = header.dataset.prefix || '';
+    header.textContent = `${prefix}${branch}${playerPrefix}${actionLabel} [${dataNode.kind}] V:${dataNode.visits} Q:${q}`;
 
     // Update children if present — match by action, not position
     const childrenDiv = domNode.querySelector(':scope > .tree-children');
@@ -165,13 +166,12 @@ class MCTSPanel {
     this.treeViewEl.innerHTML = '';
   }
 
-  _renderNode(node, depth, isLast = true, path = []) {
+  _renderNode(node, depth, isLast = true, path = [], prefix = '') {
     const div = document.createElement('div');
     const pathKey = path.join(',');
 
     const header = document.createElement('div');
     header.className = 'cursor-pointer py-0.5 whitespace-nowrap hover:text-accent';
-    header.style.paddingLeft = `${depth * 10}px`;
     header.dataset.nodeAction = node.action != null ? String(node.action) : 'root';
 
     const playerPrefix = node.player != null ? `P${node.player + 1}: ` : '';
@@ -182,7 +182,8 @@ class MCTSPanel {
 
     const branch = depth === 0 ? '' : (isLast ? '└ ' : '├ ');
     header.dataset.branch = branch;
-    header.textContent = `${branch}${playerPrefix}${actionLabel} [${kind}] V:${visits} Q:${q}`;
+    header.dataset.prefix = prefix;
+    header.textContent = `${prefix}${branch}${playerPrefix}${actionLabel} [${kind}] V:${visits} Q:${q}`;
     div.appendChild(header);
 
     if (node.children && node.children.length > 0) {
@@ -204,7 +205,8 @@ class MCTSPanel {
       const sorted = [...node.children].sort((a, b) => b.visits - a.visits);
       for (let i = 0; i < sorted.length; i++) {
         const childPath = [...path, sorted[i].action];
-        childrenDiv.appendChild(this._renderNode(sorted[i], depth + 1, i === sorted.length - 1, childPath));
+        const childPrefix = prefix + (depth === 0 ? '' : (isLast ? '  ' : '│ '));
+        childrenDiv.appendChild(this._renderNode(sorted[i], depth + 1, i === sorted.length - 1, childPath, childPrefix));
       }
       div.appendChild(childrenDiv);
     }
