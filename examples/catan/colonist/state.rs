@@ -1890,9 +1890,6 @@ fn peek_all_roll_gains(
     results
 }
 
-/// Collect (roll, gains) pairs for robber pre-filtering. Stops at events that
-/// change the board (builds, robber moves, knight plays) since those invalidate
-/// the static distribution check.
 fn pre_filter_rolls(
     events: &[GameEvent],
     color_map: &[(u8, Player)],
@@ -1965,14 +1962,13 @@ fn validate_distribution(state: &GameState, roll: u8, expected: &[ResourceArray;
         }
     }
 
-    // Only distribute if bank can cover total demand (same rule as engine).
-    for &r in &ALL_RESOURCES {
-        let ri = r as usize;
-        if total_demand[ri] == 0 || state.bank[r] < total_demand[ri] {
-            player_gains[0][ri] = 0;
-            player_gains[1][ri] = 0;
-        }
-    }
+    // NOTE: we intentionally skip the bank-can-cover-demand check here.
+    // This function is used as a heuristic pre-filter (robber, city, settle
+    // forward-checks). The bank at the pre-filter point may differ from the
+    // bank at the actual roll (due to BankTrades between them). Checking
+    // the bank causes false negatives. The authoritative distribution check
+    // at the Roll event handler uses the real bank state.
+    let _ = total_demand;
 
     let actual: [ResourceArray; 2] = [
         ResourceArray(player_gains[0]),
