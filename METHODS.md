@@ -446,10 +446,7 @@ search. Lazy chance expansion is the more promising direction.
 
 ## Related reading
 
-- [Training configuration guide](notes/training-config.md) —
+- [Training configuration guide](src/train/README.md) —
   parameter-by-parameter reference for tuning a training run.
-- [1v1 Catan strategy notes](notes/strategy-doc.md) — human-strategy
-  guide distilled from colonist.io material, useful context for
-  model/encoder design decisions.
 - [examples/catan/OPTIMIZATIONS.md](examples/catan/OPTIMIZATIONS.md)
   — Catan-specific action-space and state-space optimizations.
